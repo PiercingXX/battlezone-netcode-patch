@@ -13,6 +13,7 @@ Target profile:
 - `net_fix_manifest.send512k.recv2m.json`
 - `runtime_patch_linux.sh`
 - `runtime_patch_linux.py`
+- `auto_patch_linux_watch.sh`
 - `runtime_patch_windows.ps1`
 - `verify_net_patch.sh`
 - `verify_net_patch.ps1`
@@ -49,6 +50,21 @@ Or manual flow:
 cd "/path/to/Battlezone 98 Redux"
 VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
 ```
+
+## Linux Auto Patch (Per Launch)
+
+If you do not want to manually run the patch every launch, run the watcher once and keep it open.
+It will detect each new `Battlezone98Redux.exe` process and patch it automatically.
+
+```bash
+bash ./auto_patch_linux_watch.sh "/path/to/Battlezone 98 Redux"
+```
+
+Notes:
+
+- Keep this watcher terminal running while you play.
+- Stop with `Ctrl+C`.
+- If ptrace is blocked, apply the troubleshooting `ptrace_scope` command below first.
 
 ## Windows Test
 
