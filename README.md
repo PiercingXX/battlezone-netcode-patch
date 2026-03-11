@@ -26,6 +26,10 @@ Target profile:
 - `verify_net_patch.ps1`
 - `launch_and_patch_linux.sh` (optional one-shot launcher + patcher)
 
+
+
+
+
 ## Linux Quick Start 🚀
 
 First-time user flow:
@@ -51,6 +55,33 @@ Guided Linux flow (interactive prompts):
 bash ./run_test_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
+
+
+
+
+## Windows Quick Start 🪟
+
+Required order:
+
+1. Start Steam as Administrator.
+2. Launch game and wait at in-game main menu.
+3. Open PowerShell as Administrator.
+4. Run:
+
+```powershell
+.\runtime_patch_windows.ps1
+```
+
+Guided flow:
+
+```powershell
+.\run_test_windows.ps1 -GameRoot "C:\Path\To\Battlezone 98 Redux"
+```
+
+
+
+
+
 ## Verify ✅
 
 After entering multiplayer once, verify latest log session:
@@ -74,6 +105,10 @@ Expected line:
 
 `BZRNet P2P Socket Opened With 2097152 received buffer, 524288 send buffer`
 
+
+
+
+
 ## Troubleshooting 🧯
 
 Linux ptrace blocked:
@@ -94,6 +129,18 @@ Windows optional PID targeting:
 .\runtime_patch_windows.ps1 -TargetPid 12345
 ```
 
+
+
+
+## Notes 📝
+
+- Runtime patching must be applied each game launch (memory resets on exit)
+- This repo is now runtime-first and build-tolerant by design
+
+
+
+
+
 ## Optional: Linux One-Command Launcher
 
 Use this if you want one command for a terminal keybind:
@@ -112,27 +159,3 @@ Optional env vars:
 
 - `BATTLEZONE_APP_ID` (default `301650`)
 - `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
-
-## Windows Quick Start 🪟
-
-Required order:
-
-1. Start Steam as Administrator.
-2. Launch game and wait at in-game main menu.
-3. Open PowerShell as Administrator.
-4. Run:
-
-```powershell
-.\runtime_patch_windows.ps1
-```
-
-Guided flow:
-
-```powershell
-.\run_test_windows.ps1 -GameRoot "C:\Path\To\Battlezone 98 Redux"
-```
-
-## Notes 📝
-
-- Runtime patching must be applied each game launch (memory resets on exit)
-- This repo is now runtime-first and build-tolerant by design
