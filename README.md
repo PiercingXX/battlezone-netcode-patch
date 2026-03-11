@@ -22,101 +22,69 @@ If tools are missing on Debian or Ubuntu:
 sudo apt install mingw-w64 make
 ```
 
-### Natively Installed Steam
+### Step 1: Find Your Game Path
 
-1. Build and deploy the patch:
+**This is the most important step.** The path varies depending on your Steam installation type, and guessing will fail.
+
+1. Open Steam
+2. Right-click "Battlezone 98 Redux"
+3. Select `Manage` → `Browse local files`
+4. A file manager window will open showing your game folder
+5. Copy the full folder path from the address bar or `pwd` in terminal
+
+**Common paths by Steam type:**
+
+- **Native Steam**: `/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux`
+- **Snap Steam**: Varies; use "Browse local files" to find it
+- **Flatpak Steam**: Varies; use "Browse local files" to find it
+
+### Step 2: Verify the Path
+
+Before deploying, verify your path is correct by checking for the game executable:
 
 ```bash
-./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+ls -la "/full/path/to/Battlezone 98 Redux/battlezone98redux.exe"
 ```
 
-2. In Steam launch options for Battlezone, set:
+If this shows the file exists, your path is correct. If "No such file or directory", go back to Step 1 and get the correct path.
+
+### Step 3: Deploy the Patch
+
+```bash
+./Linux/deploy_linux.sh "/full/path/to/Battlezone 98 Redux"
+```
+
+Replace `/full/path/to/Battlezone 98 Redux` with the path you found in Step 1.
+
+### Step 4: Set Steam Launch Options
+
+1. Open Steam
+2. Right-click Battlezone 98 Redux
+3. Select `Properties`
+4. In "General" tab, find "Launch Options"
+5. Paste this:
 
 ```text
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-3. Launch the game.
-4. Enter multiplayer once.
-5. Exit the game.
+### Step 5: Test
 
-6. Verify:
+1. Launch the game
+2. Enter multiplayer once
+3. Exit the game
+
+### Step 6: Verify Success
 
 ```bash
-cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+cd "/full/path/to/Battlezone 98 Redux"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
 Or use the guided flow:
 
 ```bash
-./Linux/run_test_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-### Snap Steam
-
-If you installed Steam via Snap, the path structure is different.
-
-1. Find your Battlezone install path:
-   - Open Steam (Snap version)
-   - Right-click Battlezone 98 Redux
-   - Select `Manage` -> `Browse local files`
-   - Copy that folder path
-
-   Typical Snap path: `~/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux`
-
-2. Build and deploy:
-
-```bash
-./Linux/deploy_linux.sh "/path/to/Battlezone 98 Redux"
-```
-
-3. Set the same launch option in Steam:
-
-```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
-4. Launch game → multiplayer → exit.
-
-5. Verify:
-
-```bash
-cd "/path/to/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
-```
-
-### Flatpak Steam
-
-If you installed Steam via Flatpak:
-
-1. Find your Battlezone install path:
-   - Open Steam (Flatpak version)
-   - Right-click Battlezone 98 Redux
-   - Select `Manage` -> `Browse local files`
-   - Copy that folder path
-
-   Typical Flatpak path: `~/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux`
-
-2. Build and deploy:
-
-```bash
-./Linux/deploy_linux.sh "/path/to/Battlezone 98 Redux"
-```
-
-3. Set the same launch option in Steam:
-
-```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
-4. Launch game → multiplayer → exit.
-
-5. Verify:
-
-```bash
-cd "/path/to/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
+./Linux/run_test_linux.sh "/full/path/to/Battlezone 98 Redux"
 ```
 
 ### Linux Success / Failure
