@@ -48,12 +48,12 @@ Use this if you installed Steam natively, IF you installed via Snap or Flatpak, 
 
 Open a terminal and run the command for your distro:
 
-**Debian / Ubuntu / Mint:**
+**Debian:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch / Manjaro / EndeavourOS:**
+**Arch:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
@@ -105,12 +105,12 @@ Use this if you installed Steam via Snap (`snap install steam`).
 
 Open a terminal and run the command for your distro:
 
-**Debian / Ubuntu / Mint:**
+**Debian:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch / Manjaro / EndeavourOS:**
+**Arch:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
@@ -167,12 +167,12 @@ Use this if you installed Steam via Flatpak (`flatpak install steam`).
 
 Open a terminal and run the command for your distro:
 
-**Debian / Ubuntu / Mint:**
+**Debian:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch / Manjaro / EndeavourOS:**
+**Arch:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
