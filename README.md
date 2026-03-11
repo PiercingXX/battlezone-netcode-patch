@@ -41,14 +41,17 @@ sudo apt install mingw-w64 make
    - Launch the game from Steam
    - Go to multiplayer
    - Exit the game
-   - Open a terminal in the game folder and run:
+   - Open a terminal in the game folder:
+   
+   ```bash
+   cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+   ```
 
-```bash
-cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
-```
+   - Then verify. Replace `/home/username/Downloads/battlezone-netcode-patch` with where you cloned this repo:
 
-Replace `/path/to/Battlezone Netcode Patch` with where you cloned this repo.
+   ```bash
+   VERIFY_PROXY_READBACK=1 "/home/username/Downloads/battlezone-netcode-patch/Linux/verify_net_patch.sh"
+   ```
 
 **Success = `VERIFY RESULT: PASS`**
 
@@ -100,14 +103,17 @@ Example (if your path is in snap):
    - Launch the game from Steam
    - Go to multiplayer
    - Exit the game
-   - Open a terminal and run:
+   - Open a terminal in the game folder:
+   
+   ```bash
+   cd "/your/copied/path"
+   ```
 
-```bash
-cd "/your/copied/path"
-VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
-```
+   - Then verify. Replace `/home/username/Downloads/battlezone-netcode-patch` with where you cloned this repo:
 
-Replace both `/your/copied/path` and `/path/to/Battlezone Netcode Patch` with your actual paths.
+   ```bash
+   VERIFY_PROXY_READBACK=1 "/home/username/Downloads/battlezone-netcode-patch/Linux/verify_net_patch.sh"
+   ```
 
 **Success = `VERIFY RESULT: PASS`**
 
@@ -159,14 +165,17 @@ Example (if your path is in flatpak):
    - Launch the game from Steam
    - Go to multiplayer
    - Exit the game
-   - Open a terminal and run:
+   - Open a terminal in the game folder:
+   
+   ```bash
+   cd "/your/copied/path"
+   ```
 
-```bash
-cd "/your/copied/path"
-VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
-```
+   - Then verify. Replace `/home/username/Downloads/battlezone-netcode-patch` with where you cloned this repo:
 
-Replace both `/your/copied/path` and `/path/to/Battlezone Netcode Patch` with your actual paths.
+   ```bash
+   VERIFY_PROXY_READBACK=1 "/home/username/Downloads/battlezone-netcode-patch/Linux/verify_net_patch.sh"
+   ```
 
 **Success = `VERIFY RESULT: PASS`**
 
