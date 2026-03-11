@@ -85,6 +85,8 @@ Permissions requirement on Windows:
 - Run Steam as Administrator before launching the game.
 - Run PowerShell as Administrator before running the runtime patch script.
 - Keep elevation level consistent (both elevated) to avoid access denied when opening process memory.
+- Address detection is runtime/build-tolerant: script resolves patch locations from process memory, not fixed EXE offsets.
+- If detection is ambiguous, patching aborts safely instead of guessing.
 
 Do not patch the EXE on disk first for the normal workflow. On-disk patching is fallback-only.
 
