@@ -7,8 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExePath = Join-Path $GameRoot "battlezone98redux.exe"
-$ManifestPath = Join-Path $ScriptDir "net_fix_manifest.send512k.recv2m.json"
-$PatcherPath = Join-Path $ScriptDir "apply_binary_patch.py"
+$RuntimePatcherPath = Join-Path $ScriptDir "runtime_patch_windows.ps1"
 $VerifyPath = Join-Path $ScriptDir "verify_net_patch.ps1"
 
 if (-not (Test-Path -LiteralPath $ExePath)) {
@@ -16,42 +15,37 @@ if (-not (Test-Path -LiteralPath $ExePath)) {
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $ManifestPath)) {
-    Write-Host "Missing manifest: $ManifestPath"
+if (-not (Test-Path -LiteralPath $RuntimePatcherPath)) {
+    Write-Host "Missing runtime patcher: $RuntimePatcherPath"
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $PatcherPath)) {
-    Write-Host "Missing patcher: $PatcherPath"
+if (-not (Test-Path -LiteralPath $VerifyPath)) {
+    Write-Host "Missing verifier: $VerifyPath"
     exit 1
 }
 
-Write-Host "Windows on-disk patch test"
+Write-Host "Windows runtime patch test"
 Write-Host "Game root: $GameRoot"
 
-$pythonCmd = $null
-if (Get-Command py -ErrorAction SilentlyContinue) {
-    $pythonCmd = "py"
-} elseif (Get-Command python -ErrorAction SilentlyContinue) {
-    $pythonCmd = "python"
-} else {
-    Write-Host "Missing Python launcher (py/python). Install Python 3 first."
-    exit 1
-}
+Write-Host "Launch the game now and wait at in-game main menu."
+Read-Host "Press Enter when game is at main menu"
 
-& $pythonCmd $PatcherPath $ExePath $ManifestPath
+& $RuntimePatcherPath
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "Launch the game now, then host or join one multiplayer session."
+Write-Host "Now host or join one multiplayer session."
 Read-Host "Press Enter after entering MP once"
 
 Push-Location $GameRoot
 try {
+    $env:VERIFY_RUNTIME_ONLY = "1"
     & $VerifyPath
     exit $LASTEXITCODE
 }
 finally {
+    Remove-Item Env:VERIFY_RUNTIME_ONLY -ErrorAction SilentlyContinue
     Pop-Location
 }

@@ -13,6 +13,7 @@ Target profile:
 - `net_fix_manifest.send512k.recv2m.json`
 - `runtime_patch_linux.sh`
 - `runtime_patch_linux.py`
+- `runtime_patch_windows.ps1`
 - `verify_net_patch.sh`
 - `verify_net_patch.ps1`
 - `run_test_linux.sh`
@@ -51,6 +52,8 @@ VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
 
 ## Windows Test
 
+Use runtime patching on Windows too (launch first, patch process memory, then test).
+
 Run from PowerShell in the patch folder:
 
 ```powershell
@@ -59,17 +62,19 @@ Run from PowerShell in the patch folder:
 
 Manual flow:
 
-1. Apply patch:
+1. Launch game and wait at in-game main menu.
+2. Apply runtime patch:
 
 ```powershell
-py .\apply_binary_patch.py "C:\Path\To\Battlezone 98 Redux\battlezone98redux.exe" .\net_fix_manifest.send512k.recv2m.json
+.\runtime_patch_windows.ps1
 ```
 
-2. Launch game, host/join MP once.
-3. Verify in game folder:
+3. Host/join MP once.
+4. Verify in game folder:
 
 ```powershell
 cd "C:\Path\To\Battlezone 98 Redux"
+$env:VERIFY_RUNTIME_ONLY="1"
 \path\to\Battlezone Netcode Patch\verify_net_patch.ps1
 ```
 
