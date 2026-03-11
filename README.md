@@ -27,7 +27,7 @@ Target profile:
 - `launch_and_patch_linux.sh` (optional one-shot launcher + patcher)
 
 
-
+---
 
 
 ## Linux Quick Start 🚀
@@ -56,7 +56,7 @@ bash ./run_test_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
 
-
+---
 
 
 ## Windows Quick Start 🪟
@@ -79,6 +79,7 @@ Guided flow:
 ```
 
 
+---
 
 
 
@@ -106,7 +107,7 @@ Expected line:
 `BZRNet P2P Socket Opened With 2097152 received buffer, 524288 send buffer`
 
 
-
+---
 
 
 ## Troubleshooting 🧯
@@ -129,7 +130,7 @@ Windows optional PID targeting:
 .\runtime_patch_windows.ps1 -TargetPid 12345
 ```
 
-
+---
 
 
 ## Notes 📝
@@ -138,7 +139,7 @@ Windows optional PID targeting:
 - This repo is now runtime-first and build-tolerant by design
 
 
-
+---
 
 
 ## Optional: Linux One-Command Launcher
