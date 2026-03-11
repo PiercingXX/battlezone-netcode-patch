@@ -4,6 +4,7 @@ $LogFile = "BZLogger.txt"
 $ExeFile = "battlezone98redux.exe"
 $ExpectedRecv = "2097152"
 $ExpectedSend = "524288"
+$RuntimeOnly = ($env:VERIFY_RUNTIME_ONLY -eq "1")
 
 if (-not (Test-Path -LiteralPath $LogFile)) {
     Write-Host "Missing $LogFile"
@@ -51,16 +52,21 @@ if ($bufMatches) {
     }
 }
 
-$exeBytes = [System.IO.File]::ReadAllBytes($ExeFile)
-$sendBytes = $exeBytes[0x52d96a..0x52d96d]
-$recvBytes = $exeBytes[0x52db5e..0x52db61]
-$sendHex = (($sendBytes | ForEach-Object { $_.ToString("x2") }) -join "")
-$recvHex = (($recvBytes | ForEach-Object { $_.ToString("x2") }) -join "")
-$exeOk = ($sendHex -eq "00000800" -and $recvHex -eq "00002000")
+if ($RuntimeOnly) {
+    Write-Host "Executable patch bytes: (runtime mode, skipped)"
+    $exeOk = $true
+} else {
+    $exeBytes = [System.IO.File]::ReadAllBytes($ExeFile)
+    $sendBytes = $exeBytes[0x52d96a..0x52d96d]
+    $recvBytes = $exeBytes[0x52db5e..0x52db61]
+    $sendHex = (($sendBytes | ForEach-Object { $_.ToString("x2") }) -join "")
+    $recvHex = (($recvBytes | ForEach-Object { $_.ToString("x2") }) -join "")
+    $exeOk = ($sendHex -eq "00000800" -and $recvHex -eq "00002000")
 
-Write-Host "Executable patch bytes:"
-Write-Host "- send @0x52d96a: $sendHex (expected 00000800)"
-Write-Host "- recv @0x52db5e: $recvHex (expected 00002000)"
+    Write-Host "Executable patch bytes:"
+    Write-Host "- send @0x52d96a: $sendHex (expected 00000800)"
+    Write-Host "- recv @0x52db5e: $recvHex (expected 00002000)"
+}
 
 if ($bufOk) {
     Write-Host "VERIFY RESULT: PASS"
@@ -69,7 +75,9 @@ if ($bufOk) {
 
 Write-Host "VERIFY RESULT: FAIL"
 Write-Host "- socket buffer line mismatch"
-if ($exeOk) {
+if ($RuntimeOnly) {
+    Write-Host "- runtime patch was likely applied after socket init; run runtime patch at main menu, then enter MP"
+} elseif ($exeOk) {
     Write-Host "- executable is patched; launch the game once after patching to generate a fresh log session"
 } else {
     Write-Host "- executable patch bytes not detected"
