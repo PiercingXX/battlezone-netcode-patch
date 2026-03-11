@@ -47,7 +47,7 @@ while true; do
       fi
 
       echo "Detected PID $pid. Attempting runtime patch..."
-      if python3 "$SCRIPT_DIR/runtime_patch_linux.py"; then
+      if python3 "$SCRIPT_DIR/runtime_patch_linux.py" --pid "$pid"; then
         patched[$pid]=1
         echo "PID $pid patched successfully."
       else
