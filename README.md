@@ -48,10 +48,16 @@ Before deploying, verify your path is correct by checking for the game executabl
 ls -la "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
 ```
 
-**For Snap or Flatpak**, replace with the path you found in Step 1:
+**For Snap Steam** (example):
 
 ```bash
-ls -la "/your/path/from/step1/battlezone98redux.exe"
+ls -la "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
+```
+
+**For Flatpak Steam** (example):
+
+```bash
+ls -la "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
 ```
 
 If the file is found, your path is correct. If "No such file or directory", go back to Step 1 and get the correct path.
@@ -64,10 +70,16 @@ If the file is found, your path is correct. If "No such file or directory", go b
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-**For Snap or Flatpak**, use the path you found in Step 1:
+**For Snap Steam** (example):
 
 ```bash
-./Linux/deploy_linux.sh "/your/path/from/step1"
+./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+**For Flatpak Steam** (example):
+
+```bash
+./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 ### Step 4: Set Steam Launch Options
@@ -97,17 +109,24 @@ cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-**For Snap or Flatpak**, use your path from Step 1:
+**For Snap Steam** (example):
 
 ```bash
-cd "/your/path/from/step1"
+cd "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-Or use the guided flow (works for all Steam types):
+**For Flatpak Steam** (example):
 
 ```bash
-./Linux/run_test_linux.sh "/your/game/path"
+cd "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
+```
+
+Or use the guided flow (works for all Steam types, substitute your actual game path):
+
+```bash
+./Linux/run_test_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 ### Linux Success / Failure
