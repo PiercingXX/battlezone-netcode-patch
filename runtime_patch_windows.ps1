@@ -1,7 +1,7 @@
 param(
     [int]$TimeoutSeconds = 120,
     [string]$ExeName = "battlezone98redux.exe",
-    [int]$Pid = 0
+    [int]$TargetPid = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -287,12 +287,12 @@ function Write-Memory4 {
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 Write-Host "Waiting for running process: $ExeName"
 $target = $null
-if ($Pid -gt 0) {
+if ($TargetPid -gt 0) {
     try {
-        $target = Get-Process -Id $Pid -ErrorAction Stop
+        $target = Get-Process -Id $TargetPid -ErrorAction Stop
     }
     catch {
-        Write-Host "Provided PID not found: $Pid"
+        Write-Host "Provided PID not found: $TargetPid"
         exit 2
     }
 } else {
