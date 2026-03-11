@@ -52,7 +52,23 @@ VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
 
 ## Windows Test
 
-Use runtime patching on Windows too (launch first, patch process memory, then test).
+Use runtime patching on Windows too.
+
+Important order on Windows:
+
+1. Launch game first.
+2. Wait at in-game main menu.
+3. Run runtime patch script (patches running process memory).
+4. Enter multiplayer once.
+5. Verify logs.
+
+Permissions requirement on Windows:
+
+- Run Steam as Administrator before launching the game.
+- Run PowerShell as Administrator before running the runtime patch script.
+- Keep elevation level consistent (both elevated) to avoid access denied when opening process memory.
+
+Do not patch the EXE on disk first for the normal workflow. On-disk patching is fallback-only.
 
 Run from PowerShell in the patch folder:
 
@@ -62,15 +78,17 @@ Run from PowerShell in the patch folder:
 
 Manual flow:
 
+0. Start Steam as Administrator.
 1. Launch game and wait at in-game main menu.
-2. Apply runtime patch:
+2. Open PowerShell as Administrator.
+3. Apply runtime patch to the running game process:
 
 ```powershell
 .\runtime_patch_windows.ps1
 ```
 
-3. Host/join MP once.
-4. Verify in game folder:
+4. Host/join MP once.
+5. Verify in game folder:
 
 ```powershell
 cd "C:\Path\To\Battlezone 98 Redux"
@@ -109,4 +127,5 @@ pkill -f runtime_patch_linux.sh || true
 ```
 
 - Windows Python launcher not found: use `python` instead of `py`.
+- Windows access denied: run both Steam/game and PowerShell as Administrator.
 - SHA mismatch: executable build differs from expected hash.
