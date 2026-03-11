@@ -1,0 +1,28 @@
+{
+  "name": "battlezone98redux-net-fix-send512k-recv2m",
+  "target": "battlezone98redux.exe",
+  "expected_sha256": "d298782fc9a13edb0665db934110440c45461031db5f7fe1a76c8784b61cc90d",
+  "profile": {
+    "send_buffer_bytes": 524288,
+    "receive_buffer_bytes": 2097152
+  },
+  "notes": [
+    "This manifest is pre-configured for send=512KB and receive=2MB.",
+    "Offsets were validated from disassembly in the socket initialization path.",
+    "Each patch entry includes original bytes to guarantee safe application."
+  ],
+  "patches": [
+    {
+      "name": "send_buffer_32k_to_512k",
+      "offset": "0x52d96a",
+      "original_hex": "00800000",
+      "patched_hex": "00000800"
+    },
+    {
+      "name": "recv_buffer_1m_to_2m",
+      "offset": "0x52db5e",
+      "original_hex": "00001000",
+      "patched_hex": "00002000"
+    }
+  ]
+}
