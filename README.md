@@ -13,6 +13,7 @@ Target profile:
 - `net_fix_manifest.send512k.recv2m.json`
 - `runtime_patch_linux.sh`
 - `runtime_patch_linux.py`
+- `launch_and_patch_linux.sh`
 - `auto_patch_linux_watch.sh`
 - `runtime_patch_windows.ps1`
 - `verify_net_patch.sh`
@@ -50,6 +51,25 @@ Or manual flow:
 cd "/path/to/Battlezone 98 Redux"
 VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
 ```
+
+## Linux One-Shot Launch + Patch
+
+If you want a single command (good for terminal keybinds), use:
+
+```bash
+bash ./launch_and_patch_linux.sh "/path/to/Battlezone 98 Redux"
+```
+
+What it does:
+
+- Launches game via Steam (`steam -applaunch 301650` by default).
+- Waits for the running process.
+- Applies runtime patch automatically.
+
+Optional env vars:
+
+- `BATTLEZONE_APP_ID` (default `301650`)
+- `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
 
 ## Linux Auto Patch (Per Launch)
 
