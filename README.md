@@ -7,172 +7,203 @@ Target values:
 - Send buffer: 524288
 - Receive buffer: 2097152
 
-## Linux (Proton)
+## Linux - Native Steam
 
-### What You Need
+Follow these steps if you installed Steam normally (not Snap or Flatpak).
 
-- Linux with Steam and Proton working
-- Battlezone 98 Redux installed
-- `make`
-- `i686-w64-mingw32-g++`
+### Prerequisites
 
-If tools are missing on Debian or Ubuntu:
+Install tools (one time only):
 
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-### Step 1: Find Your Game Path
+### Steps
 
-**This is the most important step.** The path varies depending on your Steam installation type, and guessing will fail.
+1. **Open a terminal** in the repo folder
 
-1. Open Steam
-2. Right-click "Battlezone 98 Redux"
-3. Select `Manage` → `Browse local files`
-4. A file manager window will open showing your game folder
-5. Copy the full folder path from the address bar or `pwd` in terminal
-
-**Common paths by Steam type:**
-
-- **Native Steam**: `/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux`
-- **Snap Steam**: Varies; use "Browse local files" to find it
-- **Flatpak Steam**: Varies; use "Browse local files" to find it
-
-### Step 2: Verify the Path
-
-Before deploying, verify your path is correct by checking for the game executable.
-
-**For Native Steam** (common example):
-
-```bash
-ls -la "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
-```
-
-**For Snap Steam** (example):
-
-```bash
-ls -la "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
-```
-
-**For Flatpak Steam** (example):
-
-```bash
-ls -la "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
-```
-
-If the file is found, your path is correct. If "No such file or directory", go back to Step 1 and get the correct path.
-
-### Step 3: Deploy the Patch
-
-**For Native Steam:**
+2. **Run the deploy script:**
 
 ```bash
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-**For Snap Steam** (example):
+3. **Set Steam launch options:**
+   - Open Steam
+   - Right-click Battlezone 98 Redux
+   - Click `Properties`
+   - Under "General" find "Launch Options"
+   - Paste: `WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`
+   - Close
 
-```bash
-./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-**For Flatpak Steam** (example):
-
-```bash
-./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-### Step 4: Set Steam Launch Options
-
-1. Open Steam
-2. Right-click Battlezone 98 Redux
-3. Select `Properties`
-4. In "General" tab, find "Launch Options"
-5. Paste this:
-
-```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
-### Step 5: Test
-
-1. Launch the game
-2. Enter multiplayer once
-3. Exit the game
-
-### Step 6: Verify Success
-
-**For Native Steam:**
+4. **Play and verify:**
+   - Launch the game from Steam
+   - Go to multiplayer
+   - Exit the game
+   - Open a terminal in the game folder and run:
 
 ```bash
 cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-**For Snap Steam** (example):
+Replace `/path/to/Battlezone Netcode Patch` with where you cloned this repo.
+
+**Success = `VERIFY RESULT: PASS`**
+
+---
+
+## Linux - Snap Steam
+
+Follow these steps if you installed Steam via Snap.
+
+### Prerequisites
+
+Install tools (one time only):
 
 ```bash
-cd "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+sudo apt install mingw-w64 make
+```
+
+### Steps
+
+1. **Find your game path:**
+   - Open Steam (Snap)
+   - Right-click Battlezone 98 Redux
+   - Click `Manage` → `Browse local files`
+   - Copy the folder path shown (or type `pwd` in terminal there)
+
+2. **Open a terminal** in the repo folder
+
+3. **Run the deploy script** with your copied path:
+
+```bash
+./Linux/deploy_linux.sh "/your/copied/path"
+```
+
+Example (if your path is in snap):
+
+```bash
+./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+4. **Set Steam launch options:**
+   - Open Steam (Snap)
+   - Right-click Battlezone 98 Redux
+   - Click `Properties`
+   - Under "General" find "Launch Options"
+   - Paste: `WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`
+   - Close
+
+5. **Play and verify:**
+   - Launch the game from Steam
+   - Go to multiplayer
+   - Exit the game
+   - Open a terminal and run:
+
+```bash
+cd "/your/copied/path"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-**For Flatpak Steam** (example):
+Replace both `/your/copied/path` and `/path/to/Battlezone Netcode Patch` with your actual paths.
+
+**Success = `VERIFY RESULT: PASS`**
+
+---
+
+## Linux - Flatpak Steam
+
+Follow these steps if you installed Steam via Flatpak.
+
+### Prerequisites
+
+Install tools (one time only):
 
 ```bash
-cd "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+sudo apt install mingw-w64 make
+```
+
+### Steps
+
+1. **Find your game path:**
+   - Open Steam (Flatpak)
+   - Right-click Battlezone 98 Redux
+   - Click `Manage` → `Browse local files`
+   - Copy the folder path shown (or type `pwd` in terminal there)
+
+2. **Open a terminal** in the repo folder
+
+3. **Run the deploy script** with your copied path:
+
+```bash
+./Linux/deploy_linux.sh "/your/copied/path"
+```
+
+Example (if your path is in flatpak):
+
+```bash
+./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+4. **Set Steam launch options:**
+   - Open Steam (Flatpak)
+   - Right-click Battlezone 98 Redux
+   - Click `Properties`
+   - Under "General" find "Launch Options"
+   - Paste: `WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`
+   - Close
+
+5. **Play and verify:**
+   - Launch the game from Steam
+   - Go to multiplayer
+   - Exit the game
+   - Open a terminal and run:
+
+```bash
+cd "/your/copied/path"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-Or use the guided flow (works for all Steam types, substitute your actual game path):
+Replace both `/your/copied/path` and `/path/to/Battlezone Netcode Patch` with your actual paths.
 
-```bash
-./Linux/run_test_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
+**Success = `VERIFY RESULT: PASS`**
 
-### Linux Success / Failure
-
-- Success: `VERIFY RESULT: PASS`
-- Main log to trust: `dsound_proxy.log`
-- If no `dsound_proxy.log`: launch options are wrong, or `dsound.dll` was not deployed.
+---
 
 ## Windows
 
 ### What You Need
 
 - Windows with Steam and Battlezone 98 Redux installed
-- Included ready-to-copy DLL: `Microslop/winmm.dll`
+- The file `Microslop/winmm.dll` from this repo
 
 ### Steps
 
-1. Copy `Microslop/winmm.dll` to:
+1. **Find your game folder:**
+   - Open Steam
+   - Right-click Battlezone 98 Redux
+   - Click `Manage` → `Browse local files`
+   - A folder opens - that's your game folder
 
-```text
-C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\winmm.dll
-```
+2. **Copy the DLL:**
+   - Copy the file `Microslop/winmm.dll` from this repo
+   - Paste it into your game folder (from step 1)
 
-If your Steam library is on another drive, use Steam -> right-click Battlezone 98 Redux -> `Manage` -> `Browse local files`, then copy to that folder as `winmm.dll`.
-
-2. Launch the game.
-3. Enter multiplayer once.
-4. Exit the game.
-
-5. Verify:
+3. **Play and verify:**
+   - Launch the game
+   - Go to multiplayer
+   - Exit the game
+   - Open PowerShell in the repo folder and run:
 
 ```powershell
 .\Microslop\verify_windows.ps1
 ```
 
-Optional deploy script:
+**Success = `RESULT: PASS`**
 
-```powershell
-.\Microslop\deploy_windows.ps1
-```
-
-### Windows Success / Failure
-
-- Success: `RESULT: PASS`
-- Main log to trust: `winmm_proxy.log`
-- If no `winmm_proxy.log`: `winmm.dll` is not in the game folder.
+---
 
 ## Important Note
 
