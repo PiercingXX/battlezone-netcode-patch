@@ -2,19 +2,14 @@
 set -euo pipefail
 
 LOG_FILE="BZLogger.txt"
-EXE_FILE="battlezone98redux.exe"
+PROXY_LOG_FILE="dsound_proxy.log"
 EXPECTED_SRC="${1:-}"
 EXPECTED_RECV="2097152"
 EXPECTED_SEND="524288"
-RUNTIME_MODE="${VERIFY_RUNTIME_ONLY:-0}"
+PROXY_MODE="${VERIFY_PROXY_READBACK:-1}"
 
 if [[ ! -f "$LOG_FILE" ]]; then
   echo "Missing $LOG_FILE"
-  exit 1
-fi
-
-if [[ ! -f "$EXE_FILE" ]]; then
-  echo "Missing $EXE_FILE"
   exit 1
 fi
 
@@ -25,8 +20,18 @@ if [[ -z "$start_line" ]]; then
 fi
 
 session_log=$(mktemp)
-trap 'rm -f "$session_log"' EXIT
+proxy_session_log=$(mktemp)
+trap 'rm -f "$session_log" "$proxy_session_log"' EXIT
 tail -n "+$start_line" "$LOG_FILE" > "$session_log"
+
+if [[ -f "$PROXY_LOG_FILE" ]]; then
+  proxy_start_line=$(grep -n "DllMain: DLL_PROCESS_ATTACH" "$PROXY_LOG_FILE" | tail -n 1 | cut -d: -f1 || true)
+  if [[ -n "${proxy_start_line:-}" ]]; then
+    tail -n "+$proxy_start_line" "$PROXY_LOG_FILE" > "$proxy_session_log"
+  else
+    cat "$PROXY_LOG_FILE" > "$proxy_session_log"
+  fi
+fi
 
 echo "Latest startup marker:"
 grep -n "Starting BattleZone 98 Redux" "$LOG_FILE" | tail -n 1 || true
@@ -36,6 +41,13 @@ grep -n "MOD FOUND net.ini" "$session_log" | tail -n 1 || true
 
 echo "Latest socket buffer line:"
 grep -n "BZRNet P2P Socket Opened With" "$session_log" | tail -n 1 || true
+
+echo "Latest proxy effective readback line:"
+if [[ -f "$PROXY_LOG_FILE" ]]; then
+  grep -n "effective readback" "$proxy_session_log" | tail -n 1 || true
+else
+  echo "(no $PROXY_LOG_FILE found)"
+fi
 
 if [[ -n "$EXPECTED_SRC" ]]; then
   echo "Expected net.ini source should contain:"
@@ -56,27 +68,21 @@ else
   buf_ok=0
 fi
 
-# Validate the two patched immediates directly in the executable.
-if [[ "$RUNTIME_MODE" == "1" ]]; then
-  echo "Executable patch bytes: (runtime mode, skipped)"
-  exe_ok=1
-else
-  send_hex=$(xxd -p -s 0x52d96a -l 4 "$EXE_FILE" | tr -d '\n')
-  recv_hex=$(xxd -p -s 0x52db5e -l 4 "$EXE_FILE" | tr -d '\n')
-
-  if [[ "$send_hex" == "00000800" && "$recv_hex" == "00002000" ]]; then
-    exe_ok=1
+if [[ "$PROXY_MODE" == "1" ]]; then
+  if [[ -f "$PROXY_LOG_FILE" ]] && grep -Eq "effective readback SO_SNDBUF=$EXPECTED_SEND .*SO_RCVBUF=$EXPECTED_RECV" "$proxy_session_log"; then
+    proxy_ok=1
   else
-    exe_ok=0
+    proxy_ok=0
   fi
-
-  echo "Executable patch bytes:"
-  echo "- send @0x52d96a: $send_hex (expected 00000800)"
-  echo "- recv @0x52db5e: $recv_hex (expected 00002000)"
+else
+  proxy_ok=0
 fi
 
-if [[ "$src_ok" -eq 1 && "$buf_ok" -eq 1 ]]; then
+if [[ "$src_ok" -eq 1 && ( "$buf_ok" -eq 1 || "$proxy_ok" -eq 1 ) ]]; then
   echo "VERIFY RESULT: PASS"
+  if [[ "$buf_ok" -ne 1 && "$proxy_ok" -eq 1 ]]; then
+    echo "- passed via proxy readback verification mode"
+  fi
   exit 0
 fi
 
@@ -87,12 +93,11 @@ fi
 if [[ "$buf_ok" -ne 1 ]]; then
   echo "- socket buffer line mismatch"
 fi
-if [[ "$RUNTIME_MODE" == "1" && "$buf_ok" -ne 1 ]]; then
-  echo "- runtime patch was likely applied after socket init; run runtime patch before launch, then start game"
-elif [[ "$exe_ok" -eq 1 && "$buf_ok" -ne 1 ]]; then
-  echo "- executable is patched; launch the game once after patching to generate a fresh log session"
+if [[ "$PROXY_MODE" == "1" && "$proxy_ok" -ne 1 ]]; then
+  echo "- proxy readback mismatch"
 fi
-if [[ "$exe_ok" -ne 1 ]]; then
-  echo "- executable patch bytes not detected"
+if [[ "$PROXY_MODE" == "1" && "$buf_ok" -ne 1 ]]; then
+  echo "- BZLogger startup text is not authoritative for this Proton hook path"
+  echo "- proxy readback is the effective-value source of truth"
 fi
 exit 2
