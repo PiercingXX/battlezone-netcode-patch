@@ -17,7 +17,6 @@ Target profile:
 
 ## Files 📦
 
-- `launch_and_patch_linux.sh` (one-shot launcher + patcher)
 - `runtime_patch_linux.sh`
 - `runtime_patch_linux.py`
 - `runtime_patch_windows.ps1`
@@ -25,49 +24,31 @@ Target profile:
 - `run_test_windows.ps1`
 - `verify_net_patch.sh`
 - `verify_net_patch.ps1`
+- `launch_and_patch_linux.sh` (optional one-shot launcher + patcher)
 
 ## Linux Quick Start 🚀
 
-Single command (good for terminal keybinds):
+First-time user flow:
 
-```bash
-bash ./launch_and_patch_linux.sh "/path/to/Battlezone 98 Redux"
-```
-
-What it does:
-
-- Launches via Steam (`steam -applaunch 301650` by default)
-- Waits for game process
-- Applies runtime patch automatically
-
-Optional env vars:
-
-- `BATTLEZONE_APP_ID` (default `301650`)
-- `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
-
-Manual Linux patch (if game is already running):
+1. Launch game from Steam and wait at in-game main menu.
+2. Apply runtime patch:
 
 ```bash
 bash ./runtime_patch_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
-## Windows Quick Start 🪟
+3. Host or join one multiplayer session.
+4. Verify latest startup session:
 
-Required order:
-
-1. Start Steam as Administrator.
-2. Launch game and wait at in-game main menu.
-3. Open PowerShell as Administrator.
-4. Run:
-
-```powershell
-.\runtime_patch_windows.ps1
+```bash
+cd "/path/to/Battlezone 98 Redux"
+VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
 ```
 
-Guided flow:
+Guided Linux flow (interactive prompts):
 
-```powershell
-.\run_test_windows.ps1 -GameRoot "C:\Path\To\Battlezone 98 Redux"
+```bash
+bash ./run_test_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
 ## Verify ✅
@@ -111,6 +92,44 @@ Windows optional PID targeting:
 
 ```powershell
 .\runtime_patch_windows.ps1 -TargetPid 12345
+```
+
+## Optional: Linux One-Command Launcher
+
+Use this if you want one command for a terminal keybind:
+
+```bash
+bash ./launch_and_patch_linux.sh "/path/to/Battlezone 98 Redux"
+```
+
+What it does:
+
+- Launches via Steam (`steam -applaunch 301650` by default)
+- Waits for game process
+- Applies runtime patch automatically
+
+Optional env vars:
+
+- `BATTLEZONE_APP_ID` (default `301650`)
+- `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
+
+## Windows Quick Start 🪟
+
+Required order:
+
+1. Start Steam as Administrator.
+2. Launch game and wait at in-game main menu.
+3. Open PowerShell as Administrator.
+4. Run:
+
+```powershell
+.\runtime_patch_windows.ps1
+```
+
+Guided flow:
+
+```powershell
+.\run_test_windows.ps1 -GameRoot "C:\Path\To\Battlezone 98 Redux"
 ```
 
 ## Notes 📝
