@@ -40,21 +40,35 @@ sudo apt install mingw-w64 make
 
 ### Step 2: Verify the Path
 
-Before deploying, verify your path is correct by checking for the game executable:
+Before deploying, verify your path is correct by checking for the game executable.
+
+**For Native Steam** (common example):
 
 ```bash
-ls -la "/full/path/to/Battlezone 98 Redux/battlezone98redux.exe"
+ls -la "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux/battlezone98redux.exe"
 ```
 
-If this shows the file exists, your path is correct. If "No such file or directory", go back to Step 1 and get the correct path.
+**For Snap or Flatpak**, replace with the path you found in Step 1:
+
+```bash
+ls -la "/your/path/from/step1/battlezone98redux.exe"
+```
+
+If the file is found, your path is correct. If "No such file or directory", go back to Step 1 and get the correct path.
 
 ### Step 3: Deploy the Patch
 
+**For Native Steam:**
+
 ```bash
-./Linux/deploy_linux.sh "/full/path/to/Battlezone 98 Redux"
+./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-Replace `/full/path/to/Battlezone 98 Redux` with the path you found in Step 1.
+**For Snap or Flatpak**, use the path you found in Step 1:
+
+```bash
+./Linux/deploy_linux.sh "/your/path/from/step1"
+```
 
 ### Step 4: Set Steam Launch Options
 
@@ -76,15 +90,24 @@ WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 
 ### Step 6: Verify Success
 
+**For Native Steam:**
+
 ```bash
-cd "/full/path/to/Battlezone 98 Redux"
+cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-Or use the guided flow:
+**For Snap or Flatpak**, use your path from Step 1:
 
 ```bash
-./Linux/run_test_linux.sh "/full/path/to/Battlezone 98 Redux"
+cd "/your/path/from/step1"
+VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
+```
+
+Or use the guided flow (works for all Steam types):
+
+```bash
+./Linux/run_test_linux.sh "/your/game/path"
 ```
 
 ### Linux Success / Failure
