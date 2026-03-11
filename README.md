@@ -12,6 +12,34 @@ Target values:
 
 ---
 
+## Windows
+
+### Step 1: Copy the DLL
+
+1. Open Steam
+2. Right-click **Battlezone 98 Redux** in your library
+3. Click **Manage → Browse local files**
+4. A folder opens — this is your game folder
+5. Copy `Microslop\winmm.dll` from this repo into that game folder
+
+### Step 2: Play
+
+1. Launch **Battlezone 98 Redux** from Steam
+2. Go to **Multiplayer**
+3. Exit the game
+
+### Step 3: Verify
+
+Open PowerShell in the repo folder and run:
+
+```powershell
+.\Microslop\verify_windows.ps1
+```
+
+**Success = `RESULT: PASS`**
+
+---
+
 ## Linux - Native Steam
 
 Use this if you installed Steam natively, IF you installed via Snap or Flatpak, scroll down.
@@ -193,33 +221,6 @@ VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify
 
 ---
 
-## Windows
-
-### Step 1: Copy the DLL
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Manage → Browse local files**
-4. A folder opens — this is your game folder
-5. Copy `Microslop\winmm.dll` from this repo into that game folder
-
-### Step 2: Play
-
-1. Launch **Battlezone 98 Redux** from Steam
-2. Go to **Multiplayer**
-3. Exit the game
-
-### Step 3: Verify
-
-Open PowerShell in the repo folder and run:
-
-```powershell
-.\Microslop\verify_windows.ps1
-```
-
-**Success = `RESULT: PASS`**
-
----
 
 ## Important Note
 
