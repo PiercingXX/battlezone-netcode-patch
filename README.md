@@ -1,162 +1,124 @@
-# Battlezone 98 Redux Netcode Runtime Patch
+# Battlezone Netcode Patch - Tester Guide
 
-Runtime-only multiplayer net buffer patch for Battlezone 98 Redux.
+This repo helps test larger multiplayer socket buffers for Battlezone 98 Redux.
 
-No on-disk EXE editing in the normal workflow.
+Target values:
 
-## What this does 🛠️
+- Send buffer: 524288
+- Receive buffer: 2097152
 
-- Patches running process memory (not the game file on disk)
-- Uses build-tolerant runtime detection on Linux + Windows
-- Safely aborts if address detection is ambiguous
+## Linux (Proton)
 
-Target profile:
+### What You Need
 
-- Send buffer: 524288 (512 KB)
-- Receive buffer: 2097152 (2 MB)
+- Linux with Steam and Proton working
+- Battlezone 98 Redux installed
+- `make`
+- `i686-w64-mingw32-g++`
 
-## Files 📦
-
-- `runtime_patch_linux.sh`
-- `runtime_patch_linux.py`
-- `runtime_patch_windows.ps1`
-- `run_test_linux.sh`
-- `run_test_windows.ps1`
-- `verify_net_patch.sh`
-- `verify_net_patch.ps1`
-- `launch_and_patch_linux.sh` (optional one-shot launcher + patcher)
-
-
----
-
-
-## Linux Quick Start 🚀
-
-First-time user flow:
-
-1. Launch game from Steam and wait at in-game main menu.
-2. Apply runtime patch:
+If tools are missing on Debian or Ubuntu:
 
 ```bash
-bash ./runtime_patch_linux.sh "/path/to/Battlezone 98 Redux"
+sudo apt install mingw-w64 make
 ```
 
-3. Host or join one multiplayer session.
-4. Verify latest startup session:
+### Steps
+
+1. Build and deploy the Linux patch:
 
 ```bash
-cd "/path/to/Battlezone 98 Redux"
-VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
+./Linux/deploy_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
-Guided Linux flow (interactive prompts):
+Copy-paste example (common Steam path):
 
 ```bash
-bash ./run_test_linux.sh "/path/to/Battlezone 98 Redux"
+./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
+If your path is different, open Steam, right-click Battlezone 98 Redux, then:
+`Manage` -> `Browse local files` and copy that folder path.
 
----
+2. In Steam launch options for Battlezone, set:
 
-
-## Windows Quick Start 🪟
-
-Required order:
-
-1. Start Steam as Administrator.
-2. Launch game and wait at in-game main menu.
-3. Open PowerShell as Administrator.
-4. Run:
-
-```powershell
-.\runtime_patch_windows.ps1
+```text
+WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-Guided flow:
+3. Launch the game.
+4. Enter multiplayer once.
+5. Exit the game.
 
-```powershell
-.\run_test_windows.ps1 -GameRoot "C:\Path\To\Battlezone 98 Redux"
-```
-
-
----
-
-
-
-## Verify ✅
-
-After entering multiplayer once, verify latest log session:
-
-Linux:
+6. Verify:
 
 ```bash
 cd "/path/to/Battlezone 98 Redux"
-VERIFY_RUNTIME_ONLY=1 /path/to/Battlezone\ Netcode\ Patch/verify_net_patch.sh
+VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-Windows:
-
-```powershell
-cd "C:\Path\To\Battlezone 98 Redux"
-$env:VERIFY_RUNTIME_ONLY="1"
-\path\to\Battlezone Netcode Patch\verify_net_patch.ps1
-```
-
-Expected line:
-
-`BZRNet P2P Socket Opened With 2097152 received buffer, 524288 send buffer`
-
-
----
-
-
-## Troubleshooting 🧯
-
-Linux ptrace blocked:
+Copy-paste verify example (common Steam path):
 
 ```bash
-sudo sysctl -w kernel.yama.ptrace_scope=0
-pkill -9 r2 || true
+cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+VERIFY_PROXY_READBACK=1 "/path/to/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
 ```
 
-Windows access denied:
-
-- Run both Steam/game and PowerShell as Administrator
-- Keep elevation level consistent (both elevated)
-
-Windows optional PID targeting:
-
-```powershell
-.\runtime_patch_windows.ps1 -TargetPid 12345
-```
-
----
-
-
-## Notes 📝
-
-- Runtime patching must be applied each game launch (memory resets on exit)
-- This repo is now runtime-first and build-tolerant by design
-
-
----
-
-
-## Optional: Linux One-Command Launcher
-
-Use this if you want one command for a terminal keybind:
+Optional guided flow:
 
 ```bash
-bash ./launch_and_patch_linux.sh "/path/to/Battlezone 98 Redux"
+./Linux/run_test_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
-What it does:
+### Linux Success / Failure
 
-- Launches via Steam (`steam -applaunch 301650` by default)
-- Waits for game process
-- Applies runtime patch automatically
+- Success: `VERIFY RESULT: PASS`
+- Main log to trust: `dsound_proxy.log`
+- If no `dsound_proxy.log`: launch options are wrong, or `dsound.dll` was not deployed.
 
-Optional env vars:
+## Windows
 
-- `BATTLEZONE_APP_ID` (default `301650`)
-- `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
+### What You Need
+
+- Windows with Steam and Battlezone 98 Redux installed
+- Included ready-to-copy DLL: `Microslop/winmm.dll`
+
+### Steps
+
+1. Copy `Microslop/winmm.dll` to:
+
+```text
+C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\winmm.dll
+```
+
+If your Steam library is on another drive, use Steam -> right-click Battlezone 98 Redux -> `Manage` -> `Browse local files`, then copy to that folder as `winmm.dll`.
+
+2. Launch the game.
+3. Enter multiplayer once.
+4. Exit the game.
+
+5. Verify:
+
+```powershell
+.\Microslop\verify_windows.ps1
+```
+
+Optional deploy script:
+
+```powershell
+.\Microslop\deploy_windows.ps1
+```
+
+### Windows Success / Failure
+
+- Success: `RESULT: PASS`
+- Main log to trust: `winmm_proxy.log`
+- If no `winmm_proxy.log`: `winmm.dll` is not in the game folder.
+
+## Important Note
+
+The Battlezone startup text line can still show old values even when the patch is working.
+Use proxy log readback (`dsound_proxy.log` or `winmm_proxy.log`) as source of truth.
+
+## Technical Details
+
+- Full investigation history: `INVESTIGATION_WRITEUP.md`
