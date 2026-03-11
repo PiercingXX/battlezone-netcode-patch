@@ -65,6 +65,8 @@ Notes:
 - Keep this watcher terminal running while you play.
 - Stop with `Ctrl+C`.
 - If ptrace is blocked, apply the troubleshooting `ptrace_scope` command below first.
+- Address detection is runtime/build-tolerant: it resolves patch locations from process memory, not fixed EXE offsets.
+- If detection is ambiguous, patching aborts safely instead of guessing.
 
 ## Windows Test
 
