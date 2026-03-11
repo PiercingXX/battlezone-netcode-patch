@@ -18,10 +18,16 @@ Use this if you installed Steam by downloading it from the Steam website or via 
 
 ### Step 1: Install required tools
 
-Open a terminal and run:
+Open a terminal and run the command for your distro:
 
+**Debian / Ubuntu / Mint:**
 ```bash
 sudo apt install mingw-w64 make
+```
+
+**Arch / Manjaro / EndeavourOS:**
+```bash
+sudo pacman -S mingw-w64-gcc make
 ```
 
 ### Step 2: Deploy the patch
@@ -69,10 +75,16 @@ Use this if you installed Steam via Snap (`snap install steam`).
 
 ### Step 1: Install required tools
 
-Open a terminal and run:
+Open a terminal and run the command for your distro:
 
+**Debian / Ubuntu / Mint:**
 ```bash
 sudo apt install mingw-w64 make
+```
+
+**Arch / Manjaro / EndeavourOS:**
+```bash
+sudo pacman -S mingw-w64-gcc make
 ```
 
 ### Step 2: Deploy the patch
@@ -125,10 +137,16 @@ Use this if you installed Steam via Flatpak (`flatpak install steam`).
 
 ### Step 1: Install required tools
 
-Open a terminal and run:
+Open a terminal and run the command for your distro:
 
+**Debian / Ubuntu / Mint:**
 ```bash
 sudo apt install mingw-w64 make
+```
+
+**Arch / Manjaro / EndeavourOS:**
+```bash
+sudo pacman -S mingw-w64-gcc make
 ```
 
 ### Step 2: Deploy the patch
