@@ -65,6 +65,108 @@ function Read-Memory4 {
     return $buf
 }
 
+function Read-Memory {
+    param(
+        [IntPtr]$Handle,
+        [IntPtr]$Address,
+        [int]$Size
+    )
+    $buf = New-Object byte[] $Size
+    $read = [IntPtr]::Zero
+    $ok = [NativeMethods]::ReadProcessMemory($Handle, $Address, $buf, $Size, [ref]$read)
+    if (-not $ok -or $read.ToInt32() -ne $Size) {
+        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "ReadProcessMemory failed at 0x$('{0:X}' -f $Address.ToInt64()) size $Size (Win32 $err)"
+    }
+    return $buf
+}
+
+function Find-DwordOffsets {
+    param(
+        [byte[]]$Buffer,
+        [byte[]]$Value4
+    )
+    $hits = New-Object System.Collections.Generic.List[int]
+    for ($i = 0; $i -le ($Buffer.Length - 4); $i++) {
+        if ($Buffer[$i] -eq $Value4[0] -and
+            $Buffer[$i + 1] -eq $Value4[1] -and
+            $Buffer[$i + 2] -eq $Value4[2] -and
+            $Buffer[$i + 3] -eq $Value4[3]) {
+            [void]$hits.Add($i)
+        }
+    }
+    return $hits
+}
+
+function Resolve-PatchAddresses {
+    param(
+        [IntPtr]$Handle,
+        [Int64]$Base,
+        [int]$ModuleSize,
+        [IntPtr]$FixedSendAddr,
+        [IntPtr]$FixedRecvAddr,
+        [byte[]]$SendOld,
+        [byte[]]$SendNew,
+        [byte[]]$RecvOld,
+        [byte[]]$RecvNew
+    )
+
+    # Fast path: fixed offsets still match known bytes.
+    $sendBefore = Read-Memory4 -Handle $Handle -Address $FixedSendAddr
+    $recvBefore = Read-Memory4 -Handle $Handle -Address $FixedRecvAddr
+    $sendHexBefore = ($sendBefore | ForEach-Object { $_.ToString("x2") }) -join ""
+    $recvHexBefore = ($recvBefore | ForEach-Object { $_.ToString("x2") }) -join ""
+    if (($sendHexBefore -in @("00800000", "00000800")) -and ($recvHexBefore -in @("00001000", "00002000"))) {
+        return @($FixedSendAddr, $FixedRecvAddr, "fixed")
+    }
+
+    Write-Host "Fixed offsets did not match known bytes. Attempting automatic pattern discovery..."
+
+    $moduleBytes = Read-Memory -Handle $Handle -Address ([IntPtr]$Base) -Size $ModuleSize
+
+    $sendNeedles = @($SendOld, $SendNew)
+    $recvNeedles = @($RecvOld, $RecvNew)
+    $sendHitSet = New-Object 'System.Collections.Generic.HashSet[int]'
+    $recvHitSet = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    foreach ($needle in $sendNeedles) {
+        $hits = Find-DwordOffsets -Buffer $moduleBytes -Value4 $needle
+        foreach ($h in $hits) { [void]$sendHitSet.Add($h) }
+    }
+    foreach ($needle in $recvNeedles) {
+        $hits = Find-DwordOffsets -Buffer $moduleBytes -Value4 $needle
+        foreach ($h in $hits) { [void]$recvHitSet.Add($h) }
+    }
+
+    $delta = 0x1F4
+    $candidatePairs = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $sendHitSet) {
+        $r = $s + $delta
+        if ($recvHitSet.Contains($r)) {
+            [void]$candidatePairs.Add(@($s, $r))
+        }
+    }
+
+    if ($candidatePairs.Count -eq 1) {
+        $pair = $candidatePairs[0]
+        $sendAddr = [IntPtr]($Base + [int]$pair[0])
+        $recvAddr = [IntPtr]($Base + [int]$pair[1])
+        return @($sendAddr, $recvAddr, "auto")
+    }
+
+    if ($candidatePairs.Count -gt 1) {
+        Write-Host "Found multiple candidate address pairs; cannot choose safely."
+        foreach ($p in $candidatePairs) {
+            $sva = $Base + [int]$p[0]
+            $rva = $Base + [int]$p[1]
+            Write-Host ("- send 0x{0:X8}, recv 0x{1:X8}" -f $sva, $rva)
+        }
+        throw "Ambiguous runtime patch addresses"
+    }
+
+    throw "Could not resolve runtime patch addresses for this build"
+}
+
 function Write-Memory4 {
     param(
         [IntPtr]$Handle,
@@ -110,8 +212,9 @@ if ($null -eq $target) {
 Write-Host "Found process PID: $($target.Id)"
 
 $base = [Int64]$target.MainModule.BaseAddress
-$sendAddr = [IntPtr]($base + 0x12D96A)
-$recvAddr = [IntPtr]($base + 0x12DB5E)
+$moduleSize = [int]$target.MainModule.ModuleMemorySize
+$fixedSendAddr = [IntPtr]($base + 0x12D96A)
+$fixedRecvAddr = [IntPtr]($base + 0x12DB5E)
 
 $sendOld = [byte[]](0x00,0x80,0x00,0x00)
 $sendNew = [byte[]](0x00,0x00,0x08,0x00)
@@ -127,6 +230,15 @@ if ($hProc -eq [IntPtr]::Zero) {
 }
 
 try {
+    $resolved = Resolve-PatchAddresses -Handle $hProc -Base $base -ModuleSize $moduleSize -FixedSendAddr $fixedSendAddr -FixedRecvAddr $fixedRecvAddr -SendOld $sendOld -SendNew $sendNew -RecvOld $recvOld -RecvNew $recvNew
+    $sendAddr = [IntPtr]$resolved[0]
+    $recvAddr = [IntPtr]$resolved[1]
+    $mode = [string]$resolved[2]
+
+    Write-Host ("Using {0} addresses:" -f $mode)
+    Write-Host ("- send: 0x{0:X8}" -f $sendAddr.ToInt64())
+    Write-Host ("- recv: 0x{0:X8}" -f $recvAddr.ToInt64())
+
     $sendBefore = Read-Memory4 -Handle $hProc -Address $sendAddr
     $recvBefore = Read-Memory4 -Handle $hProc -Address $recvAddr
 
