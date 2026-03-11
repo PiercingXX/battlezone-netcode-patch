@@ -483,9 +483,7 @@ VERIFY_PROXY_READBACK=1 /path/to/Battlezone\ Netcode\ Patch/Linux/verify_net_pat
 
 In this mode, verification can pass when `dsound_proxy.log` contains effective readback values matching target send/receive buffers, even if the startup BZLogger text line remains default.
 
-## Fresh-Agent Handoff Notes
-
-If a fresh AI agent continues this work, start from these facts:
+## Next Step Notes
 
 1. Post-launch ptrace patching: verified too late.
 2. net.ini path: does not expose send/recv socket buffer keys.
@@ -493,13 +491,10 @@ If a fresh AI agent continues this work, start from these facts:
 4. API interception via DSOUND override: hooks fire and force values at startup, but logged effective values remain defaults.
 5. Immediate readback plus socket lifecycle tracing now show the forced values remain applied on the intercepted startup socket.
 
-Recommended immediate next instrumentation for handoff:
+- Optionally hook `sendto`/`recvfrom` to identify which socket handle is actually used for P2P traffic and correlate with the one that received forced values.
 
-1. Track socket lifecycle (`socket`, `closesocket`) and assign per-socket IDs in logs.
-2. Log later `setsockopt` calls on the same socket to detect post-start resets.
-3. Optionally hook `sendto`/`recvfrom` to identify which socket handle is actually used for P2P traffic and correlate with the one that received forced values.
 
-Those first two items are now complete in the current repo state.
+
 
 ## Windows Follow-Up
 
