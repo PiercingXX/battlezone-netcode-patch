@@ -14,7 +14,6 @@ Target profile:
 - `runtime_patch_linux.sh`
 - `runtime_patch_linux.py`
 - `launch_and_patch_linux.sh`
-- `auto_patch_linux_watch.sh`
 - `runtime_patch_windows.ps1`
 - `verify_net_patch.sh`
 - `verify_net_patch.ps1`
@@ -70,23 +69,6 @@ Optional env vars:
 
 - `BATTLEZONE_APP_ID` (default `301650`)
 - `RUNTIME_PATCH_TIMEOUT_SECS` (default `180`)
-
-## Linux Auto Patch (Per Launch)
-
-If you do not want to manually run the patch every launch, run the watcher once and keep it open.
-It will detect each new `Battlezone98Redux.exe` process and patch it automatically.
-
-```bash
-bash ./auto_patch_linux_watch.sh "/path/to/Battlezone 98 Redux"
-```
-
-Notes:
-
-- Keep this watcher terminal running while you play.
-- Stop with `Ctrl+C`.
-- If ptrace is blocked, apply the troubleshooting `ptrace_scope` command below first.
-- Address detection is runtime/build-tolerant: it resolves patch locations from process memory, not fixed EXE offsets.
-- If detection is ambiguous, patching aborts safely instead of guessing.
 
 ## Windows Test
 
