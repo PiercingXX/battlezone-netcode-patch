@@ -1,6 +1,7 @@
 param(
     [int]$TimeoutSeconds = 120,
-    [string]$ExeName = "battlezone98redux.exe"
+    [string]$ExeName = "battlezone98redux.exe",
+    [int]$Pid = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -98,6 +99,75 @@ function Find-DwordOffsets {
     return $hits
 }
 
+function Find-PatternOffsets {
+    param(
+        [byte[]]$Buffer,
+        [byte[]]$Pattern
+    )
+    $hits = New-Object System.Collections.Generic.List[int]
+    $max = $Buffer.Length - $Pattern.Length
+    if ($max -lt 0) {
+        return $hits
+    }
+    for ($i = 0; $i -le $max; $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $Pattern.Length; $j++) {
+            if ($Buffer[$i + $j] -ne $Pattern[$j]) {
+                $ok = $false
+                break
+            }
+        }
+        if ($ok) {
+            [void]$hits.Add($i)
+        }
+    }
+    return $hits
+}
+
+function Choose-AddressPair {
+    param(
+        [int[]]$SendImms,
+        [int[]]$RecvImms,
+        [int]$PreferredDelta = 0x1F4
+    )
+
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $recvSet = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($r in $RecvImms) { [void]$recvSet.Add($r) }
+
+    foreach ($s in $SendImms) {
+        $r = $s + $PreferredDelta
+        if ($recvSet.Contains($r)) {
+            [void]$pairs.Add(@($s, $r, 0))
+        }
+    }
+
+    if ($pairs.Count -eq 0) {
+        foreach ($s in $SendImms) {
+            foreach ($r in $RecvImms) {
+                $d = $r - $s
+                if ($d -gt 0 -and $d -le 0x2000) {
+                    [void]$pairs.Add(@($s, $r, [Math]::Abs($d - $PreferredDelta)))
+                }
+            }
+        }
+    }
+
+    if ($pairs.Count -eq 0) {
+        return @("none")
+    }
+
+    $sorted = $pairs | Sort-Object { [int]$_[2] }
+    $bestScore = [int]$sorted[0][2]
+    $best = @($sorted | Where-Object { [int]$_[2] -eq $bestScore })
+
+    if ($best.Count -eq 1) {
+        return @("ok", [int]$best[0][0], [int]$best[0][1], $bestScore)
+    }
+
+    return @("ambiguous", $best, $bestScore)
+}
+
 function Resolve-PatchAddresses {
     param(
         [IntPtr]$Handle,
@@ -126,40 +196,60 @@ function Resolve-PatchAddresses {
 
     $sendNeedles = @($SendOld, $SendNew)
     $recvNeedles = @($RecvOld, $RecvNew)
+    $sendSigOld = [byte[]](0x68,0x00,0x80,0x00,0x00,0x6A,0x00,0x53,0xFF,0x95)
+    $sendSigNew = [byte[]](0x68,0x00,0x00,0x08,0x00,0x6A,0x00,0x53,0xFF,0x95)
+    $recvSigOld = [byte[]](0x68,0x00,0x00,0x10,0x00,0xFF,0x95,0xD8,0xFE,0xFF,0xFF)
+    $recvSigNew = [byte[]](0x68,0x00,0x00,0x20,0x00,0xFF,0x95,0xD8,0xFE,0xFF,0xFF)
     $sendHitSet = New-Object 'System.Collections.Generic.HashSet[int]'
     $recvHitSet = New-Object 'System.Collections.Generic.HashSet[int]'
 
+    # Stage 1: strong signatures (instruction context + immediate).
+    foreach ($sig in @($sendSigOld, $sendSigNew)) {
+        $hits = Find-PatternOffsets -Buffer $moduleBytes -Pattern $sig
+        foreach ($h in $hits) { [void]$sendHitSet.Add($h + 1) }
+    }
+    foreach ($sig in @($recvSigOld, $recvSigNew)) {
+        $hits = Find-PatternOffsets -Buffer $moduleBytes -Pattern $sig
+        foreach ($h in $hits) { [void]$recvHitSet.Add($h + 1) }
+    }
+
+    # Stage 2: loose dword candidates if signatures drift across builds.
     foreach ($needle in $sendNeedles) {
         $hits = Find-DwordOffsets -Buffer $moduleBytes -Value4 $needle
-        foreach ($h in $hits) { [void]$sendHitSet.Add($h) }
+        foreach ($h in $hits) {
+            if ($h -gt 0 -and $moduleBytes[$h - 1] -eq 0x68) {
+                [void]$sendHitSet.Add($h)
+            }
+        }
     }
     foreach ($needle in $recvNeedles) {
         $hits = Find-DwordOffsets -Buffer $moduleBytes -Value4 $needle
-        foreach ($h in $hits) { [void]$recvHitSet.Add($h) }
-    }
-
-    $delta = 0x1F4
-    $candidatePairs = New-Object System.Collections.Generic.List[object]
-    foreach ($s in $sendHitSet) {
-        $r = $s + $delta
-        if ($recvHitSet.Contains($r)) {
-            [void]$candidatePairs.Add(@($s, $r))
+        foreach ($h in $hits) {
+            if ($h -gt 0 -and $moduleBytes[$h - 1] -eq 0x68) {
+                [void]$recvHitSet.Add($h)
+            }
         }
     }
 
-    if ($candidatePairs.Count -eq 1) {
-        $pair = $candidatePairs[0]
-        $sendAddr = [IntPtr]($Base + [int]$pair[0])
-        $recvAddr = [IntPtr]($Base + [int]$pair[1])
-        return @($sendAddr, $recvAddr, "auto")
+    $sendImms = @($sendHitSet)
+    $recvImms = @($recvHitSet)
+    $picked = Choose-AddressPair -SendImms $sendImms -RecvImms $recvImms -PreferredDelta 0x1F4
+
+    if ($picked[0] -eq "ok") {
+        $sendAddr = [IntPtr]($Base + [int]$picked[1])
+        $recvAddr = [IntPtr]($Base + [int]$picked[2])
+        $score = [int]$picked[3]
+        return @($sendAddr, $recvAddr, ("auto(score={0})" -f $score))
     }
 
-    if ($candidatePairs.Count -gt 1) {
+    if ($picked[0] -eq "ambiguous") {
         Write-Host "Found multiple candidate address pairs; cannot choose safely."
-        foreach ($p in $candidatePairs) {
+        $list = $picked[1]
+        foreach ($p in $list | Select-Object -First 8) {
             $sva = $Base + [int]$p[0]
             $rva = $Base + [int]$p[1]
-            Write-Host ("- send 0x{0:X8}, recv 0x{1:X8}" -f $sva, $rva)
+            $scr = [int]$p[2]
+            Write-Host ("- send 0x{0:X8}, recv 0x{1:X8}, score {2}" -f $sva, $rva, $scr)
         }
         throw "Ambiguous runtime patch addresses"
     }
@@ -197,10 +287,20 @@ function Write-Memory4 {
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 Write-Host "Waiting for running process: $ExeName"
 $target = $null
-while ((Get-Date) -lt $deadline) {
-    $target = Get-TargetProcess -TargetExe $ExeName
-    if ($null -ne $target) { break }
-    Start-Sleep -Seconds 1
+if ($Pid -gt 0) {
+    try {
+        $target = Get-Process -Id $Pid -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Provided PID not found: $Pid"
+        exit 2
+    }
+} else {
+    while ((Get-Date) -lt $deadline) {
+        $target = Get-TargetProcess -TargetExe $ExeName
+        if ($null -ne $target) { break }
+        Start-Sleep -Seconds 1
+    }
 }
 
 if ($null -eq $target) {
