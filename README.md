@@ -27,7 +27,7 @@ sudo apt install mingw-w64 make
 1. Build and deploy the Linux patch:
 
 ```bash
-./Linux/deploy_linux.sh "/path/to/Battlezone 98 Redux"
+./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Copy-paste example (common Steam path):
