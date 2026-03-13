@@ -23,6 +23,9 @@ Target values:
 5. Copy `Microslop\winmm.dll` from this repo into that game folder
 
 
+![alt text](resources/image.png)
+
+![alt text](resources/iaWY5xDy9t.gif)
 
 ### Step 2: Play
 
