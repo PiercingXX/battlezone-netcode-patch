@@ -43,6 +43,71 @@ Open PowerShell in the repo folder and run:
 
 **Success = `RESULT: PASS`**
 
+## After Each Stress Test (Send This Back)
+
+After every test run, collect a bundle and send the generated archive file back to the test coordinator.
+
+Windows:
+
+```powershell
+.\Microslop\collect_windows_test_bundle.ps1
+```
+
+Bundle output location:
+
+- Windows: `test_bundles/*.zip`
+
+## Deep Diagnostics (Lag + Crash Investigation)
+
+Use this only for bad sessions (heavy lag, desync, crash, freeze). It captures deeper network/system data.
+
+Windows:
+
+```powershell
+.\Microslop\start_deep_diag.ps1
+```
+
+Run your match, then stop and bundle:
+
+```powershell
+.\Microslop\stop_deep_diag.ps1
+```
+
+Linux Native Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/start_deep_diag.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+Run your match, then stop and bundle:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/stop_deep_diag.sh
+```
+
+Linux Snap Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/start_deep_diag.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+Linux Flatpak Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/start_deep_diag.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+Notes:
+
+- Windows `netsh` capture works best in an elevated PowerShell.
+- Windows crash dumps are collected automatically if `procdump.exe` is installed.
+- Linux Proton logs are captured if Steam launch options include `PROTON_LOG=1 %command%`.
+- Deep diagnostics bundles are written under `test_bundles/deep_*`.
+
 ---
 
 ## Linux - Native Steam
@@ -99,6 +164,20 @@ VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify
 ```
 
 **Success = `VERIFY RESULT: PASS`**
+
+## After Each Stress Test (Send This Back)
+
+After every test run, collect a bundle and send the generated archive file back to the test coordinator.
+
+Linux Native Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/collect_test_bundle.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+Bundle output location:
+
+- Linux: `test_bundles/*.tar.gz`
 
 ---
 
@@ -162,6 +241,20 @@ VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify
 
 **Success = `VERIFY RESULT: PASS`**
 
+## After Each Stress Test (Send This Back)
+
+After every test run, collect a bundle and send the generated archive file back to the test coordinator.
+
+Linux Snap Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/collect_test_bundle.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+Bundle output location:
+
+- Linux: `test_bundles/*.tar.gz`
+
 ---
 
 ## Linux - Flatpak Steam
@@ -223,6 +316,21 @@ VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify
 ```
 
 **Success = `VERIFY RESULT: PASS`**
+
+
+## After Each Stress Test (Send This Back)
+
+After every test run, collect a bundle and send the generated archive file back to the test coordinator.
+
+Linux Flatpak Steam:
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/collect_test_bundle.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+```
+Bundle output location:
+
+- Linux: `test_bundles/*.tar.gz`
 
 ---
 
