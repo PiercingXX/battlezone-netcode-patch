@@ -22,6 +22,8 @@ Target values:
 4. A folder opens — this is your game folder
 5. Copy `Microslop\winmm.dll` from this repo into that game folder
 
+
+
 ### Step 2: Play
 
 1. Launch **Battlezone 98 Redux** from Steam
