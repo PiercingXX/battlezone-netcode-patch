@@ -13,7 +13,7 @@ The logging captures network/system diagnostics plus game/proxy logs, then build
 
 ## Required
 
-I need BOTH host and client logging to ensure this is actually viable. All players need to upload logging bundles, Discord should work for this.
+I need BOTH host and client logging to ensure this is actually viable and to see what improvements will need to be made. All players need to upload logging bundles, Discord should work for this.
 
 
 ## Notes
