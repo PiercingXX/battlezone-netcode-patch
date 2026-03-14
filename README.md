@@ -35,7 +35,7 @@ Open PowerShell in the repo folder and run:
 .\Microslop\tester_diag.ps1 -Action Start
 ```
 
-The script will try to auto-detect the other player's IP from the match traffic.
+The script will attempt to log any errors including lag and CTD.
 
 ### Step 3: Play
 
@@ -100,7 +100,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/tester_diag.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-The script will try to auto-detect the other player's IP from the match traffic.
+The script will attempt to log any errors including lag and CTD.
 
 ### Step 5: Play
 
@@ -169,7 +169,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/tester_diag.sh start "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-The script will try to auto-detect the other player's IP from the match traffic.
+The script will attempt to log any errors including lag and CTD.
 
 ### Step 5: Play
 
@@ -238,7 +238,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/tester_diag.sh start "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-The script will try to auto-detect the other player's IP from the match traffic.
+The script will attempt to log any errors including lag and CTD.
 
 ### Step 5: Play
 
