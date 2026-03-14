@@ -1,7 +1,7 @@
 
 ## Deep Diagnostics (Lag + Crash Investigation)
 
-Use this only for bad sessions (heavy lag, desync, crash, freeze). It captures deeper network/system data.
+It captures network/system data.
 
 Privacy scope:
 
