@@ -61,9 +61,9 @@ extract_peer_candidates_linux() {
   local all_tmp
   game_only_tmp="$(mktemp)"
   all_tmp="$(mktemp)"
-  trap 'rm -f "$game_only_tmp" "$all_tmp"' RETURN
   if [[ ! -f "$socket_log" ]]; then
     : >"$out_file"
+    rm -f "$game_only_tmp" "$all_tmp"
     return
   fi
 
@@ -88,6 +88,7 @@ extract_peer_candidates_linux() {
 
   if [[ -s "$game_only_tmp" ]]; then
     cp -f "$game_only_tmp" "$out_file"
+    rm -f "$game_only_tmp" "$all_tmp"
     return
   fi
 
@@ -111,6 +112,7 @@ extract_peer_candidates_linux() {
     done >"$all_tmp"
 
   cp -f "$all_tmp" "$out_file"
+  rm -f "$game_only_tmp" "$all_tmp"
 }
 
 copy_proton_logs_capped() {
