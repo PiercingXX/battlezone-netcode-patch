@@ -27,86 +27,29 @@ Target values:
 
 ![alt text](resources/iaWY5xDy9t.gif)
 
-### Step 2: Play
+### Step 2: Start Logging
+
+Open PowerShell in the repo folder and run:
+
+```powershell
+.\Microslop\tester_diag.ps1 -Action Start
+```
+
+The script will try to auto-detect the other player's IP from the match traffic.
+
+### Step 3: Play
 
 1. Launch **Battlezone 98 Redux** from Steam
 2. Go to **Multiplayer**
 3. Exit the game
 
-### Step 3: Verify
+### Step 4: Stop Logging And Send Bundle
 
-Open PowerShell in the repo folder and run:
-
-```powershell
-.\Microslop\verify_windows.ps1
-```
-
-**Success = `RESULT: PASS`**
-
-## After Each Stress Test (Send This Back)
-
-After every test run, collect a bundle and send the generated archive file back to the test coordinator.
-
-Windows:
+After the match, run:
 
 ```powershell
-.\Microslop\collect_windows_test_bundle.ps1
+.\Microslop\tester_diag.ps1 -Action Stop
 ```
-
-Bundle output location:
-
-- Windows: `test_bundles/*.zip`
-
-## Deep Diagnostics (Lag + Crash Investigation)
-
-Use this only for bad sessions (heavy lag, desync, crash, freeze). It captures deeper network/system data.
-
-Windows:
-
-```powershell
-.\Microslop\start_deep_diag.ps1
-```
-
-Run your match, then stop and bundle:
-
-```powershell
-.\Microslop\stop_deep_diag.ps1
-```
-
-Linux Native Steam:
-
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/start_deep_diag.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-Run your match, then stop and bundle:
-
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/stop_deep_diag.sh
-```
-
-Linux Snap Steam:
-
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/start_deep_diag.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-Linux Flatpak Steam:
-
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/start_deep_diag.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-Notes:
-
-- Windows `netsh` capture works best in an elevated PowerShell.
-- Windows crash dumps are collected automatically if `procdump.exe` is installed.
-- Linux Proton logs are captured if Steam launch options include `PROTON_LOG=1 %command%`.
-- Deep diagnostics bundles are written under `test_bundles/deep_*`.
 
 ---
 
@@ -145,39 +88,32 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
 
-### Step 4: Play
+### Step 4: Start Logging
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/tester_diag.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+The script will try to auto-detect the other player's IP from the match traffic.
+
+### Step 5: Play
 
 1. Launch **Battlezone 98 Redux** from Steam
 2. Go to **Multiplayer**
 3. Exit the game
 
-### Step 5: Verify
-
-```bash
-cd "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify_net_patch.sh
-```
-
-**Success = `VERIFY RESULT: PASS`**
-
-## After Each Stress Test (Send This Back)
-
-After every test run, collect a bundle and send the generated archive file back to the test coordinator.
-
-Linux Native Steam:
+### Step 6: Stop Logging And Send Bundle
 
 ```bash
 cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/collect_test_bundle.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+./Linux/tester_diag.sh stop
 ```
-Bundle output location:
-
-- Linux: `test_bundles/*.tar.gz`
 
 ---
 
@@ -221,39 +157,32 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
 
-### Step 4: Play
+### Step 4: Start Logging
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/tester_diag.sh start "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+The script will try to auto-detect the other player's IP from the match traffic.
+
+### Step 5: Play
 
 1. Launch **Battlezone 98 Redux** from Steam
 2. Go to **Multiplayer**
 3. Exit the game
 
-### Step 5: Verify
-
-```bash
-cd "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify_net_patch.sh
-```
-
-**Success = `VERIFY RESULT: PASS`**
-
-## After Each Stress Test (Send This Back)
-
-After every test run, collect a bundle and send the generated archive file back to the test coordinator.
-
-Linux Snap Steam:
+### Step 6: Stop Logging And Send Bundle
 
 ```bash
 cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/collect_test_bundle.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+./Linux/tester_diag.sh stop
 ```
-Bundle output location:
-
-- Linux: `test_bundles/*.tar.gz`
 
 ---
 
@@ -297,40 +226,33 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
 
-### Step 4: Play
+### Step 4: Start Logging
+
+```bash
+cd ~/Downloads/battlezone-netcode-patch-master
+./Linux/tester_diag.sh start "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+```
+
+The script will try to auto-detect the other player's IP from the match traffic.
+
+### Step 5: Play
 
 1. Launch **Battlezone 98 Redux** from Steam
 2. Go to **Multiplayer**
 3. Exit the game
 
-### Step 5: Verify
-
-```bash
-cd "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 ~/Downloads/battlezone-netcode-patch-master/Linux/verify_net_patch.sh
-```
-
-**Success = `VERIFY RESULT: PASS`**
-
-
-## After Each Stress Test (Send This Back)
-
-After every test run, collect a bundle and send the generated archive file back to the test coordinator.
-
-Linux Flatpak Steam:
+### Step 6: Stop Logging And Send Bundle
 
 ```bash
 cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/collect_test_bundle.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+./Linux/tester_diag.sh stop
 ```
-Bundle output location:
 
-- Linux: `test_bundles/*.tar.gz`
 
 ---
 
