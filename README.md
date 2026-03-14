@@ -10,6 +10,21 @@ Target values:
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
 
+
+How to use this patch:
+0. Download this patch. Your repo should stay in your Downloads directory.
+1. Ensure patch DLL/proxy is in the game folder (one-time setup). Thats it. 
+(For Testing ONLY) 
+2. Start logging.
+3. Play game.
+4. Exit game.
+5. Stop logging.
+6. Send the generated bundle archive to devs (not the script itself).
+
+Ideally we want to have no more than 3 games logged. 
+
+**IF YOU CRASH, STOP LOGGING AND SEND BUNDLE BEFORE RESTARTING LOGGING AND THEN BATTLEZONE**
+
 ---
 
 ## Windows
