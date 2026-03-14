@@ -1,28 +1,70 @@
-# All the logs (Lag + Crash Investigation)
+# Deep Diagnostics (Lag + Crash Investigation)
 
-The logging captures network/system diagnostics plus game/proxy logs, then builds a bundle to send back.
+Use this for bad sessions only (lag spikes, desync, freeze, CTD/crash).
 
+## Fast Flow
+
+1. Start logging.
+2. Play and exit game.
+3. Stop logging.
+4. Send bundle archive to devs.
+
+Both host and client should log and upload bundles for the same match.
+
+## Windows (Noob Safe Commands)
+
+Open PowerShell as Administrator.
+
+Enable scripts for this PowerShell session:
+
+`Set-ExecutionPolicy -Scope Process Bypass -Force`
+
+Start logging:
+
+`& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Start`
+
+Stop logging:
+
+`& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Stop`
+
+If your extracted folder name is `battlezone-netcode-patch-main`, replace `...-master` in both commands.
+
+## Linux (Any Steam Install)
+
+Start logging:
+
+`./Linux/tester_diag.sh start "/path/to/Battlezone 98 Redux"`
+
+Stop logging:
+
+`./Linux/tester_diag.sh stop`
+
+Native Steam path example:
+
+`./Linux/tester_diag.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"`
+
+Snap Steam path example:
+
+`./Linux/tester_diag.sh start "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"`
+
+Flatpak Steam path example:
+
+`./Linux/tester_diag.sh start "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"`
+
+## What Is Captured
+
+- Game logs and proxy logs.
+- Route/path diagnostics and interface counters.
+- Crash data (Windows dumps when `procdump.exe` is installed).
+- Baseline ping timeline and peer candidate inference from socket metadata.
 
 ## Privacy Scope
 
-- Captures game logs, proxy logs, route/path diagnostics, and interface counters.
 - Does not capture chat logs.
 - Does not capture packet payloads.
-- Proxy environment is captured as enabled/disabled flags only, not proxy credentials.
+- Proxy environment is logged as flags only, not credentials.
 
+## Output Bundles
 
-## Required
-
-I need BOTH host and client logging to ensure this is actually viable and to see what improvements will need to be made. All players need to upload logging bundles, Discord should work for this.
-
-
-## Notes
-
-- Windows `netsh` ETW capture usually requires elevated PowerShell (Run as Administrator).
-- Windows crash dumps are collected automatically if `procdump.exe` is installed.
-- Linux Proton logs are captured when Steam launch options include: `PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`.
-- Bundles are written under `test_bundles/deep_*` as `.zip` (Windows) or `.tar.gz` (Linux).
-- Bundles always include baseline ping timeline data (`ping_timeline.log`).
-- When peer detection succeeds, bundles include `peer_candidates.txt`, `inferred_peer_target.txt` (when inferred), and peer route diagnostics.
-- Linux captures periodic baseline `mtr` timelines when `mtr` is installed, and peer `mtr` timelines when an explicit peer target is provided.
-- Start/end snapshots include route traces, interface counters, queue/congestion snapshots, and network noise profile signals.
+- Windows: `.zip` under `test_bundles/deep_*`
+- Linux: `.tar.gz` under `test_bundles/deep_*`

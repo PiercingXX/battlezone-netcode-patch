@@ -21,17 +21,29 @@ How to use this patch:
 5. Stop logging.
 6. Send the generated bundle archive to devs (not the script itself).
 
-Ideally we want to have no more than 3 games per log. 
-
+Ideally we want to have no more than 3 games logged. 
 
 **IF YOU CRASH, STOP LOGGING AND SEND BUNDLE BEFORE RESTARTING LOGGING AND THEN BATTLEZONE**
 
+## Noob Quick Start (Logging Only)
 
+Windows:
 
-I need BOTH host and client logging to ensure this is actually viable and to see what improvements will need to be made. All players need to upload logging bundles, Discord should work for this.
+1. Open PowerShell as Administrator.
+2. Run: `Set-ExecutionPolicy -Scope Process Bypass -Force`
+3. Start logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Start`
+4. Play and exit game.
+5. Stop logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Stop`
+6. Send the generated `.zip` bundle from `test_bundles`.
 
+Linux (all Steam variants):
 
-
+1. Start logging:
+	`./Linux/tester_diag.sh start "/path/to/Battlezone 98 Redux"`
+2. Play and exit game.
+3. Stop logging:
+	`./Linux/tester_diag.sh stop`
+4. Send the generated `.tar.gz` bundle from `test_bundles`.
 
 ---
 
@@ -52,10 +64,28 @@ I need BOTH host and client logging to ensure this is actually viable and to see
 
 ### Step 2: Start Logging
 
-Open PowerShell in the repo folder and run:
+Open PowerShell as Administrator, then enable scripts for this session:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+```
+
+Then in the repo folder run:
 
 ```powershell
 .\Microslop\tester_diag.ps1 -Action Start
+```
+
+If your prompt is already inside `...\Microslop>`, run this instead:
+
+```powershell
+.\tester_diag.ps1 -Action Start
+```
+
+If you are not in the repo folder, run with full path:
+
+```powershell
+& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Start
 ```
 
 The script will attempt to log any errors including lag and CTD.
@@ -74,11 +104,23 @@ After the match, run:
 .\Microslop\tester_diag.ps1 -Action Stop
 ```
 
+If your prompt is `...\Microslop>`, use:
+
+```powershell
+.\tester_diag.ps1 -Action Stop
+```
+
+If you are not in the repo folder, use:
+
+```powershell
+& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Stop
+```
+
 ---
 
 ## Linux - Native Steam
 
-Use this if you installed Steam natively, IF you installed via Snap or Flatpak, scroll down.
+Use this if you installed Steam natively. If you installed Steam via Snap or Flatpak, use the sections below.
 
 ### Step 1: Install required tools
 

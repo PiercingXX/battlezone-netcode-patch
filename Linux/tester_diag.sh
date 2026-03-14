@@ -22,6 +22,20 @@ Notes:
 EOF
 }
 
+log_step() {
+  echo "[tester_diag] $1"
+}
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@" || true
+  else
+    "$@" || true
+  fi
+}
+
 is_public_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -335,6 +349,7 @@ stop_diag() {
   baseline_target="$(cat "$session_dir/ping_target.txt" 2>/dev/null || true)"
   default_iface="$(grep -E '^default_iface=' "$session_dir/noise_profile_start.txt" 2>/dev/null | cut -d= -f2- || true)"
 
+  log_step "Stopping background collectors"
   stop_pid_file "$session_dir/ping.pid"
   stop_pid_file "$session_dir/peer_ping.pid"
   stop_pid_file "$session_dir/mtr_peer.pid"
@@ -342,6 +357,7 @@ stop_diag() {
   stop_pid_file "$session_dir/netrate.pid"
   stop_pid_file "$session_dir/socket.pid"
 
+  log_step "Capturing end-of-session network snapshot"
   {
     echo "# route"
     ip route 2>/dev/null || true
@@ -350,12 +366,14 @@ stop_diag() {
     ip addr 2>/dev/null || true
   } >"$session_dir/network_end.txt"
 
+  log_step "Inferring likely peer candidates"
   extract_peer_candidates_linux "$session_dir/socket_timeline.log" "$baseline_target" "$session_dir/peer_candidates.txt"
   if [[ -z "$peer_target" && -s "$session_dir/peer_candidates.txt" ]]; then
     peer_target="$(awk 'NR==1 {print $2}' "$session_dir/peer_candidates.txt")"
     echo "$peer_target" >"$session_dir/inferred_peer_target.txt"
   fi
 
+  log_step "Capturing route/interface/queue snapshots"
   [[ -n "$peer_target" ]] && capture_route_snapshot "$peer_target" "$session_dir/route_peer_end.txt"
   [[ -n "$baseline_target" ]] && capture_route_snapshot "$baseline_target" "$session_dir/route_baseline_end.txt"
   capture_interface_stats "$session_dir/interface_stats_end.txt"
@@ -365,6 +383,7 @@ stop_diag() {
     capture_rate_sample "$default_iface" "$session_dir/net_rate_end.txt"
   fi
 
+  log_step "Copying game and proxy logs"
   if [[ -n "$game_root" && -d "$game_root" ]]; then
     local f
     for f in BZLogger.txt dsound_proxy.log winmm_proxy.log multi.ini; do
@@ -372,25 +391,29 @@ stop_diag() {
     done
   fi
 
+  log_step "Collecting Steam Proton logs"
   if [[ -f "$session_dir/start.marker" ]]; then
     while IFS= read -r -d '' log_file; do
       cp -f "$log_file" "$session_dir/$(basename "$log_file")"
     done < <(find "$HOME" -maxdepth 1 -type f -name 'steam-*.log' -newer "$session_dir/start.marker" -print0 2>/dev/null)
   fi
 
+  log_step "Collecting journal snapshot (up to 30s)"
   if command -v journalctl >/dev/null 2>&1; then
     if [[ -n "$start_iso" ]]; then
-      journalctl --since "$start_iso" --no-pager >"$session_dir/journal_since_start.log" 2>/dev/null || true
+      run_with_timeout 30s journalctl --since "$start_iso" --no-pager >"$session_dir/journal_since_start.log" 2>/dev/null || true
     else
-      journalctl -n 2000 --no-pager >"$session_dir/journal_since_start.log" 2>/dev/null || true
+      run_with_timeout 30s journalctl -n 2000 --no-pager >"$session_dir/journal_since_start.log" 2>/dev/null || true
     fi
   fi
 
+  log_step "Collecting coredump metadata (up to 20s each)"
   if command -v coredumpctl >/dev/null 2>&1; then
-    coredumpctl list --no-pager >"$session_dir/coredumps_list.txt" 2>/dev/null || true
-    coredumpctl info --no-pager >"$session_dir/coredumps_info.txt" 2>/dev/null || true
+    run_with_timeout 20s coredumpctl list --no-pager >"$session_dir/coredumps_list.txt" 2>/dev/null || true
+    run_with_timeout 20s coredumpctl info --no-pager >"$session_dir/coredumps_info.txt" 2>/dev/null || true
   fi
 
+  log_step "Running verify snapshot"
   verify_log="$session_dir/verify_output.txt"
   if [[ -n "$game_root" && -d "$game_root" ]]; then
     (
@@ -407,6 +430,7 @@ stop_diag() {
     } >"$verify_log"
   fi
 
+  log_step "Creating bundle archive (this can take a minute)"
   archive_path="${session_dir}.tar.gz"
   tar -czf "$archive_path" -C "$(dirname "$session_dir")" "$(basename "$session_dir")"
 
