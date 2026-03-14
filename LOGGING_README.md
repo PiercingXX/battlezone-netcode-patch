@@ -1,4 +1,4 @@
-# Deep Diagnostics (Lag + Crash Investigation)
+# All the logs (Lag + Crash Investigation)
 
 The logging captures network/system diagnostics plus game/proxy logs, then builds a bundle to send back.
 
