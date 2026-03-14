@@ -45,6 +45,9 @@ Linux (all Steam variants):
 	`./Linux/tester_diag.sh stop`
 4. Send the generated `.tar.gz` bundle from `test_bundles`.
 
+Linux note: Proton logs are copied with a 64 MB cap per log by default. To skip Proton log copy on stop, run:
+`DISABLE_PROTON_LOG_COPY=1 ./Linux/tester_diag.sh stop`
+
 ---
 
 ## Windows

@@ -57,10 +57,41 @@ extract_peer_candidates_linux() {
   local socket_log="$1"
   local baseline_target="$2"
   local out_file="$3"
+  local game_only_tmp
+  local all_tmp
+  game_only_tmp="$(mktemp)"
+  all_tmp="$(mktemp)"
+  trap 'rm -f "$game_only_tmp" "$all_tmp"' RETURN
   if [[ ! -f "$socket_log" ]]; then
     : >"$out_file"
     return
   fi
+
+  # Prefer endpoints tied to Battlezone/wineserver sockets to avoid background app false positives.
+  awk '
+    /Battlezone98Red|wineserver|BZ98R|Battlezone 98 Redux/ {
+      while (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9*]+/)) {
+        token = substr($0, RSTART, RLENGTH)
+        split(token, parts, ":")
+        print parts[1]
+        $0 = substr($0, RSTART + RLENGTH)
+      }
+    }
+  ' "$socket_log" |
+    grep -v -F "$baseline_target" |
+    sort | uniq -c | sort -nr |
+    while read -r count ip; do
+      if is_public_ipv4 "$ip"; then
+        printf '%s %s\n' "$count" "$ip"
+      fi
+    done >"$game_only_tmp"
+
+  if [[ -s "$game_only_tmp" ]]; then
+    cp -f "$game_only_tmp" "$out_file"
+    return
+  fi
+
+  # Fallback: broad scan of all sockets if game-tagged sockets were not captured.
   awk '
     {
       while (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9*]+/)) {
@@ -77,7 +108,55 @@ extract_peer_candidates_linux() {
       if is_public_ipv4 "$ip"; then
         printf '%s %s\n' "$count" "$ip"
       fi
-    done >"$out_file"
+    done >"$all_tmp"
+
+  cp -f "$all_tmp" "$out_file"
+}
+
+copy_proton_logs_capped() {
+  local marker_file="$1"
+  local session_dir="$2"
+  local max_mb="${PROTON_LOG_MAX_MB:-64}"
+  local max_bytes
+  local copied_count=0
+  local truncated_count=0
+  local summary_file="$session_dir/proton_log_capture_summary.txt"
+
+  if [[ "${DISABLE_PROTON_LOG_COPY:-0}" == "1" ]]; then
+    {
+      echo "proton_log_copy=disabled"
+      echo "reason=DISABLE_PROTON_LOG_COPY=1"
+    } >"$summary_file"
+    return
+  fi
+
+  max_bytes=$((max_mb * 1024 * 1024))
+  {
+    echo "proton_log_copy=enabled"
+    echo "max_mb=$max_mb"
+  } >"$summary_file"
+
+  while IFS= read -r -d '' log_file; do
+    local base_name dst_path size_bytes
+    base_name="$(basename "$log_file")"
+    dst_path="$session_dir/$base_name"
+    size_bytes="$(stat -c%s "$log_file" 2>/dev/null || echo 0)"
+
+    if [[ "$size_bytes" -gt "$max_bytes" ]]; then
+      tail -c "$max_bytes" "$log_file" >"$dst_path" 2>/dev/null || cp -f "$log_file" "$dst_path"
+      echo "$base_name truncated_to_mb=$max_mb original_bytes=$size_bytes" >>"$summary_file"
+      truncated_count=$((truncated_count + 1))
+    else
+      cp -f "$log_file" "$dst_path"
+      echo "$base_name copied_full_bytes=$size_bytes" >>"$summary_file"
+    fi
+    copied_count=$((copied_count + 1))
+  done < <(find "$HOME" -maxdepth 1 -type f -name 'steam-*.log' -newer "$marker_file" -print0 2>/dev/null)
+
+  {
+    echo "copied_count=$copied_count"
+    echo "truncated_count=$truncated_count"
+  } >>"$summary_file"
 }
 
 capture_route_snapshot() {
@@ -391,11 +470,9 @@ stop_diag() {
     done
   fi
 
-  log_step "Collecting Steam Proton logs"
+  log_step "Collecting Steam Proton logs (capped, default 64 MB each)"
   if [[ -f "$session_dir/start.marker" ]]; then
-    while IFS= read -r -d '' log_file; do
-      cp -f "$log_file" "$session_dir/$(basename "$log_file")"
-    done < <(find "$HOME" -maxdepth 1 -type f -name 'steam-*.log' -newer "$session_dir/start.marker" -print0 2>/dev/null)
+    copy_proton_logs_capped "$session_dir/start.marker" "$session_dir"
   fi
 
   log_step "Collecting journal snapshot (up to 30s)"

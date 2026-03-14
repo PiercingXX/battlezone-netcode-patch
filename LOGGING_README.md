@@ -57,6 +57,15 @@ Flatpak Steam path example:
 - Route/path diagnostics and interface counters.
 - Crash data (Windows dumps when `procdump.exe` is installed).
 - Baseline ping timeline and peer candidate inference from socket metadata.
+- Linux Proton logs are included but capped to 64 MB per `steam-*.log` by default.
+
+## Proton Log Controls (Linux)
+
+- Keep Proton logging enabled for crash/startup correlation.
+- To reduce bundle size further at stop time:
+	`PROTON_LOG_MAX_MB=16 ./Linux/tester_diag.sh stop`
+- To skip Proton log copy entirely at stop time:
+	`DISABLE_PROTON_LOG_COPY=1 ./Linux/tester_diag.sh stop`
 
 ## Privacy Scope
 
