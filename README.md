@@ -21,7 +21,7 @@ How to use this patch:
 5. Stop logging.
 6. Send the generated bundle archive to devs (not the script itself).
 
-Ideally we want to have no more than 3 games logged. 
+Ideally we want to have no more than 3 games per log. 
 
 
 **IF YOU CRASH, STOP LOGGING AND SEND BUNDLE BEFORE RESTARTING LOGGING AND THEN BATTLEZONE**
