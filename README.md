@@ -23,7 +23,15 @@ How to use this patch:
 
 Ideally we want to have no more than 3 games logged. 
 
+
 **IF YOU CRASH, STOP LOGGING AND SEND BUNDLE BEFORE RESTARTING LOGGING AND THEN BATTLEZONE**
+
+
+
+I need BOTH host and client logging to ensure this is actually viable and to see what improvements will need to be made. All players need to upload logging bundles, Discord should work for this.
+
+
+
 
 ---
 
