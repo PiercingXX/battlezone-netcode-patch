@@ -249,6 +249,68 @@ stop_pid_file() {
   fi
 }
 
+extract_crash_summary() {
+  local session_dir="$1"
+  local out_file="$session_dir/crash_summary.txt"
+  local found=0
+  {
+    echo "# crash_summary"
+    echo "generated=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo
+
+    # Check Steam/Proton logs for Wine crash indicators
+    while IFS= read -r proton_log; do
+      local log_name hit_lines
+      log_name="$(basename "$proton_log")"
+      hit_lines="$(grep -n -E 'Unhandled page fault|EXCEPTION_ACCESS_VIOLATION|wine: Unhandled' "$proton_log" 2>/dev/null | head -5 || true)"
+      if [[ -n "$hit_lines" ]]; then
+        found=$((found + 1))
+        echo "=== WINE CRASH in $log_name ==="
+        echo "$hit_lines"
+        echo
+        local first_line ctx_start ctx_end
+        first_line="$(echo "$hit_lines" | head -1 | cut -d: -f1)"
+        if [[ "$first_line" =~ ^[0-9]+$ ]]; then
+          ctx_start=$(( first_line > 8 ? first_line - 8 : 1 ))
+          ctx_end=$(( first_line + 12 ))
+          echo "--- context lines ${ctx_start}-${ctx_end} ---"
+          sed -n "${ctx_start},${ctx_end}p" "$proton_log" 2>/dev/null || true
+          echo
+        fi
+      fi
+    done < <(find "$session_dir" -maxdepth 1 -type f -name 'steam-*.log' -print 2>/dev/null)
+
+    # Check journal for kernel-level crash signals
+    if [[ -f "$session_dir/journal_since_start.log" ]]; then
+      local journal_hits
+      journal_hits="$(grep -n -i -E 'segfault|fatal signal|killed process|core dumped' "$session_dir/journal_since_start.log" 2>/dev/null | head -20 || true)"
+      if [[ -n "$journal_hits" ]]; then
+        found=$((found + 1))
+        echo "=== KERNEL CRASH SIGNALS in journal ==="
+        echo "$journal_hits"
+        echo
+      fi
+    fi
+
+    # Report the last 5 coredump list entries
+    if [[ -f "$session_dir/coredumps_list.txt" ]]; then
+      local recent_dumps
+      recent_dumps="$(awk 'NR>1' "$session_dir/coredumps_list.txt" | tail -5 || true)"
+      if [[ -n "$recent_dumps" ]]; then
+        echo "=== RECENT COREDUMPS ==="
+        echo "$recent_dumps"
+        echo
+      fi
+    fi
+
+    if [[ "$found" -eq 0 ]]; then
+      echo "no_crash_detected=1"
+    else
+      echo "crash_indicators_found=$found"
+    fi
+  } >"$out_file"
+}
+
 start_diag() {
   local game_root="${1:-$DEFAULT_GAME_ROOT}"
   local baseline_target="${2:-1.1.1.1}"
@@ -491,6 +553,9 @@ stop_diag() {
     run_with_timeout 20s coredumpctl list --no-pager >"$session_dir/coredumps_list.txt" 2>/dev/null || true
     run_with_timeout 20s coredumpctl info --no-pager >"$session_dir/coredumps_info.txt" 2>/dev/null || true
   fi
+
+  log_step "Scanning for crash indicators"
+  extract_crash_summary "$session_dir"
 
   log_step "Running verify snapshot"
   verify_log="$session_dir/verify_output.txt"
