@@ -102,11 +102,12 @@ function Start-Diagnostics {
     $sessionDir = Join-Path $repoRoot "test_bundles\deep_windows_${hostName}_${utcStamp}"
     New-Item -ItemType Directory -Path $sessionDir -Force | Out-Null
 
-    $sessionDir | Out-File -FilePath $currentFile -Encoding utf8
-    $resolvedGamePath | Out-File -FilePath (Join-Path $sessionDir "game_path.txt") -Encoding utf8
-    $PingTarget | Out-File -FilePath (Join-Path $sessionDir "ping_target.txt") -Encoding utf8
-    $PeerPingTarget | Out-File -FilePath (Join-Path $sessionDir "peer_ping_target.txt") -Encoding utf8
-    $startIso | Out-File -FilePath (Join-Path $sessionDir "start_utc.txt") -Encoding utf8
+    try {
+        $sessionDir | Out-File -FilePath $currentFile -Encoding utf8
+        $resolvedGamePath | Out-File -FilePath (Join-Path $sessionDir "game_path.txt") -Encoding utf8
+        $PingTarget | Out-File -FilePath (Join-Path $sessionDir "ping_target.txt") -Encoding utf8
+        $PeerPingTarget | Out-File -FilePath (Join-Path $sessionDir "peer_ping_target.txt") -Encoding utf8
+        $startIso | Out-File -FilePath (Join-Path $sessionDir "start_utc.txt") -Encoding utf8
 
     $sessionInfo = @(
         "start_utc=$startIso",
@@ -140,9 +141,9 @@ function Start-Diagnostics {
         Format-Table -AutoSize | Out-File -FilePath (Join-Path $sessionDir "adapter_stats_start.txt") -Encoding utf8
 
     $proxyInfo = (netsh winhttp show proxy) -join "`n"
-    $vpnAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+    $vpnAdapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
         $_.Status -eq "Up" -and ($_.Name -match "vpn|tun|tap|wireguard" -or $_.InterfaceDescription -match "vpn|tun|tap|wireguard")
-    }
+    })
     @(
         "proxy_winhttp_set=$([int](-not ($proxyInfo -match 'Direct access \(no proxy server\)')))",
         "vpn_adapter_up_count=$($vpnAdapters.Count)",
@@ -229,15 +230,25 @@ while (`$true) {
         gameExeName = $GameExeName
     } | ConvertTo-Json | Out-File -FilePath (Join-Path $sessionDir "state.json") -Encoding utf8
 
-    Write-Host "Deep diagnostics started."
-    Write-Host "Session dir: $sessionDir"
-    Write-Host "Baseline ping target: $PingTarget"
-    Write-Host "Peer ping target: $(if ($PeerPingTarget) { $PeerPingTarget } else { 'auto-detect' })"
-    Write-Host ""
-    Write-Host "Next:"
-    Write-Host "1) Run your test match."
-    Write-Host "2) Optional marker during lag spike: .\Microslop\tester_diag.ps1 -Action Mark -Message \"lag spike during combat\""
-    Write-Host "3) Run .\Microslop\tester_diag.ps1 -Action Stop"
+        Write-Host "Deep diagnostics started."
+        Write-Host "Session dir: $sessionDir"
+        Write-Host "Baseline ping target: $PingTarget"
+        Write-Host "Peer ping target: $(if ($PeerPingTarget) { $PeerPingTarget } else { 'auto-detect' })"
+        Write-Host ""
+        Write-Host "Next:"
+        Write-Host "1) Run your test match."
+        Write-Host "2) Optional marker during lag spike: .\Microslop\tester_diag.ps1 -Action Mark -Message \"lag spike during combat\""
+        Write-Host "3) Run .\Microslop\tester_diag.ps1 -Action Stop"
+    } catch {
+        Write-Host "ERROR: failed to start diagnostics: $($_.Exception.Message)" -ForegroundColor Red
+        if (Test-Path $currentFile) {
+            Remove-Item -Force $currentFile -ErrorAction SilentlyContinue
+        }
+        if ($sessionDir -and (Test-Path $sessionDir)) {
+            Remove-Item -Recurse -Force $sessionDir -ErrorAction SilentlyContinue
+        }
+        exit 1
+    }
 }
 
 function Stop-Diagnostics {
@@ -298,9 +309,9 @@ function Stop-Diagnostics {
         Format-Table -AutoSize | Out-File -FilePath (Join-Path $sessionDir "adapter_stats_end.txt") -Encoding utf8
 
     $proxyInfo = (netsh winhttp show proxy) -join "`n"
-    $vpnAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
+    $vpnAdapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
         $_.Status -eq "Up" -and ($_.Name -match "vpn|tun|tap|wireguard" -or $_.InterfaceDescription -match "vpn|tun|tap|wireguard")
-    }
+    })
     @(
         "proxy_winhttp_set=$([int](-not ($proxyInfo -match 'Direct access \(no proxy server\)')))",
         "vpn_adapter_up_count=$($vpnAdapters.Count)",
