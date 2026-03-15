@@ -1,0 +1,190 @@
+; winmm.def
+; Battlezone 98 Redux - Windows netcode patch
+;
+; Module definition for our winmm.dll proxy.
+; All exports are implemented in winmm_proxy.cpp except timeGetTime which
+; is aliased to timeGetTime_fwd to avoid a macro collision in MinGW headers.
+
+LIBRARY winmm
+
+EXPORTS
+    CloseDriver
+    DefDriverProc
+    DriverCallback
+    DrvGetModuleHandle
+    GetDriverModuleHandle
+    NotifyCallbackData
+    OpenDriver
+    PlaySoundA
+    PlaySoundW
+    SendDriverMessage
+    mmsystemGetVersion
+    sndPlaySoundA
+    sndPlaySoundW
+
+    timeBeginPeriod
+    timeEndPeriod
+    timeGetDevCaps
+    timeGetSystemTime
+    timeGetTime   = timeGetTime_fwd
+    timeKillEvent
+    timeSetEvent
+
+    waveOutOpen
+    waveOutClose
+    waveOutWrite
+    waveOutPause
+    waveOutRestart
+    waveOutReset
+    waveOutBreakLoop
+    waveOutPrepareHeader
+    waveOutUnprepareHeader
+    waveOutGetPosition
+    waveOutGetPitch
+    waveOutSetPitch
+    waveOutGetPlaybackRate
+    waveOutSetPlaybackRate
+    waveOutGetVolume
+    waveOutSetVolume
+    waveOutGetErrorTextA
+    waveOutGetErrorTextW
+    waveOutGetNumDevs
+    waveOutGetDevCapsA
+    waveOutGetDevCapsW
+    waveOutGetID
+    waveOutMessage
+
+    waveInOpen
+    waveInClose
+    waveInAddBuffer
+    waveInStart
+    waveInStop
+    waveInReset
+    waveInPrepareHeader
+    waveInUnprepareHeader
+    waveInGetPosition
+    waveInGetErrorTextA
+    waveInGetErrorTextW
+    waveInGetNumDevs
+    waveInGetDevCapsA
+    waveInGetDevCapsW
+    waveInGetID
+    waveInMessage
+
+    midiOutOpen
+    midiOutClose
+    midiOutShortMsg
+    midiOutLongMsg
+    midiOutPrepareHeader
+    midiOutUnprepareHeader
+    midiOutReset
+    midiOutGetVolume
+    midiOutSetVolume
+    midiOutCacheDrumPatches
+    midiOutCachePatches
+    midiOutGetErrorTextA
+    midiOutGetErrorTextW
+    midiOutGetNumDevs
+    midiOutGetDevCapsA
+    midiOutGetDevCapsW
+    midiOutGetID
+    midiOutMessage
+
+    midiInOpen
+    midiInClose
+    midiInAddBuffer
+    midiInStart
+    midiInStop
+    midiInReset
+    midiInPrepareHeader
+    midiInUnprepareHeader
+    midiInGetErrorTextA
+    midiInGetErrorTextW
+    midiInGetNumDevs
+    midiInGetDevCapsA
+    midiInGetDevCapsW
+    midiInGetID
+    midiInMessage
+    midiConnect
+    midiDisconnect
+
+    midiStreamOpen
+    midiStreamClose
+    midiStreamOut
+    midiStreamPause
+    midiStreamPosition
+    midiStreamProperty
+    midiStreamRestart
+    midiStreamStop
+
+    mciSendCommandA
+    mciSendCommandW
+    mciSendStringA
+    mciSendStringW
+    mciGetErrorStringA
+    mciGetErrorStringW
+    mciSetYieldProc
+    mciGetCreatorTask
+    mciGetYieldProc
+    mciExecute
+    mciGetDeviceIDA
+    mciGetDeviceIDW
+    mciGetDeviceIDFromElementIDA
+    mciGetDeviceIDFromElementIDW
+    mciGetDriverData
+    mciSetDriverData
+
+    auxGetNumDevs
+    auxGetDevCapsA
+    auxGetDevCapsW
+    auxGetVolume
+    auxSetVolume
+    auxOutMessage
+
+    mixerGetNumDevs
+    mixerOpen
+    mixerClose
+    mixerMessage
+    mixerGetDevCapsA
+    mixerGetDevCapsW
+    mixerGetID
+    mixerGetLineInfoA
+    mixerGetLineInfoW
+    mixerGetLineControlsA
+    mixerGetLineControlsW
+    mixerGetControlDetailsA
+    mixerGetControlDetailsW
+    mixerSetControlDetails
+
+    joyGetDevCapsA
+    joyGetDevCapsW
+    joyGetNumDevs
+    joyGetPos
+    joyGetPosEx
+    joyGetThreshold
+    joyReleaseCapture
+    joySetCapture
+    joySetThreshold
+    joyConfigChanged
+
+    mmioOpenA
+    mmioOpenW
+    mmioClose
+    mmioRead
+    mmioWrite
+    mmioSeek
+    mmioGetInfo
+    mmioSetInfo
+    mmioSetBuffer
+    mmioFlush
+    mmioAdvance
+    mmioDescend
+    mmioAscend
+    mmioCreateChunk
+    mmioRenameA
+    mmioRenameW
+    mmioSendMessage
+    mmioInstallIOProcA
+    mmioInstallIOProcW
+    mmioStringToFOURCCA
+    mmioStringToFOURCCW
