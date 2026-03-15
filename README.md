@@ -10,8 +10,6 @@ Target values:
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
 
-For logging instructions, see [logging_readme.md](logging_readme.md).
-
 ---
 
 ## Windows
