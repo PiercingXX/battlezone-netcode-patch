@@ -34,7 +34,7 @@ Windows:
 Linux (all Steam variants):
 
 1. Start buffer logging:
-    `cd ~/Downloads/battlezone-netcode-patch-master && ./buffer-logging/buffer_logger_linux.sh start "/path/to/Battlezone 98 Redux"`
+    `cd ~/Downloads/battlezone-netcode-patch-master && ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"`
 2. Open the generated `launch_options.txt` file in the new `test_bundles/buffer_linux_*` folder.
 3. Copy the launch option line into Steam.
 4. Play and exit game.
@@ -71,6 +71,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 Then in the repo folder run:
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start
 ```
 
@@ -96,6 +97,7 @@ Open the generated `launch_options.txt` file and copy the single line inside it 
 ### Step 4: Stop Buffer Logging And Send Bundle
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Stop
 ```
 
@@ -426,18 +428,21 @@ The goal of phase 1 is evidence collection only.
 Use:
 
 ```bash
-./buffer-logging/buffer_logger_linux.sh start
+cd ~/Downloads/battlezone-netcode-patch-master
+./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Optional explicit form:
 
 ```bash
+cd ~/Downloads/battlezone-netcode-patch-master
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536
 ```
 
 Optional peer-targeted form:
 
 ```bash
+cd ~/Downloads/battlezone-netcode-patch-master
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536 "73.200.253.44:37218"
 ```
 
@@ -488,6 +493,7 @@ If `BZ_BUFFER_LOG` is not set, packet logging should stay off.
 After the match ends, run:
 
 ```bash
+cd ~/Downloads/battlezone-netcode-patch-master
 ./buffer-logging/buffer_logger_linux.sh stop
 ```
 
@@ -523,18 +529,21 @@ The metadata file should be tiny and contain:
 Use:
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start
 ```
 
 Optional explicit form:
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start -GamePath "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux" -PayloadBytes 32 -RingRecords 65536
 ```
 
 Optional peer-targeted form:
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start -PeerFilter "73.200.253.44:37218"
 ```
 
@@ -579,6 +588,7 @@ These should be read once at startup.
 After the match ends, run:
 
 ```powershell
+cd "$HOME\Downloads\battlezone-netcode-patch-master"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Stop
 ```
 
