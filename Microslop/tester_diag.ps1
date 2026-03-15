@@ -193,11 +193,11 @@ while (`$true) {
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($netstatScript))
     $netstatProc = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-EncodedCommand", $encoded) -WindowStyle Hidden -PassThru
 
-    $procdumpCandidates = @(
+    $procdumpCandidates = @(@(
         (Get-Command procdump.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }),
         "C:\Program Files\Sysinternals\procdump.exe",
         "C:\Sysinternals\procdump.exe"
-    ) | Where-Object { $_ -and (Test-Path $_) }
+    ) | Where-Object { $_ -and (Test-Path $_) })
     $procdumpProc = $null
     $dumpDir = Join-Path $sessionDir "dumps"
     New-Item -ItemType Directory -Path $dumpDir -Force | Out-Null
