@@ -6,12 +6,21 @@
 #include <cstdarg>
 #include <cstring>
 #include <cwchar>
+#include <cstdint>
+#include <cstdlib>
+#include <cctype>
 
 namespace {
 
 constexpr wchar_t kLogFileName[] = L"dsound_proxy.log";
 wchar_t g_log_path[MAX_PATH] = L"dsound_proxy.log";
 bool g_log_path_ready = false;
+
+constexpr wchar_t kBufferBinName[] = L"bz_buffer_log.bin";
+constexpr wchar_t kBufferMetaName[] = L"bz_buffer_log.meta.txt";
+wchar_t g_buffer_bin_path[MAX_PATH] = L"bz_buffer_log.bin";
+wchar_t g_buffer_meta_path[MAX_PATH] = L"bz_buffer_log.meta.txt";
+bool g_buffer_paths_ready = false;
 
 constexpr int kSendBuf = 524288;
 constexpr int kRecvBuf = 4194304;
@@ -42,6 +51,65 @@ bool g_logged_real_wsaget = false;
 bool g_logged_real_socket = false;
 bool g_logged_real_wsasocketw = false;
 bool g_logged_real_closesocket = false;
+bool g_logged_real_recvfrom = false;
+bool g_logged_real_wsarecvfrom = false;
+bool g_logged_real_ioctlsocket = false;
+bool g_logged_real_wsaioctl = false;
+
+using RecvFromFn = int(WSAAPI *)(SOCKET, char *, int, int, sockaddr *, int *);
+RecvFromFn g_real_recvfrom = nullptr;
+using WSARecvFromFn = int(WSAAPI *)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD, sockaddr *, LPINT, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+WSARecvFromFn g_real_wsarecvfrom = nullptr;
+using IoctlSocketFn = int(WSAAPI *)(SOCKET, long, u_long *);
+IoctlSocketFn g_real_ioctlsocket = nullptr;
+using WSAIoctlFn = int(WSAAPI *)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+WSAIoctlFn g_real_wsaioclt = nullptr;
+
+constexpr uint32_t kBufferLogVersion = 1;
+constexpr uint32_t kBufferLogMagic = 0x474c5a42; // 'BZLG'
+constexpr uint32_t kEventTypeRecvFrom = 1;
+constexpr uint32_t kEventTypeWSARecvFrom = 2;
+constexpr uint32_t kEventTypeIoctlSocket = 3;
+constexpr uint32_t kEventTypeWSAIoctl = 4;
+
+constexpr uint32_t kDefaultPayloadBytes = 32;
+constexpr uint32_t kDefaultRingRecords = 65536;
+constexpr uint32_t kMinPayloadBytes = 8;
+constexpr uint32_t kMaxPayloadBytes = 256;
+constexpr uint32_t kMinRingRecords = 1024;
+constexpr uint32_t kMaxRingRecords = 1000000;
+
+#pragma pack(push, 1)
+struct BufferLogRecordHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t event_type;
+    uint32_t sid;
+    uint64_t tick_ms;
+    uint32_t sequence;
+    uint32_t requested_len;
+    uint32_t transferred_len;
+    uint32_t wsa_error;
+    uint32_t src_ipv4;
+    uint16_t src_port;
+    uint16_t flags;
+    uint16_t payload_len;
+    uint16_t reserved;
+};
+#pragma pack(pop)
+
+CRITICAL_SECTION g_buffer_lock = {};
+bool g_buffer_lock_ready = false;
+bool g_buffer_log_initialized = false;
+bool g_buffer_log_enabled = false;
+uint32_t g_buffer_payload_bytes = kDefaultPayloadBytes;
+uint32_t g_buffer_ring_records = kDefaultRingRecords;
+uint32_t g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + kDefaultPayloadBytes);
+uint32_t g_buffer_head = 0;
+uint32_t g_buffer_count = 0;
+uint32_t g_buffer_sequence = 0;
+uint64_t g_buffer_total_events = 0;
+uint8_t *g_buffer_ring = nullptr;
 
 constexpr int kSocketTrackCap = 256;
 struct SocketTrack {
@@ -54,6 +122,227 @@ CRITICAL_SECTION g_track_lock = {};
 bool g_track_lock_ready = false;
 
 void log_line(const char *fmt, ...);
+int get_socket_id(SOCKET s, bool create_if_missing);
+
+bool env_truthy(const char *s) {
+    if (s == nullptr || *s == '\0') {
+        return false;
+    }
+    if (std::strcmp(s, "1") == 0) {
+        return true;
+    }
+    char lower[16] = {0};
+    size_t n = std::strlen(s);
+    if (n >= sizeof(lower)) {
+        n = sizeof(lower) - 1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(s[i])));
+    }
+    lower[n] = '\0';
+    return std::strcmp(lower, "true") == 0 || std::strcmp(lower, "yes") == 0 || std::strcmp(lower, "on") == 0;
+}
+
+uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+uint32_t parse_env_u32(const char *name, uint32_t fallback) {
+    const char *v = std::getenv(name);
+    if (v == nullptr || *v == '\0') {
+        return fallback;
+    }
+    char *end = nullptr;
+    unsigned long parsed = std::strtoul(v, &end, 10);
+    if (end == nullptr || *end != '\0') {
+        return fallback;
+    }
+    if (parsed > 0xffffffffUL) {
+        return fallback;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
+void init_buffer_paths() {
+    if (g_buffer_paths_ready) {
+        return;
+    }
+
+    wchar_t exe_path[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        g_buffer_paths_ready = true;
+        return;
+    }
+
+    wchar_t *sep = wcsrchr(exe_path, L'\\');
+    if (sep == nullptr) {
+        sep = wcsrchr(exe_path, L'/');
+    }
+    if (sep != nullptr) {
+        *(sep + 1) = L'\0';
+    } else {
+        exe_path[0] = L'\0';
+    }
+
+    g_buffer_bin_path[0] = L'\0';
+    if (lstrlenW(exe_path) + lstrlenW(kBufferBinName) + 1 < MAX_PATH) {
+        lstrcpyW(g_buffer_bin_path, exe_path);
+    }
+    lstrcatW(g_buffer_bin_path, kBufferBinName);
+
+    g_buffer_meta_path[0] = L'\0';
+    if (lstrlenW(exe_path) + lstrlenW(kBufferMetaName) + 1 < MAX_PATH) {
+        lstrcpyW(g_buffer_meta_path, exe_path);
+    }
+    lstrcatW(g_buffer_meta_path, kBufferMetaName);
+
+    g_buffer_paths_ready = true;
+}
+
+void init_buffer_log_if_needed() {
+    if (g_buffer_log_initialized) {
+        return;
+    }
+    g_buffer_log_initialized = true;
+    init_buffer_paths();
+
+    const char *enabled = std::getenv("BZ_BUFFER_LOG");
+    if (!env_truthy(enabled)) {
+        log_line("buffer_log: disabled (set BZ_BUFFER_LOG=1 to enable)");
+        return;
+    }
+
+    g_buffer_payload_bytes = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_BYTES", kDefaultPayloadBytes), kMinPayloadBytes, kMaxPayloadBytes);
+    g_buffer_ring_records = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_RING", kDefaultRingRecords), kMinRingRecords, kMaxRingRecords);
+    g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + g_buffer_payload_bytes);
+
+    size_t total = static_cast<size_t>(g_buffer_stride) * static_cast<size_t>(g_buffer_ring_records);
+    g_buffer_ring = reinterpret_cast<uint8_t *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total));
+    if (g_buffer_ring == nullptr) {
+        log_line("buffer_log: allocation failed bytes=%lu", static_cast<unsigned long>(total));
+        return;
+    }
+
+    g_buffer_log_enabled = true;
+    log_line("buffer_log: enabled payload=%u ring=%u stride=%u", g_buffer_payload_bytes, g_buffer_ring_records, g_buffer_stride);
+}
+
+void buffer_log_event(uint32_t event_type,
+                      SOCKET s,
+                      const sockaddr *src,
+                      uint16_t flags,
+                      uint32_t requested_len,
+                      uint32_t transferred_len,
+                      uint32_t wsa_error,
+                      const uint8_t *payload,
+                      uint16_t payload_len) {
+    if (!g_buffer_log_enabled || !g_buffer_lock_ready || g_buffer_ring == nullptr) {
+        return;
+    }
+
+    if (payload_len > g_buffer_payload_bytes) {
+        payload_len = static_cast<uint16_t>(g_buffer_payload_bytes);
+    }
+
+    uint32_t src_ipv4 = 0;
+    uint16_t src_port = 0;
+    if (src != nullptr && src->sa_family == AF_INET) {
+        const sockaddr_in *in = reinterpret_cast<const sockaddr_in *>(src);
+        src_ipv4 = static_cast<uint32_t>(in->sin_addr.S_un.S_addr);
+        src_port = ntohs(in->sin_port);
+    }
+
+    int sid = get_socket_id(s, true);
+    if (sid < 0) {
+        sid = 0;
+    }
+
+    EnterCriticalSection(&g_buffer_lock);
+    uint32_t idx = g_buffer_head;
+    uint8_t *slot = g_buffer_ring + (static_cast<size_t>(idx) * static_cast<size_t>(g_buffer_stride));
+
+    BufferLogRecordHeader rec = {};
+    rec.magic = kBufferLogMagic;
+    rec.version = kBufferLogVersion;
+    rec.event_type = event_type;
+    rec.sid = static_cast<uint32_t>(sid);
+    rec.tick_ms = GetTickCount64();
+    rec.sequence = g_buffer_sequence++;
+    rec.requested_len = requested_len;
+    rec.transferred_len = transferred_len;
+    rec.wsa_error = wsa_error;
+    rec.src_ipv4 = src_ipv4;
+    rec.src_port = src_port;
+    rec.flags = flags;
+    rec.payload_len = payload_len;
+    std::memcpy(slot, &rec, sizeof(rec));
+
+    uint8_t *payload_dst = slot + sizeof(rec);
+    if (payload_len > 0 && payload != nullptr) {
+        std::memcpy(payload_dst, payload, payload_len);
+    }
+    if (payload_len < g_buffer_payload_bytes) {
+        std::memset(payload_dst + payload_len, 0, g_buffer_payload_bytes - payload_len);
+    }
+
+    g_buffer_head = (g_buffer_head + 1) % g_buffer_ring_records;
+    if (g_buffer_count < g_buffer_ring_records) {
+        ++g_buffer_count;
+    }
+    ++g_buffer_total_events;
+    LeaveCriticalSection(&g_buffer_lock);
+}
+
+void flush_buffer_log_files() {
+    if (!g_buffer_log_enabled || g_buffer_ring == nullptr) {
+        return;
+    }
+
+    init_buffer_paths();
+
+    HANDLE bin = CreateFileW(g_buffer_bin_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (bin != INVALID_HANDLE_VALUE) {
+        EnterCriticalSection(&g_buffer_lock);
+        uint32_t count = g_buffer_count;
+        uint32_t start = (g_buffer_head + g_buffer_ring_records - g_buffer_count) % g_buffer_ring_records;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t idx = (start + i) % g_buffer_ring_records;
+            const uint8_t *slot = g_buffer_ring + (static_cast<size_t>(idx) * static_cast<size_t>(g_buffer_stride));
+            DWORD written = 0;
+            WriteFile(bin, slot, g_buffer_stride, &written, nullptr);
+        }
+        LeaveCriticalSection(&g_buffer_lock);
+        CloseHandle(bin);
+    }
+
+    HANDLE meta = CreateFileW(g_buffer_meta_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (meta != INVALID_HANDLE_VALUE) {
+        char text[1024] = {0};
+        int n = std::snprintf(text,
+                              sizeof(text),
+                              "format=buffer_log_v1\\r\\nrecord_header_size=%u\\r\\npayload_bytes=%u\\r\\nrecord_stride=%u\\r\\nring_records=%u\\r\\nrecords_written=%u\\r\\ntotal_events_seen=%llu\\r\\n",
+                              static_cast<unsigned>(sizeof(BufferLogRecordHeader)),
+                              static_cast<unsigned>(g_buffer_payload_bytes),
+                              static_cast<unsigned>(g_buffer_stride),
+                              static_cast<unsigned>(g_buffer_ring_records),
+                              static_cast<unsigned>(g_buffer_count),
+                              static_cast<unsigned long long>(g_buffer_total_events));
+        if (n > 0) {
+            DWORD written = 0;
+            WriteFile(meta, text, static_cast<DWORD>(n), &written, nullptr);
+        }
+        CloseHandle(meta);
+    }
+
+    log_line("buffer_log: flushed records=%u total_events=%llu", static_cast<unsigned>(g_buffer_count), static_cast<unsigned long long>(g_buffer_total_events));
+}
 
 void init_log_path() {
     if (g_log_path_ready) {
@@ -381,6 +670,161 @@ int WSAAPI hooked_closesocket(SOCKET s) {
     return rc;
 }
 
+int WSAAPI hooked_recvfrom(SOCKET s, char *buf, int len, int flags, sockaddr *from, int *fromlen) {
+    if (g_real_recvfrom == nullptr) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_real_recvfrom(s, buf, len, flags, from, fromlen);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    if (g_buffer_log_enabled) {
+        uint32_t transferred = (rc == SOCKET_ERROR || rc < 0) ? 0u : static_cast<uint32_t>(rc);
+        uint16_t payload_len = static_cast<uint16_t>((transferred < g_buffer_payload_bytes) ? transferred : g_buffer_payload_bytes);
+        const uint8_t *payload = (payload_len > 0 && buf != nullptr) ? reinterpret_cast<const uint8_t *>(buf) : nullptr;
+        buffer_log_event(kEventTypeRecvFrom,
+                         s,
+                         from,
+                         static_cast<uint16_t>(flags),
+                         (len > 0) ? static_cast<uint32_t>(len) : 0u,
+                         transferred,
+                         (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
+                         payload,
+                         payload_len);
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
+int WSAAPI hooked_WSARecvFrom(SOCKET s,
+                              LPWSABUF buffers,
+                              DWORD buffer_count,
+                              LPDWORD bytes_received,
+                              LPDWORD inout_flags,
+                              sockaddr *from,
+                              LPINT fromlen,
+                              LPWSAOVERLAPPED overlapped,
+                              LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+    if (g_real_wsarecvfrom == nullptr) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_real_wsarecvfrom(s, buffers, buffer_count, bytes_received, inout_flags, from, fromlen, overlapped, completion_routine);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    if (g_buffer_log_enabled) {
+        uint32_t requested = 0;
+        for (DWORD i = 0; i < buffer_count; ++i) {
+            requested += buffers[i].len;
+        }
+
+        uint32_t transferred = 0;
+        if (rc == 0 && bytes_received != nullptr) {
+            transferred = *bytes_received;
+        }
+
+        uint16_t recv_flags = 0;
+        if (inout_flags != nullptr) {
+            recv_flags = static_cast<uint16_t>(*inout_flags & 0xffffUL);
+        }
+
+        uint16_t payload_len = static_cast<uint16_t>((transferred < g_buffer_payload_bytes) ? transferred : g_buffer_payload_bytes);
+        const uint8_t *payload = nullptr;
+        if (payload_len > 0 && buffer_count > 0 && buffers != nullptr && buffers[0].buf != nullptr) {
+            payload = reinterpret_cast<const uint8_t *>(buffers[0].buf);
+        }
+
+        buffer_log_event(kEventTypeWSARecvFrom,
+                         s,
+                         from,
+                         recv_flags,
+                         requested,
+                         transferred,
+                         (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
+                         payload,
+                         payload_len);
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
+int WSAAPI hooked_ioctlsocket(SOCKET s, long cmd, u_long *argp) {
+    if (g_real_ioctlsocket == nullptr) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_real_ioctlsocket(s, cmd, argp);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    if (g_buffer_log_enabled && cmd == static_cast<long>(FIONBIO)) {
+        uint32_t mode = (argp != nullptr) ? static_cast<uint32_t>(*argp) : 0u;
+        uint16_t flags = static_cast<uint16_t>((mode & 1u) ? 1u : 0u);
+        buffer_log_event(kEventTypeIoctlSocket,
+                         s,
+                         nullptr,
+                         flags,
+                         static_cast<uint32_t>(cmd),
+                         mode,
+                         (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
+                         nullptr,
+                         0);
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
+int WSAAPI hooked_WSAIoctl(SOCKET s,
+                           DWORD control_code,
+                           LPVOID in_buffer,
+                           DWORD in_buffer_len,
+                           LPVOID out_buffer,
+                           DWORD out_buffer_len,
+                           LPDWORD bytes_returned,
+                           LPWSAOVERLAPPED overlapped,
+                           LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+    if (g_real_wsaioclt == nullptr) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_real_wsaioclt(s,
+                             control_code,
+                             in_buffer,
+                             in_buffer_len,
+                             out_buffer,
+                             out_buffer_len,
+                             bytes_returned,
+                             overlapped,
+                             completion_routine);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    if (g_buffer_log_enabled && control_code == static_cast<DWORD>(FIONBIO)) {
+        uint32_t mode = 0;
+        if (in_buffer != nullptr && in_buffer_len >= sizeof(u_long)) {
+            mode = static_cast<uint32_t>(*reinterpret_cast<u_long *>(in_buffer));
+        }
+        uint16_t flags = static_cast<uint16_t>((mode & 1u) ? 1u : 0u);
+        buffer_log_event(kEventTypeWSAIoctl,
+                         s,
+                         nullptr,
+                         flags,
+                         control_code,
+                         mode,
+                         (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
+                         nullptr,
+                         0);
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
 FARPROC WINAPI hooked_GetProcAddress(HMODULE module, LPCSTR proc_name) {
     if (g_real_getprocaddress == nullptr) {
         return nullptr;
@@ -441,6 +885,30 @@ FARPROC WINAPI hooked_GetProcAddress(HMODULE module, LPCSTR proc_name) {
         return reinterpret_cast<FARPROC>(&hooked_closesocket);
     }
 
+    if (_stricmp(proc_name, "recvfrom") == 0 || std::strcmp(proc_name, "_recvfrom@24") == 0) {
+        g_real_recvfrom = reinterpret_cast<RecvFromFn>(real);
+        log_line("hooked_GetProcAddress: redirecting %s real=%p hook=%p", proc_name, reinterpret_cast<void *>(real), reinterpret_cast<void *>(&hooked_recvfrom));
+        return reinterpret_cast<FARPROC>(&hooked_recvfrom);
+    }
+
+    if (_stricmp(proc_name, "WSARecvFrom") == 0 || std::strcmp(proc_name, "_WSARecvFrom@36") == 0) {
+        g_real_wsarecvfrom = reinterpret_cast<WSARecvFromFn>(real);
+        log_line("hooked_GetProcAddress: redirecting %s real=%p hook=%p", proc_name, reinterpret_cast<void *>(real), reinterpret_cast<void *>(&hooked_WSARecvFrom));
+        return reinterpret_cast<FARPROC>(&hooked_WSARecvFrom);
+    }
+
+    if (_stricmp(proc_name, "ioctlsocket") == 0 || std::strcmp(proc_name, "_ioctlsocket@12") == 0) {
+        g_real_ioctlsocket = reinterpret_cast<IoctlSocketFn>(real);
+        log_line("hooked_GetProcAddress: redirecting %s real=%p hook=%p", proc_name, reinterpret_cast<void *>(real), reinterpret_cast<void *>(&hooked_ioctlsocket));
+        return reinterpret_cast<FARPROC>(&hooked_ioctlsocket);
+    }
+
+    if (_stricmp(proc_name, "WSAIoctl") == 0 || std::strcmp(proc_name, "_WSAIoctl@36") == 0) {
+        g_real_wsaioclt = reinterpret_cast<WSAIoctlFn>(real);
+        log_line("hooked_GetProcAddress: redirecting %s real=%p hook=%p", proc_name, reinterpret_cast<void *>(real), reinterpret_cast<void *>(&hooked_WSAIoctl));
+        return reinterpret_cast<FARPROC>(&hooked_WSAIoctl);
+    }
+
     return real;
 }
 
@@ -456,7 +924,7 @@ bool patch_iat_slot(void **slot, void *replacement) {
 }
 
 void patch_module_ws2_iat_by_pointer(BYTE *base) {
-    if (base == nullptr || (g_real_setsockopt == nullptr && g_real_wsasetsocketoption == nullptr && g_real_getsockopt == nullptr && g_real_wsagetsocketoption == nullptr && g_real_socket == nullptr && g_real_wsasocketw == nullptr && g_real_closesocket == nullptr)) {
+    if (base == nullptr || (g_real_setsockopt == nullptr && g_real_wsasetsocketoption == nullptr && g_real_getsockopt == nullptr && g_real_wsagetsocketoption == nullptr && g_real_socket == nullptr && g_real_wsasocketw == nullptr && g_real_closesocket == nullptr && g_real_recvfrom == nullptr && g_real_wsarecvfrom == nullptr && g_real_ioctlsocket == nullptr && g_real_wsaioclt == nullptr)) {
         return;
     }
 
@@ -517,6 +985,26 @@ void patch_module_ws2_iat_by_pointer(BYTE *base) {
             }
             if (g_real_closesocket != nullptr && *slot == reinterpret_cast<void *>(g_real_closesocket)) {
                 if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_closesocket))) {
+                    ++patched_count;
+                }
+            }
+            if (g_real_recvfrom != nullptr && *slot == reinterpret_cast<void *>(g_real_recvfrom)) {
+                if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_recvfrom))) {
+                    ++patched_count;
+                }
+            }
+            if (g_real_wsarecvfrom != nullptr && *slot == reinterpret_cast<void *>(g_real_wsarecvfrom)) {
+                if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_WSARecvFrom))) {
+                    ++patched_count;
+                }
+            }
+            if (g_real_ioctlsocket != nullptr && *slot == reinterpret_cast<void *>(g_real_ioctlsocket)) {
+                if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_ioctlsocket))) {
+                    ++patched_count;
+                }
+            }
+            if (g_real_wsaioclt != nullptr && *slot == reinterpret_cast<void *>(g_real_wsaioclt)) {
+                if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_WSAIoctl))) {
                     ++patched_count;
                 }
             }
@@ -666,7 +1154,11 @@ bool hook_setsockopt_iat() {
     FARPROC real_socket = getproc(ws2, "socket");
     FARPROC real_wsasocketw = getproc(ws2, "WSASocketW");
     FARPROC real_closesocket = getproc(ws2, "closesocket");
-    if (real_setsockopt == nullptr && real_wsaset == nullptr && real_getsockopt == nullptr && real_wsaget == nullptr && real_socket == nullptr && real_wsasocketw == nullptr && real_closesocket == nullptr) {
+    FARPROC real_recvfrom = getproc(ws2, "recvfrom");
+    FARPROC real_wsarecvfrom = getproc(ws2, "WSARecvFrom");
+    FARPROC real_ioctlsocket = getproc(ws2, "ioctlsocket");
+    FARPROC real_wsaioclt = getproc(ws2, "WSAIoctl");
+    if (real_setsockopt == nullptr && real_wsaset == nullptr && real_getsockopt == nullptr && real_wsaget == nullptr && real_socket == nullptr && real_wsasocketw == nullptr && real_closesocket == nullptr && real_recvfrom == nullptr && real_wsarecvfrom == nullptr && real_ioctlsocket == nullptr && real_wsaioclt == nullptr) {
         log_line("hook_setsockopt_iat: failed to resolve target ws2_32 APIs");
         return false;
     }
@@ -691,6 +1183,18 @@ bool hook_setsockopt_iat() {
     }
     if (real_closesocket != nullptr && g_real_closesocket == nullptr) {
         g_real_closesocket = reinterpret_cast<CloseSocketFn>(real_closesocket);
+    }
+    if (real_recvfrom != nullptr && g_real_recvfrom == nullptr) {
+        g_real_recvfrom = reinterpret_cast<RecvFromFn>(real_recvfrom);
+    }
+    if (real_wsarecvfrom != nullptr && g_real_wsarecvfrom == nullptr) {
+        g_real_wsarecvfrom = reinterpret_cast<WSARecvFromFn>(real_wsarecvfrom);
+    }
+    if (real_ioctlsocket != nullptr && g_real_ioctlsocket == nullptr) {
+        g_real_ioctlsocket = reinterpret_cast<IoctlSocketFn>(real_ioctlsocket);
+    }
+    if (real_wsaioclt != nullptr && g_real_wsaioclt == nullptr) {
+        g_real_wsaioclt = reinterpret_cast<WSAIoctlFn>(real_wsaioclt);
     }
 
     if (!g_logged_real_setsockopt && g_real_setsockopt != nullptr) {
@@ -720,6 +1224,22 @@ bool hook_setsockopt_iat() {
     if (!g_logged_real_closesocket && g_real_closesocket != nullptr) {
         g_logged_real_closesocket = true;
         log_line("hook_setsockopt_iat: real closesocket=%p", reinterpret_cast<void *>(g_real_closesocket));
+    }
+    if (!g_logged_real_recvfrom && g_real_recvfrom != nullptr) {
+        g_logged_real_recvfrom = true;
+        log_line("hook_setsockopt_iat: real recvfrom=%p", reinterpret_cast<void *>(g_real_recvfrom));
+    }
+    if (!g_logged_real_wsarecvfrom && g_real_wsarecvfrom != nullptr) {
+        g_logged_real_wsarecvfrom = true;
+        log_line("hook_setsockopt_iat: real WSARecvFrom=%p", reinterpret_cast<void *>(g_real_wsarecvfrom));
+    }
+    if (!g_logged_real_ioctlsocket && g_real_ioctlsocket != nullptr) {
+        g_logged_real_ioctlsocket = true;
+        log_line("hook_setsockopt_iat: real ioctlsocket=%p", reinterpret_cast<void *>(g_real_ioctlsocket));
+    }
+    if (!g_logged_real_wsaioctl && g_real_wsaioclt != nullptr) {
+        g_logged_real_wsaioctl = true;
+        log_line("hook_setsockopt_iat: real WSAIoctl=%p", reinterpret_cast<void *>(g_real_wsaioclt));
     }
 
     patch_all_loaded_modules_ws2_iat();
@@ -776,6 +1296,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                 g_socket_tracks[i].id = 0;
             }
         }
+        if (!g_buffer_lock_ready) {
+            InitializeCriticalSection(&g_buffer_lock);
+            g_buffer_lock_ready = true;
+        }
+        init_buffer_log_if_needed();
         log_line("DllMain: DLL_PROCESS_ATTACH");
         if (!hook_setsockopt_iat()) {
             log_line("DllMain: initial hook install attempt failed");
@@ -787,6 +1312,15 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             log_line("DllMain: failed to create hook worker thread gle=%lu", static_cast<unsigned long>(GetLastError()));
         }
     } else if (reason == DLL_PROCESS_DETACH) {
+        flush_buffer_log_files();
+        if (g_buffer_ring != nullptr) {
+            HeapFree(GetProcessHeap(), 0, g_buffer_ring);
+            g_buffer_ring = nullptr;
+        }
+        if (g_buffer_lock_ready) {
+            DeleteCriticalSection(&g_buffer_lock);
+            g_buffer_lock_ready = false;
+        }
         if (g_track_lock_ready) {
             DeleteCriticalSection(&g_track_lock);
             g_track_lock_ready = false;
