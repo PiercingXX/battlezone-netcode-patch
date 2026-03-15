@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+**/build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
+
+# Generated logs and diagnostics
+*.log
+*.tmp
+*.cache
+
+# Shell/PowerShell transient outputs
+*.stackdump
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
