@@ -10,6 +10,10 @@ Target values:
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
 
+Thank you to G1 and BL for the insights.
+This patch is to be used along side of Herps' Auto-Kick Reduction Patch
+There are plans to bake this into a steam mod, but for those who want early access, here you go!
+
 ---
 
 ## Windows
