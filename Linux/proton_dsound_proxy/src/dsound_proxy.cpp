@@ -14,7 +14,7 @@ wchar_t g_log_path[MAX_PATH] = L"dsound_proxy.log";
 bool g_log_path_ready = false;
 
 constexpr int kSendBuf = 524288;
-constexpr int kRecvBuf = 2097152;
+constexpr int kRecvBuf = 4194304;
 
 HMODULE g_real_dsound = nullptr;
 FARPROC g_real_ordinal_1 = nullptr;

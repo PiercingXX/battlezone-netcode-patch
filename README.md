@@ -5,7 +5,7 @@ This repo helps test larger multiplayer socket buffers for Battlezone 98 Redux.
 Target values:
 
 - Send buffer: 524288
-- Receive buffer: 2097152
+- Receive buffer: 4194304
 
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
@@ -66,7 +66,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
@@ -113,7 +113,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
@@ -160,7 +160,7 @@ cd ~/Downloads/battlezone-netcode-patch-master
 6. Paste this into it:
 
 ```
-PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
 7. Close the window
