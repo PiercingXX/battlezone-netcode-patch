@@ -95,17 +95,6 @@ Meaning:
 
 This causes Proton to load the local `dsound.dll` from the game directory first.
 
-## Verify
-
-Launch the game from Steam, enter multiplayer once, then verify:
-
-```bash
-cd "/home/piercingxx/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-VERIFY_PROXY_READBACK=1 "/media/Working-Storage/GitHub/Battlezone Netcode Patch/Linux/verify_net_patch.sh"
-```
-
-Successful verification may pass via proxy readback even if the Battlezone startup socket text line remains unchanged.
-
 ## Current Limitations
 
 - The implementation here is Proton-specific because it depends on Wine loading a local native `dsound.dll`.

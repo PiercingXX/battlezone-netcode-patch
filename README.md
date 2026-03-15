@@ -1,177 +1,71 @@
-# Battlezone Netcode Patch - Setup Guide
+# Battlezone Netcode Patch
 
-This repo helps test larger multiplayer socket buffers for Battlezone 98 Redux.
+Final release repository for the Battlezone 98 Redux netcode patch.
 
-Target values:
+This project is focused only on shipping the two game-folder proxy DLL paths:
 
-- Send buffer: 524288
-- Receive buffer: 4194304
+1. Linux (Proton): `dsound.dll`
+2. Windows: `winmm.dll`
 
-> **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
-> All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
+Target socket values forced by the patch:
 
-For logging instructions, see [logging_readme.md](logging_readme.md).
+1. `SO_SNDBUF = 524288`
+2. `SO_RCVBUF = 4194304`
 
----
+## Repository Layout
 
-## Windows
+1. `Linux/deploy_linux.sh`: Build and deploy Linux/Proton `dsound.dll`.
+2. `Linux/proton_dsound_proxy/`: Linux proxy source and build.
+3. `Microslop/deploy_windows.ps1`: Deploy Windows `winmm.dll`.
+4. `Microslop/winmm.dll`: Prebuilt Windows drop-in DLL.
+5. `Microslop/winmm_proxy/`: Windows proxy source and build.
 
-### Step 1: Copy the DLL
+## Linux Deploy
 
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Manage → Browse local files**
-4. A folder opens — this is your game folder
-5. Copy `Microslop\winmm.dll` from this repo into that game folder
+Install tools:
 
-
-![alt text](resources/image.png)
-
-![alt text](resources/iaWY5xDy9t.gif)
-
----
-
-## Linux - Native Steam
-
-Use this if you installed Steam natively. If you installed Steam via Snap or Flatpak, use the sections below.
-
-### Step 1: Install required tools
-
-Open a terminal and run the command for your distro:
-
-**Debian:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch:**
-```bash
-sudo pacman -S mingw-w64-gcc make
-```
-
-### Step 2: Deploy the patch
+Deploy for native Steam:
 
 ```bash
 cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-### Step 3: Set Steam launch options
+Steam launch options on Linux/Proton:
 
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
-
-```
+```text
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-7. Close the window
+For Snap Steam, use:
 
----
-
-## Linux - Snap Steam
-
-Use this if you installed Steam via Snap (`snap install steam`).
-
-### Step 1: Install required tools
-
-Open a terminal and run the command for your distro:
-
-**Debian:**
-```bash
-sudo apt install mingw-w64 make
+```text
+/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux
 ```
 
-**Arch:**
-```bash
-sudo pacman -S mingw-w64-gcc make
+For Flatpak Steam, use:
+
+```text
+/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux
 ```
 
-### Step 2: Deploy the patch
+## Windows Deploy
 
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+From PowerShell on the Windows machine:
+
+```powershell
+cd "path\to\battlezone-netcode-patch"
+.\Microslop\deploy_windows.ps1
 ```
 
-> If this fails with "Missing game executable", your Snap Steam path is different.
-> Open Steam → right-click Battlezone 98 Redux → **Manage → Browse local files**,
-> then open a terminal in that folder and run `pwd` to get the exact path.
-> Replace the path above with that.
+If Steam is installed in a non-default path:
 
-### Step 3: Set Steam launch options
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
-
-```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+```powershell
+.\Microslop\deploy_windows.ps1 -GamePath "D:\Steam\steamapps\common\Battlezone 98 Redux"
 ```
 
-7. Close the window
-
----
-
-## Linux - Flatpak Steam
-
-Use this if you installed Steam via Flatpak (`flatpak install steam`).
-
-### Step 1: Install required tools
-
-Open a terminal and run the command for your distro:
-
-**Debian:**
-```bash
-sudo apt install mingw-w64 make
-```
-
-**Arch:**
-```bash
-sudo pacman -S mingw-w64-gcc make
-```
-
-### Step 2: Deploy the patch
-
-```bash
-cd ~/Downloads/battlezone-netcode-patch-master
-./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-> If this fails with "Missing game executable", your Flatpak Steam path is different.
-> Open Steam → right-click Battlezone 98 Redux → **Manage → Browse local files**,
-> then open a terminal in that folder and run `pwd` to get the exact path.
-> Replace the path above with that.
-
-### Step 3: Set Steam launch options
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
-
-```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
-7. Close the window
-
----
-
-## Important Note
-
-The Battlezone startup text line can still show old values even when the patch is working.
-Use proxy log readback (`dsound_proxy.log` or `winmm_proxy.log`) as source of truth.
-
-## Technical Details
-
-- Full investigation history: `INVESTIGATION_WRITEUP.md`
+No Steam launch option changes are required on Windows.
