@@ -96,11 +96,11 @@ if (-not (Test-Path $logPath)) {
     }
 
     # Check 5: readback confirms target values
-    # Looking for: effective readback SO_SNDBUF=524288 and SO_RCVBUF=2097152
+    # Looking for: effective readback SO_SNDBUF=524288 and SO_RCVBUF=4194304
     if ($sessionLog -match "effective readback SO_SNDBUF=524288" -and
-        $sessionLog -match "effective readback SO_RCVBUF=2097152") {
+        $sessionLog -match "effective readback SO_RCVBUF=4194304") {
         Write-Host "[PASS] SO_SNDBUF=524288 confirmed via readback" -ForegroundColor Green
-        Write-Host "[PASS] SO_RCVBUF=2097152 confirmed via readback" -ForegroundColor Green
+        Write-Host "[PASS] SO_RCVBUF=4194304 confirmed via readback" -ForegroundColor Green
     } elseif ($sessionLog -match "WSASocketW hook:") {
         Write-Host "[WARN] Socket hook fired but readback values unexpected" -ForegroundColor Yellow
         Write-Host "       Check $logPath for details"

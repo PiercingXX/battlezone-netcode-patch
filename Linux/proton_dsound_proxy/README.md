@@ -24,7 +24,7 @@ On process attach, the proxy:
 	- `closesocket`
 3. Forces these target values when Battlezone configures socket buffers:
 	- `SO_SNDBUF = 524288`
-	- `SO_RCVBUF = 2097152`
+	- `SO_RCVBUF = 4194304`
 4. Immediately reads the effective values back from the same socket handle.
 5. Logs socket IDs, handles, force calls, readbacks, and close events to `dsound_proxy.log`.
 6. Forwards ordinal `1` to the real system `dsound.dll` on demand.

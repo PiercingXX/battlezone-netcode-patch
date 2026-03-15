@@ -11,7 +11,7 @@
 //
 // Target values (match the Linux dsound proxy):
 //   SO_SNDBUF = 524288   (512 KB)
-//   SO_RCVBUF = 2097152  (  2 MB)
+//   SO_RCVBUF = 4194304  (  4 MB)
 
 #include "netcode_hooks.h"
 #include <cstdio>
@@ -24,7 +24,7 @@ extern void ProxyLog(const char* fmt, ...);
 // Constants
 // ---------------------------------------------------------
 static const int kTargetSndBuf = 524288;   // 512 KB
-static const int kTargetRcvBuf = 2097152;  //   2 MB
+static const int kTargetRcvBuf = 4194304;  //   4 MB
 
 // ---------------------------------------------------------
 // Real-function pointers (resolved from ws2_32.dll)
