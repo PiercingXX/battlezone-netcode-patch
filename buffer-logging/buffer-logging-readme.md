@@ -4,7 +4,7 @@ Use this for packet-order / out-of-order packet testing only.
 
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
-> If your extracted folder is named `battlezone-netcode-patch-main` instead of `battlezone-netcode-patch-master`, replace `...-master` in all commands below.
+> If your extracted folder name differs, replace `Battlezone Netcode Testing` in all commands below.
 
 How to use buffer logging:
 1. Start buffer logging.
@@ -24,22 +24,22 @@ Windows:
 
 1. Open PowerShell.
 2. Run: `Set-ExecutionPolicy -Scope Process Bypass -Force`
-3. Start buffer logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Start`
+3. Start buffer logging: `& "$HOME\Downloads\Battlezone Netcode Testing\buffer-logging\buffer_logger_windows.ps1" -Action Start`
 4. Open the generated `launch_options.txt` file in the new `test_bundles\buffer_windows_*` folder.
 5. Copy the launch option line into Steam.
 6. Play and exit game.
-7. Stop buffer logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Stop`
+7. Stop buffer logging: `& "$HOME\Downloads\Battlezone Netcode Testing\buffer-logging\buffer_logger_windows.ps1" -Action Stop`
 8. Send the generated `.zip` bundle from `test_bundles`.
 
 Linux (all Steam variants):
 
 1. Start buffer logging:
-    `cd ~/Downloads/battlezone-netcode-patch-master && ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"`
+    `cd "$HOME/Downloads/Battlezone Netcode Testing" && ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"`
 2. Open the generated `launch_options.txt` file in the new `test_bundles/buffer_linux_*` folder.
 3. Copy the launch option line into Steam.
 4. Play and exit game.
 5. Stop buffer logging:
-    `cd ~/Downloads/battlezone-netcode-patch-master && ./buffer-logging/buffer_logger_linux.sh stop`
+    `cd "$HOME/Downloads/Battlezone Netcode Testing" && ./buffer-logging/buffer_logger_linux.sh stop`
 6. Send the generated `.tar.gz` bundle from `test_bundles`.
 
 ---
@@ -71,14 +71,14 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 Then in the repo folder run:
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start
 ```
 
 If you are not in the repo folder, run with full path:
 
 ```powershell
-& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Start
+& "$HOME\Downloads\Battlezone Netcode Testing\buffer-logging\buffer_logger_windows.ps1" -Action Start
 ```
 
 The script creates a new `test_bundles\buffer_windows_*` session folder and writes a `launch_options.txt` file.
@@ -97,14 +97,14 @@ Open the generated `launch_options.txt` file and copy the single line inside it 
 ### Step 4: Stop Buffer Logging And Send Bundle
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Stop
 ```
 
 If you are not in the repo folder, use:
 
 ```powershell
-& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Stop
+& "$HOME\Downloads\Battlezone Netcode Testing\buffer-logging\buffer_logger_windows.ps1" -Action Stop
 ```
 
 The script will create a `.zip` bundle under `test_bundles`.
@@ -118,7 +118,7 @@ Use this if you installed Steam natively. If you installed Steam via Snap or Fla
 ### Step 1: Start Buffer Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -138,7 +138,7 @@ Open the generated `launch_options.txt` file and copy the single line inside it 
 ### Step 4: Stop Buffer Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh stop
 ```
 
@@ -153,7 +153,7 @@ Use this if you installed Steam via Snap (`snap install steam`).
 ### Step 1: Start Buffer Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -171,7 +171,7 @@ Open the generated `launch_options.txt` file and copy the single line inside it 
 ### Step 4: Stop Buffer Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh stop
 ```
 
@@ -184,7 +184,7 @@ Use this if you installed Steam via Flatpak (`flatpak install steam`).
 ### Step 1: Start Buffer Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -202,7 +202,7 @@ Open the generated `launch_options.txt` file and copy the single line inside it 
 ### Step 4: Stop Buffer Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh stop
 ```
 
@@ -428,21 +428,21 @@ The goal of phase 1 is evidence collection only.
 Use:
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Optional explicit form:
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536
 ```
 
 Optional peer-targeted form:
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536 "203.0.113.44:37218"
 ```
 
@@ -493,7 +493,7 @@ If `BZ_BUFFER_LOG` is not set, packet logging should stay off.
 After the match ends, run:
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./buffer-logging/buffer_logger_linux.sh stop
 ```
 
@@ -529,21 +529,21 @@ The metadata file should be tiny and contain:
 Use:
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start
 ```
 
 Optional explicit form:
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start -GamePath "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux" -PayloadBytes 32 -RingRecords 65536
 ```
 
 Optional peer-targeted form:
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Start -PeerFilter "203.0.113.44:37218"
 ```
 
@@ -588,7 +588,7 @@ These should be read once at startup.
 After the match ends, run:
 
 ```powershell
-cd "$HOME\Downloads\battlezone-netcode-patch-master"
+cd "$HOME\Downloads\Battlezone Netcode Testing"
 .\buffer-logging\buffer_logger_windows.ps1 -Action Stop
 ```
 

@@ -123,9 +123,10 @@ uint8_t *g_buffer_ring = nullptr;
 constexpr uint32_t kReorderSeqOffset   = 13;    // byte offset in payload
 constexpr uint32_t kReorderSeqMinPay   = 17;    // minimum payload length with seq field
 constexpr uint32_t kReorderDefaultMs   = 30;    // default hold window (ms)
-constexpr uint32_t kReorderSlotCount   = 8;     // per-peer buffered packet slots (fixed)
-constexpr uint32_t kReorderMaxPeers    = 32;    // max distinct IPv4 sources
-constexpr uint32_t kReorderDrainCap    = 32;    // max real WSARecvFrom calls per hook invocation
+constexpr uint32_t kReorderSlotCap     = 8;     // max per-peer buffered packet slots
+constexpr uint32_t kReorderPeerCap     = 32;    // max distinct IPv4 sources
+constexpr uint32_t kReorderDrainCapDef = 32;    // default real WSARecvFrom calls per hook invocation
+constexpr uint32_t kReorderDrainCapMax = 128;   // hard cap for drain loop
 constexpr uint32_t kReorderMaxPktBytes = 1500;  // max UDP datagram size
 
 struct ReorderSlot {
@@ -144,12 +145,15 @@ struct PeerBuf {
     uint32_t    last_seq;  // last sequence number delivered to the game
     uint32_t    filled;    // number of occupied slots
     uint32_t    _pad;
-    ReorderSlot slots[kReorderSlotCount];
+    ReorderSlot slots[kReorderSlotCap];
 };
 
 static bool              g_reorder_enabled  = false;
 static uint32_t          g_reorder_ms       = kReorderDefaultMs;
-static PeerBuf           g_peers[kReorderMaxPeers];   // zero-initialized (BSS)
+static uint32_t          g_reorder_depth    = kReorderSlotCap;
+static uint32_t          g_reorder_peers    = kReorderPeerCap;
+static uint32_t          g_reorder_drain    = kReorderDrainCapDef;
+static PeerBuf           g_peers[kReorderPeerCap];    // zero-initialized (BSS)
 static CRITICAL_SECTION  g_reorder_cs       = {};
 static bool              g_reorder_cs_ready = false;
 
@@ -209,6 +213,14 @@ uint32_t parse_env_u32(const char *name, uint32_t fallback) {
         return fallback;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+static inline int32_t seq_cmp_u32(uint32_t a, uint32_t b) {
+    return static_cast<int32_t>(a - b);
+}
+
+static inline bool seq_ahead_or_equal(uint32_t seq, uint32_t want) {
+    return seq_cmp_u32(seq, want) >= 0;
 }
 
 void init_buffer_paths() {
@@ -743,12 +755,12 @@ static uint32_t scatter_copy(LPWSABUF bufs, DWORD nbufs, const uint8_t *src, uin
 static PeerBuf *reorder_get_peer(const sockaddr_in &addr) {
     uint64_t k = (static_cast<uint64_t>(static_cast<uint32_t>(addr.sin_addr.S_un.S_addr)) << 16)
                  | static_cast<uint64_t>(ntohs(addr.sin_port));
-    for (int i = 0; i < static_cast<int>(kReorderMaxPeers); ++i) {
+    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
         if (g_peers[i].key == k) {
             return &g_peers[i];
         }
     }
-    for (int i = 0; i < static_cast<int>(kReorderMaxPeers); ++i) {
+    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
         if (g_peers[i].key == 0) {
             std::memset(&g_peers[i], 0, sizeof(g_peers[i]));
             g_peers[i].key = k;
@@ -762,12 +774,12 @@ static PeerBuf *reorder_get_peer(const sockaddr_in &addr) {
 // are full the oldest packet is evicted to make room.  Caller must hold g_reorder_cs.
 static void reorder_insert(PeerBuf *pb, uint32_t seq, uint64_t ts,
                            const sockaddr_in &from, const uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < kReorderSlotCount; ++i) {
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
         if (pb->slots[i].used && pb->slots[i].seq == seq) {
             return; // duplicate
         }
     }
-    for (uint32_t i = 0; i < kReorderSlotCount; ++i) {
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
         if (!pb->slots[i].used) {
             pb->slots[i].used = 1;
             pb->slots[i].seq  = seq;
@@ -782,7 +794,7 @@ static void reorder_insert(PeerBuf *pb, uint32_t seq, uint64_t ts,
     }
     // All slots occupied: evict the oldest.
     uint32_t oix = 0;
-    for (uint32_t i = 1; i < kReorderSlotCount; ++i) {
+    for (uint32_t i = 1; i < g_reorder_depth; ++i) {
         if (pb->slots[i].used && pb->slots[i].ts < pb->slots[oix].ts) {
             oix = i;
         }
@@ -806,33 +818,55 @@ static int reorder_pick(PeerBuf *pb, uint64_t now_ms) {
     }
     if (pb->seq_init) {
         uint32_t want = pb->last_seq + 1;
-        for (uint32_t i = 0; i < kReorderSlotCount; ++i) {
+        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
             if (pb->slots[i].used && pb->slots[i].seq == want) {
                 return static_cast<int>(i);
             }
         }
+
+        int best_ahead = -1;
+        uint32_t best_dist = 0;
+        int best_oldest = -1;
+        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+            if (!pb->slots[i].used) {
+                continue;
+            }
+            if (now_ms < pb->slots[i].ts || (now_ms - pb->slots[i].ts) < g_reorder_ms) {
+                continue;
+            }
+
+            if (best_oldest < 0 || pb->slots[i].ts < pb->slots[best_oldest].ts) {
+                best_oldest = static_cast<int>(i);
+            }
+
+            if (seq_ahead_or_equal(pb->slots[i].seq, want)) {
+                uint32_t dist = pb->slots[i].seq - want;
+                if (best_ahead < 0 || dist < best_dist) {
+                    best_ahead = static_cast<int>(i);
+                    best_dist = dist;
+                }
+            }
+        }
+        if (best_ahead >= 0) {
+            return best_ahead;
+        }
+        if (best_oldest >= 0) {
+            return best_oldest;
+        }
+        return -1;
     }
-    // Find slot with the smallest sequence number.
-    int mi = -1;
-    for (uint32_t i = 0; i < kReorderSlotCount; ++i) {
+
+    // On first packet for a peer, deliver the oldest buffered slot immediately.
+    int oldest = -1;
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
         if (!pb->slots[i].used) {
             continue;
         }
-        if (mi < 0 || pb->slots[i].seq < pb->slots[mi].seq) {
-            mi = static_cast<int>(i);
+        if (oldest < 0 || pb->slots[i].ts < pb->slots[oldest].ts) {
+            oldest = static_cast<int>(i);
         }
     }
-    if (mi < 0) {
-        return -1;
-    }
-    // Deliver immediately on first-ever packet or when the hold window expires.
-    if (!pb->seq_init) {
-        return mi;
-    }
-    if (now_ms >= pb->slots[mi].ts && (now_ms - pb->slots[mi].ts) >= g_reorder_ms) {
-        return mi;
-    }
-    return -1; // still within the reorder hold window
+    return oldest;
 }
 
 int WSAAPI hooked_recvfrom(SOCKET s, char *buf, int len, int flags, sockaddr *from, int *fromlen) {
@@ -913,11 +947,9 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
     drain_wsabuf.buf = reinterpret_cast<char *>(drain_buf);
     drain_wsabuf.len = kReorderMaxPktBytes;
 
-    uint64_t now_ms = GetTickCount64();
-
     EnterCriticalSection(&g_reorder_cs);
 
-    for (int di = 0; di < static_cast<int>(kReorderDrainCap); ++di) {
+    for (uint32_t di = 0; di < g_reorder_drain; ++di) {
         DWORD       drain_bytes  = 0;
         DWORD       drain_flags  = 0;
         sockaddr_in drain_src    = {};
@@ -985,13 +1017,15 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
             return 0;
         }
 
-        reorder_insert(pb, seq, now_ms, drain_src, drain_buf, drain_bytes);
+        uint64_t arrival_ms = GetTickCount64();
+        reorder_insert(pb, seq, arrival_ms, drain_src, drain_buf, drain_bytes);
     }
 
     // Scan the peer table for the first packet that is ready to deliver.
+    uint64_t now_ms = GetTickCount64();
     int best_pi = -1;
     int best_si = -1;
-    for (int pi = 0; pi < static_cast<int>(kReorderMaxPeers); ++pi) {
+    for (uint32_t pi = 0; pi < g_reorder_peers; ++pi) {
         if (g_peers[pi].key == 0) {
             continue;
         }
@@ -1606,12 +1640,17 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             const char *rv = std::getenv("BZ_REORDER");
             g_reorder_enabled = (rv == nullptr || *rv == '\0') ? true : env_truthy(rv);
             g_reorder_ms = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
+            g_reorder_depth = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
+            g_reorder_peers = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
+            g_reorder_drain = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
-        log_line("reorder: %s window_ms=%u depth=%u seq_offset=%u",
+        log_line("reorder: %s window_ms=%u depth=%u peers=%u drain=%u seq_offset=%u",
                  g_reorder_enabled ? "enabled" : "disabled (BZ_REORDER=0)",
                  static_cast<unsigned>(g_reorder_ms),
-                 static_cast<unsigned>(kReorderSlotCount),
+                 static_cast<unsigned>(g_reorder_depth),
+                 static_cast<unsigned>(g_reorder_peers),
+                 static_cast<unsigned>(g_reorder_drain),
                  static_cast<unsigned>(kReorderSeqOffset));
         if (!hook_setsockopt_iat()) {
             log_line("DllMain: initial hook install attempt failed");

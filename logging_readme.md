@@ -1,10 +1,10 @@
-# Battlezone Netcode Patch - Logging Guide
+# Battlezone Netcode Testing - Logging Guide
 
 Use this for bad sessions only (lag spikes, desync, freeze, CTD/crash).
 
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
-> If your extracted folder is named `battlezone-netcode-patch-main` instead of `battlezone-netcode-patch-master`, replace `...-master` in all commands below.
+> If your extracted folder name differs, replace `Battlezone Netcode Testing` in all commands below.
 
 How to use logging:
 1. Start logging.
@@ -25,9 +25,9 @@ Windows:
 
 1. Open PowerShell as Administrator.
 2. Run: `Set-ExecutionPolicy -Scope Process Bypass -Force`
-3. Start logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Start`
+3. Start logging: `& "$HOME\Downloads\Battlezone Netcode Testing\Microslop\tester_diag.ps1" -Action Start`
 4. Play and exit game.
-5. Stop logging: `& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Stop`
+5. Stop logging: `& "$HOME\Downloads\Battlezone Netcode Testing\Microslop\tester_diag.ps1" -Action Stop`
 6. Send the generated `.zip` bundle from `test_bundles`.
 
 Linux (all Steam variants):
@@ -79,7 +79,7 @@ If your prompt is already inside `...\Microslop>`, run this instead:
 If you are not in the repo folder, run with full path:
 
 ```powershell
-& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Start
+& "$HOME\Downloads\Battlezone Netcode Testing\Microslop\tester_diag.ps1" -Action Start
 ```
 
 The script will attempt to log any errors including lag and CTD.
@@ -107,7 +107,7 @@ If your prompt is `...\Microslop>`, use:
 If you are not in the repo folder, use:
 
 ```powershell
-& "$HOME\Downloads\battlezone-netcode-patch-master\Microslop\tester_diag.ps1" -Action Stop
+& "$HOME\Downloads\Battlezone Netcode Testing\Microslop\tester_diag.ps1" -Action Stop
 ```
 
 ---
@@ -119,7 +119,7 @@ Use this if you installed Steam natively. If you installed Steam via Snap or Fla
 ### Step 1: Start Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -134,7 +134,7 @@ The script will attempt to log any errors including lag and CTD.
 ### Step 3: Stop Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh stop
 ```
 
@@ -172,7 +172,7 @@ Use this if you installed Steam via Snap (`snap install steam`).
 ### Step 1: Start Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh start "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -187,7 +187,7 @@ The script will attempt to log any errors including lag and CTD.
 ### Step 3: Stop Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh stop
 ```
 
@@ -200,7 +200,7 @@ Use this if you installed Steam via Flatpak (`flatpak install steam`).
 ### Step 1: Start Logging
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh start "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -215,6 +215,6 @@ The script will attempt to log any errors including lag and CTD.
 ### Step 3: Stop Logging And Send Bundle
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/tester_diag.sh stop
 ```

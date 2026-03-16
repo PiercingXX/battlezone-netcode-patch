@@ -1,4 +1,4 @@
-# Battlezone Netcode Patch — Out-of-Order Packet Resequencing
+# Battlezone Netcode Testing — Out-of-Order Packet Resequencing
 
 This repo includes socket buffer sizing plus **in-proxy reorder buffering**.
 
@@ -6,7 +6,7 @@ Battlezone 98 Redux drops any UDP packet whose internal sequence number is not e
 
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
 > All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically.
-> If your extracted folder is named `battlezone-netcode-patch-main` instead of `battlezone-netcode-patch-master`, replace `...-master` in all commands below.
+> If your extracted folder name differs, replace `Battlezone Netcode Testing` in the commands below.
 
 For logging instructions, see [logging_readme.md](logging_readme.md).
 
@@ -36,7 +36,7 @@ sudo pacman -S mingw-w64-gcc make
 ### Step 2: Deploy the patch
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -72,7 +72,7 @@ sudo pacman -S mingw-w64-gcc make
 ### Step 2: Deploy the patch
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -101,7 +101,7 @@ sudo pacman -S mingw-w64-gcc make
 ### Step 2: Deploy the patch
 
 ```bash
-cd ~/Downloads/battlezone-netcode-patch-master
+cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -136,5 +136,5 @@ This patch includes everything from Patch 00 (SO_SNDBUF / SO_RCVBUF forcing) and
 ## Technical Details
 
 - Source: `Linux/proton_dsound_proxy/src/dsound_proxy.cpp`
-- Sequence field analysis: `../resources/valid_capture_reorder_signal_only.csv`
-- Full investigation: `INVESTIGATION_WRITEUP.md`
+- Sequence field analysis: `resources/valid_capture_reorder_signal_only.csv`
+- Full investigation: `resources/INVESTIGATION_WRITEUP.md`
