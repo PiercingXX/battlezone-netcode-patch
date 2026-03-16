@@ -1,14 +1,12 @@
-# Battlezone Netcode Patch - Setup Guide
+# Battlezone Netcode Patch — Out-of-Order Packet Resequencing
 
-This repo helps test larger multiplayer socket buffers for Battlezone 98 Redux.
+This repo includes socket buffer sizing plus **in-proxy reorder buffering**.
 
-Target values:
-
-- Send buffer: 524288
-- Receive buffer: 4194304
+Battlezone 98 Redux drops any UDP packet whose internal sequence number is not exactly the next expected value.  On bursty or wireless connections this causes cascading drops and visible player warping.  This patch intercepts `WSARecvFrom` in the proxy DLL, holds packets arriving just out of order in a small per-peer buffer, and delivers them to the game in the correct sequence — without touching the game binary.
 
 > **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
-> All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically to your username and home folder.
+> All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically.
+> If your extracted folder is named `battlezone-netcode-patch-main` instead of `battlezone-netcode-patch-master`, replace `...-master` in all commands below.
 
 For logging instructions, see [logging_readme.md](logging_readme.md).
 
@@ -16,35 +14,21 @@ For logging instructions, see [logging_readme.md](logging_readme.md).
 
 ## Windows
 
-### Step 1: Copy the DLL
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Manage → Browse local files**
-4. A folder opens — this is your game folder
-5. Copy `Microslop\winmm.dll` from this repo into that game folder
-
-
-![alt text](resources/image.png)
-
-![alt text](resources/iaWY5xDy9t.gif)
+> **Not yet implemented.** The Windows `winmm_proxy` does not yet contain recv-path hooks.
+> Use Patch 00 on Windows for now — it still applies the socket buffer fix.
 
 ---
 
-## Linux - Native Steam
-
-Use this if you installed Steam natively. If you installed Steam via Snap or Flatpak, use the sections below.
+## Linux — Native Steam
 
 ### Step 1: Install required tools
 
-Open a terminal and run the command for your distro:
-
-**Debian:**
+**Debian / Ubuntu:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch:**
+**Arch / Manjaro:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
@@ -59,34 +43,28 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ### Step 3: Set Steam launch options
 
 1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
+2. Right-click **Battlezone 98 Redux** → **Properties**
+3. Click **General** on the left
+4. In the **Launch Options** box paste:
 
 ```
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-7. Close the window
+> Reordering is **on by default**.  Add `BZ_REORDER=0` to the front of the launch options only if you experience issues.
 
 ---
 
-## Linux - Snap Steam
-
-Use this if you installed Steam via Snap (`snap install steam`).
+## Linux — Snap Steam
 
 ### Step 1: Install required tools
 
-Open a terminal and run the command for your distro:
-
-**Debian:**
+**Debian / Ubuntu:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch:**
+**Arch / Manjaro:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
@@ -98,42 +76,24 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-> If this fails with "Missing game executable", your Snap Steam path is different.
-> Open Steam → right-click Battlezone 98 Redux → **Manage → Browse local files**,
-> then open a terminal in that folder and run `pwd` to get the exact path.
-> Replace the path above with that.
-
 ### Step 3: Set Steam launch options
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
 
 ```
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-7. Close the window
-
 ---
 
-## Linux - Flatpak Steam
-
-Use this if you installed Steam via Flatpak (`flatpak install steam`).
+## Linux — Flatpak Steam
 
 ### Step 1: Install required tools
 
-Open a terminal and run the command for your distro:
-
-**Debian:**
+**Debian / Ubuntu:**
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch:**
+**Arch / Manjaro:**
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
@@ -145,33 +105,36 @@ cd ~/Downloads/battlezone-netcode-patch-master
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-> If this fails with "Missing game executable", your Flatpak Steam path is different.
-> Open Steam → right-click Battlezone 98 Redux → **Manage → Browse local files**,
-> then open a terminal in that folder and run `pwd` to get the exact path.
-> Replace the path above with that.
-
 ### Step 3: Set Steam launch options
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** in your library
-3. Click **Properties**
-4. Click **General** on the left
-5. Find the **Launch Options** box at the bottom
-6. Paste this into it:
 
 ```
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-7. Close the window
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `BZ_REORDER` | *(on)* | Set to `0` to disable reorder buffering |
+| `BZ_REORDER_WINDOW_MS` | `30` | Max time (ms) a packet may be held waiting for its predecessor. Increase to `50`–`60` for very bursty/wireless peers. |
+| `BZ_BUFFER_LOG` | *(off)* | Set to `1` to capture binary packet trace for analysis |
 
 ---
 
-## Important Note
+## What Changed vs. Patch 00
 
-The Battlezone startup text line can still show old values even when the patch is working.
-Use proxy log readback (`dsound_proxy.log` or `winmm_proxy.log`) as source of truth.
+This patch includes everything from Patch 00 (SO_SNDBUF / SO_RCVBUF forcing) and adds:
+
+- Per-peer reorder buffer inside `hooked_WSARecvFrom`
+- Up to 8 packets held per peer, keyed by IPv4 source
+- Sequence field read from `payload[13..16]` (u32le) — confirmed via live binary capture analysis
+- Hold window eviction: oldest packet released once it exceeds `BZ_REORDER_WINDOW_MS`
+- Peer table cleared on `closesocket` to prevent stale state across reconnections
 
 ## Technical Details
 
-- Full investigation history: `INVESTIGATION_WRITEUP.md`
+- Source: `Linux/proton_dsound_proxy/src/dsound_proxy.cpp`
+- Sequence field analysis: `../resources/valid_capture_reorder_signal_only.csv`
+- Full investigation: `INVESTIGATION_WRITEUP.md`

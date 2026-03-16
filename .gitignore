@@ -7,6 +7,7 @@ build/
 *.lib
 *.so
 *.dll
+!**/Microslop/winmm.dll
 *.exe
 *.out
 

@@ -69,7 +69,7 @@ Expected verification line:
 
 The installed game was located at:
 
-`/home/piercingxx/.local/share/Steam/steamapps/common/Battlezone 98 Redux`
+`/path/to/Battlezone 98 Redux`
 
 Observed install characteristics:
 
@@ -85,7 +85,7 @@ Important files confirmed:
 
 The active `net.ini` loaded by the game was found at:
 
-`/home/piercingxx/.local/share/Steam/steamapps/workshop/content/301650/1895622040/net.ini`
+`/path/to/workshop/net.ini`
 
 That file corresponds to the current Workshop mod named:
 

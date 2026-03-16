@@ -54,4 +54,4 @@ BZLogger shows `Interval` ≤ 33 ms in a live session and the verify scripts pas
 - All 4 test sessions used the existing 52 ms interval.
 - Session 1 (232149Z): 6,857 total P2P drops over ~62 min.
 - Warp event timestamps averaged 0.166 s apart in session 1 — a tighter update rate may reduce visible warp magnitude.
-- Test bundle parent dir: `/home/piercingxx/Downloads/Testing 1 with 2mb receive/`
+- Test bundle parent dir: `/path/to/test-bundles/`

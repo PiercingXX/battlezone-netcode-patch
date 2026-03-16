@@ -18,7 +18,7 @@ Usage:
 Examples:
   ./buffer-logging/buffer_logger_linux.sh start
   ./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536
-  ./buffer-logging/buffer_logger_linux.sh start "/path/to/game" 32 65536 "73.200.253.44:37218"
+  ./buffer-logging/buffer_logger_linux.sh start "/path/to/game" 32 65536 "203.0.113.44:37218"
 
 Notes:
   - This is a lightweight collector for the new buffer logger only.

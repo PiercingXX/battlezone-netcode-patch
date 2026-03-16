@@ -443,7 +443,7 @@ Optional peer-targeted form:
 
 ```bash
 cd ~/Downloads/battlezone-netcode-patch-master
-./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536 "73.200.253.44:37218"
+./buffer-logging/buffer_logger_linux.sh start "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux" 32 65536 "203.0.113.44:37218"
 ```
 
 The script creates a lightweight session directory under `test_bundles/`, writes the exact Steam launch options into `launch_options.txt`, and does not start any heavy background polling.
@@ -544,7 +544,7 @@ Optional peer-targeted form:
 
 ```powershell
 cd "$HOME\Downloads\battlezone-netcode-patch-master"
-.\buffer-logging\buffer_logger_windows.ps1 -Action Start -PeerFilter "73.200.253.44:37218"
+.\buffer-logging\buffer_logger_windows.ps1 -Action Start -PeerFilter "203.0.113.44:37218"
 ```
 
 The script creates a lightweight session directory under `test_bundles\`, writes the exact Steam launch options into `launch_options.txt`, and avoids the heavy diagnostics capture.
