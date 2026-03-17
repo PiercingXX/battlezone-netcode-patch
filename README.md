@@ -58,19 +58,19 @@ sudo pacman -S mingw-w64-gcc make
 
 Native Steam path:
 ```bash
-cd "$HOME/Downloads/Battlezone Netcode Testing"
+cd "$HOME/Downloads/battlezone-netcode-testing-main"
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Snap Steam path:
 ```bash
-cd "$HOME/Downloads/Battlezone Netcode Testing"
+cd "$HOME/Downloads/battlezone-netcode-testing-main"
 ./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Flatpak Steam path:
 ```bash
-cd "$HOME/Downloads/Battlezone Netcode Testing"
+cd "$HOME/Downloads/battlezone-netcode-testing-main"
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -91,7 +91,7 @@ prebuilt/windows/winmm.dll
 Optional integrity check:
 
 ```bash
-cd "Battlezone Netcode Testing/prebuilt/windows"
+cd "$HOME/Downloads/battlezone-netcode-testing-main/prebuilt/windows"
 sha256sum -c winmm.dll.sha256
 ```
 
@@ -106,7 +106,7 @@ C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
 If you want to build it yourself instead:
 
 ```bash
-cd "$HOME/Downloads/Battlezone Netcode Testing"
+cd "$HOME/Downloads/battlezone-netcode-testing-main"
 cd Microslop/winmm_proxy && make
 ```
 
