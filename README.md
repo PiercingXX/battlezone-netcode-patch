@@ -1,29 +1,28 @@
-# Battlezone Netcode Testing
+### The Actual Problem
+Battlezone's netcode is brutally unforgiving: it drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
 
-## Netcode, But Less Embarrassing
+It is now substantially less dumb.
 
-Battlezone drops out-of-order UDP packets like they're invalid by moral principle.
+### The "Solution": Out-of-Order Packet Reordering
+I built a packet reordering engine that intercepts wayward packets mid-flight, buffers them for up to 45ms, then releases them once their predecessors arrive. Think traffic control, not packet panic.
 
-That is fine on perfect links and garbage on real ones.
+**The result:** ~4-5 fewer drops per minute on typical connections. On WiFi or high-latency links: better hit registration, smoother movement, and fewer "how did that even happen" moments...yes there are still drops, I said 'fewer'.
 
-This repo ships the proxy patch that fixes that behavior.
+The patch runs entirely in userspace via DLL proxy injection. The game never knows it's there.
 
-No game binary edits. No ritual config voodoo. Just a DLL proxy that intercepts recv path traffic, reorders short-window out-of-order packets, and hands clean sequence flow back to the game.
 
----
+## What War Actually Shipped (V1 -> V3)
 
-## What We Shipped (V1 -> V3)
-
-### V1 (Patch 00)
+### Version 1 (Patch 00)
 - Forced bigger UDP socket buffers
 - `SO_SNDBUF = 512 KB`
 - `SO_RCVBUF = 2 MB`
-- Immediate gain: better burst tolerance
+- Result: better burst tolerance, fewer immediate choke events
 
-### V2
+### Version 2
 - Forced even bigger UDP socket buffers
-- SO_SNDBUF = 512 KB
-- SO_RCVBUF = 4 MB
+- `SO_SNDBUF = 512 KB`
+- `SO_RCVBUF = 4 MB`
 - Hardened hooks and improved deployment consistency
 
 ### V3 (Current)
