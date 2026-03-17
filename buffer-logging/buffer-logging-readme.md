@@ -54,7 +54,7 @@ The scripts collect only the lightweight files we care about:
 - `bz_buffer_log.meta.txt`
 - `multi.ini`
 
-If `bz_buffer_log.bin` is missing, that means the proxy-side binary logger has not been implemented yet.  The scripts will still collect the rest of the bundle.
+If `bz_buffer_log.bin` is missing, that usually means logging was not enabled for that run or the game did not exit cleanly enough to flush the ring buffer before collection.
 
 ---
 
@@ -555,29 +555,20 @@ Add the logger to:
 
 - `Microslop/winmm_proxy/src/netcode_hooks.cpp`
 
-### Current limitation
+### Current Windows implementation
 
-The Windows proxy currently only hooks `WSASocketW` for buffer application.
+The Windows proxy now logs the synchronous `WSARecvFrom` path used by the reorder engine and writes:
 
-Before the logger can be useful on Windows, extend the IAT patcher to support:
+- `bz_buffer_log.bin`
+- `bz_buffer_log.meta.txt`
 
-- `recvfrom`
-- `WSARecvFrom`
-- `setsockopt`
-- `getsockopt`
-- `ioctlsocket`
-- `WSAIoctl`
-- `WSAAsyncSelect`
-- `WSAEventSelect`
-- optionally `sendto`
+Text output remains in `winmm_proxy.log` for startup/status only.
 
 ### Windows runtime control
 
 Support these environment variables:
 
 - `BZ_BUFFER_LOG=1`
-- `BZ_BUFFER_LOG_SOCKET=<id>`
-- `BZ_BUFFER_LOG_PEER=<ip:port>`
 - `BZ_BUFFER_LOG_BYTES=32`
 - `BZ_BUFFER_LOG_RING=65536`
 
@@ -659,12 +650,7 @@ The first test goal is to answer:
 
 ## Important Limitation Right Now
 
-These scripts are ready to collect the new lightweight logger output, but the proxy-side packet logger still needs to be implemented in:
-
-- `Linux/proton_dsound_proxy/src/dsound_proxy.cpp`
-- `Microslop/winmm_proxy/src/netcode_hooks.cpp`
-
-Until that code exists, the scripts will still collect `BZLogger.txt` and the proxy text logs, but `bz_buffer_log.bin` may be missing.  That is expected.
+The logger is implemented on both Linux and Windows, but capture is still bounded by what the proxy sees on the hooked receive path. If a session exits uncleanly or never enables `BZ_BUFFER_LOG=1`, `bz_buffer_log.bin` may still be missing.
 
 ## Success Criteria For This Logger
 

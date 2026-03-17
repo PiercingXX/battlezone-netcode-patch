@@ -16,6 +16,9 @@
 #include "netcode_hooks.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <cctype>
+#include <cwchar>
 
 // Provided by dllmain.cpp
 extern void ProxyLog(const char* fmt, ...);
@@ -25,6 +28,37 @@ extern void ProxyLog(const char* fmt, ...);
 // ---------------------------------------------------------
 static const int kTargetSndBuf = 524288;   // 512 KB
 static const int kTargetRcvBuf = 4194304;  //   4 MB
+
+constexpr wchar_t kBufferBinName[] = L"bz_buffer_log.bin";
+constexpr wchar_t kBufferMetaName[] = L"bz_buffer_log.meta.txt";
+constexpr uint32_t kBufferLogVersion = 1;
+constexpr uint32_t kBufferLogMagic = 0x474c5a42; // 'BZLG'
+constexpr uint32_t kEventTypeWSARecvFrom = 2;
+constexpr uint32_t kDefaultPayloadBytes = 32;
+constexpr uint32_t kDefaultRingRecords = 65536;
+constexpr uint32_t kMinPayloadBytes = 8;
+constexpr uint32_t kMaxPayloadBytes = 256;
+constexpr uint32_t kMinRingRecords = 1024;
+constexpr uint32_t kMaxRingRecords = 1000000;
+
+#pragma pack(push, 1)
+struct BufferLogRecordHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t event_type;
+    uint32_t sid;
+    uint64_t tick_ms;
+    uint32_t sequence;
+    uint32_t requested_len;
+    uint32_t transferred_len;
+    uint32_t wsa_error;
+    uint32_t src_ipv4;
+    uint16_t src_port;
+    uint16_t flags;
+    uint16_t payload_len;
+    uint16_t reserved;
+};
+#pragma pack(pop)
 
 // ---------------------------------------------------------
 // Real-function pointers (resolved from ws2_32.dll)
@@ -51,6 +85,22 @@ static PFN_getsockopt  g_realGetsockopt  = nullptr;
 static PFN_WSARecvFrom g_realWSARecvFrom = nullptr;
 static PFN_closesocket g_realClosesocket = nullptr;
 
+static wchar_t          g_buffer_bin_path[MAX_PATH] = L"bz_buffer_log.bin";
+static wchar_t          g_buffer_meta_path[MAX_PATH] = L"bz_buffer_log.meta.txt";
+static bool             g_buffer_paths_ready = false;
+static CRITICAL_SECTION g_buffer_lock = {};
+static bool             g_buffer_lock_ready = false;
+static bool             g_buffer_log_initialized = false;
+static bool             g_buffer_log_enabled = false;
+static uint32_t         g_buffer_payload_bytes = kDefaultPayloadBytes;
+static uint32_t         g_buffer_ring_records = kDefaultRingRecords;
+static uint32_t         g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + kDefaultPayloadBytes);
+static uint32_t         g_buffer_head = 0;
+static uint32_t         g_buffer_count = 0;
+static uint32_t         g_buffer_sequence = 0;
+static uint64_t         g_buffer_total_events = 0;
+static uint8_t         *g_buffer_ring = nullptr;
+
 // ---------------------------------------------------------
 // Reorder globals (per-peer packet buffering)
 // ---------------------------------------------------------
@@ -62,6 +112,223 @@ static uint32_t          g_reorder_drain       = kReorderDrainCapDef;
 static PeerBuf           g_peers[kReorderPeerCap];        // zero-initialized (BSS)
 static CRITICAL_SECTION  g_reorder_cs          = {};
 static bool              g_reorder_cs_ready    = false;
+
+static bool env_truthy(const char *s) {
+    if (s == nullptr || *s == '\0') {
+        return false;
+    }
+    if (std::strcmp(s, "1") == 0) {
+        return true;
+    }
+    char lower[16] = {0};
+    size_t n = std::strlen(s);
+    if (n >= sizeof(lower)) {
+        n = sizeof(lower) - 1;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        lower[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(s[i])));
+    }
+    lower[n] = '\0';
+    return std::strcmp(lower, "true") == 0 || std::strcmp(lower, "yes") == 0 || std::strcmp(lower, "on") == 0;
+}
+
+static uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+static uint32_t parse_env_u32(const char *name, uint32_t fallback) {
+    const char *v = std::getenv(name);
+    if (v == nullptr || *v == '\0') {
+        return fallback;
+    }
+    char *end = nullptr;
+    unsigned long parsed = std::strtoul(v, &end, 10);
+    if (end == nullptr || *end != '\0' || parsed > 0xffffffffUL) {
+        return fallback;
+    }
+    return static_cast<uint32_t>(parsed);
+}
+
+static void init_buffer_paths() {
+    if (g_buffer_paths_ready) {
+        return;
+    }
+
+    wchar_t exe_path[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        g_buffer_paths_ready = true;
+        return;
+    }
+
+    wchar_t *sep = wcsrchr(exe_path, L'\\');
+    if (sep == nullptr) {
+        sep = wcsrchr(exe_path, L'/');
+    }
+    if (sep != nullptr) {
+        *(sep + 1) = L'\0';
+    } else {
+        exe_path[0] = L'\0';
+    }
+
+    g_buffer_bin_path[0] = L'\0';
+    if (lstrlenW(exe_path) + lstrlenW(kBufferBinName) + 1 < MAX_PATH) {
+        lstrcpyW(g_buffer_bin_path, exe_path);
+    }
+    lstrcatW(g_buffer_bin_path, kBufferBinName);
+
+    g_buffer_meta_path[0] = L'\0';
+    if (lstrlenW(exe_path) + lstrlenW(kBufferMetaName) + 1 < MAX_PATH) {
+        lstrcpyW(g_buffer_meta_path, exe_path);
+    }
+    lstrcatW(g_buffer_meta_path, kBufferMetaName);
+
+    g_buffer_paths_ready = true;
+}
+
+static void init_buffer_log_if_needed() {
+    if (g_buffer_log_initialized) {
+        return;
+    }
+    g_buffer_log_initialized = true;
+    init_buffer_paths();
+
+    const char *enabled = std::getenv("BZ_BUFFER_LOG");
+    if (!env_truthy(enabled)) {
+        ProxyLog("buffer_log: disabled (set BZ_BUFFER_LOG=1 to enable)");
+        return;
+    }
+
+    g_buffer_payload_bytes = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_BYTES", kDefaultPayloadBytes), kMinPayloadBytes, kMaxPayloadBytes);
+    g_buffer_ring_records = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_RING", kDefaultRingRecords), kMinRingRecords, kMaxRingRecords);
+    g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + g_buffer_payload_bytes);
+
+    size_t total = static_cast<size_t>(g_buffer_stride) * static_cast<size_t>(g_buffer_ring_records);
+    g_buffer_ring = reinterpret_cast<uint8_t *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total));
+    if (g_buffer_ring == nullptr) {
+        ProxyLog("buffer_log: allocation failed bytes=%lu", static_cast<unsigned long>(total));
+        return;
+    }
+
+    g_buffer_log_enabled = true;
+    ProxyLog("buffer_log: enabled payload=%u ring=%u stride=%u",
+             static_cast<unsigned>(g_buffer_payload_bytes),
+             static_cast<unsigned>(g_buffer_ring_records),
+             static_cast<unsigned>(g_buffer_stride));
+}
+
+static void buffer_log_event(uint32_t event_type,
+                             SOCKET s,
+                             const sockaddr *src,
+                             uint16_t flags,
+                             uint32_t requested_len,
+                             uint32_t transferred_len,
+                             uint32_t wsa_error,
+                             const uint8_t *payload,
+                             uint16_t payload_len) {
+    if (!g_buffer_log_enabled || !g_buffer_lock_ready || g_buffer_ring == nullptr) {
+        return;
+    }
+
+    if (payload_len > g_buffer_payload_bytes) {
+        payload_len = static_cast<uint16_t>(g_buffer_payload_bytes);
+    }
+
+    uint32_t src_ipv4 = 0;
+    uint16_t src_port = 0;
+    if (src != nullptr && src->sa_family == AF_INET) {
+        const sockaddr_in *in = reinterpret_cast<const sockaddr_in *>(src);
+        src_ipv4 = static_cast<uint32_t>(in->sin_addr.S_un.S_addr);
+        src_port = ntohs(in->sin_port);
+    }
+
+    EnterCriticalSection(&g_buffer_lock);
+    uint32_t idx = g_buffer_head;
+    uint8_t *slot = g_buffer_ring + (static_cast<size_t>(idx) * static_cast<size_t>(g_buffer_stride));
+
+    BufferLogRecordHeader rec = {};
+    rec.magic = kBufferLogMagic;
+    rec.version = kBufferLogVersion;
+    rec.event_type = event_type;
+    rec.sid = static_cast<uint32_t>(s);
+    rec.tick_ms = GetTickCount64();
+    rec.sequence = g_buffer_sequence++;
+    rec.requested_len = requested_len;
+    rec.transferred_len = transferred_len;
+    rec.wsa_error = wsa_error;
+    rec.src_ipv4 = src_ipv4;
+    rec.src_port = src_port;
+    rec.flags = flags;
+    rec.payload_len = payload_len;
+    std::memcpy(slot, &rec, sizeof(rec));
+
+    uint8_t *payload_dst = slot + sizeof(rec);
+    if (payload_len > 0 && payload != nullptr) {
+        std::memcpy(payload_dst, payload, payload_len);
+    }
+    if (payload_len < g_buffer_payload_bytes) {
+        std::memset(payload_dst + payload_len, 0, g_buffer_payload_bytes - payload_len);
+    }
+
+    g_buffer_head = (g_buffer_head + 1) % g_buffer_ring_records;
+    if (g_buffer_count < g_buffer_ring_records) {
+        ++g_buffer_count;
+    }
+    ++g_buffer_total_events;
+    LeaveCriticalSection(&g_buffer_lock);
+}
+
+static void flush_buffer_log_files() {
+    if (!g_buffer_log_enabled || g_buffer_ring == nullptr) {
+        return;
+    }
+
+    init_buffer_paths();
+
+    HANDLE bin = CreateFileW(g_buffer_bin_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (bin != INVALID_HANDLE_VALUE) {
+        EnterCriticalSection(&g_buffer_lock);
+        uint32_t count = g_buffer_count;
+        uint32_t start = (g_buffer_head + g_buffer_ring_records - g_buffer_count) % g_buffer_ring_records;
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t idx = (start + i) % g_buffer_ring_records;
+            const uint8_t *slot = g_buffer_ring + (static_cast<size_t>(idx) * static_cast<size_t>(g_buffer_stride));
+            DWORD written = 0;
+            WriteFile(bin, slot, g_buffer_stride, &written, nullptr);
+        }
+        LeaveCriticalSection(&g_buffer_lock);
+        CloseHandle(bin);
+    }
+
+    HANDLE meta = CreateFileW(g_buffer_meta_path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (meta != INVALID_HANDLE_VALUE) {
+        char text[1024] = {0};
+        int n = std::snprintf(text,
+                              sizeof(text),
+                              "format=buffer_log_v1\r\nrecord_header_size=%u\r\npayload_bytes=%u\r\nrecord_stride=%u\r\nring_records=%u\r\nrecords_written=%u\r\ntotal_events_seen=%llu\r\n",
+                              static_cast<unsigned>(sizeof(BufferLogRecordHeader)),
+                              static_cast<unsigned>(g_buffer_payload_bytes),
+                              static_cast<unsigned>(g_buffer_stride),
+                              static_cast<unsigned>(g_buffer_ring_records),
+                              static_cast<unsigned>(g_buffer_count),
+                              static_cast<unsigned long long>(g_buffer_total_events));
+        if (n > 0) {
+            DWORD written = 0;
+            WriteFile(meta, text, static_cast<DWORD>(n), &written, nullptr);
+        }
+        CloseHandle(meta);
+    }
+
+    ProxyLog("buffer_log: flushed records=%u total_events=%llu",
+             static_cast<unsigned>(g_buffer_count),
+             static_cast<unsigned long long>(g_buffer_total_events));
+}
 
 // Helper: sequence number comparison.  BZRNet wraps at 2^32, so we use
 // modular arithmetic (sint32 overflow to detect wrap).
@@ -274,8 +541,24 @@ static int WSAAPI Hooked_WSARecvFrom(
 
     if (!g_reorder_enabled || !g_reorder_cs_ready) {
         // Passthrough if reorder not configured or not ready
-        return g_realWSARecvFrom(s, buffers, buffer_count, bytes_received, inout_flags,
-                                from, fromlen, ov, cr);
+        int rc = g_realWSARecvFrom(s, buffers, buffer_count, bytes_received, inout_flags,
+                                   from, fromlen, ov, cr);
+        int wsa = static_cast<int>(WSAGetLastError());
+        if (g_buffer_log_enabled) {
+            uint32_t requested = 0;
+            for (DWORD i = 0; i < buffer_count && buffers != nullptr; ++i) {
+                requested += buffers[i].len;
+            }
+            uint32_t transferred = (rc == 0 && bytes_received != nullptr) ? *bytes_received : 0u;
+            uint16_t recv_flags = (inout_flags != nullptr) ? static_cast<uint16_t>(*inout_flags & 0xffffUL) : 0;
+            uint16_t payload_len = static_cast<uint16_t>((transferred < g_buffer_payload_bytes) ? transferred : g_buffer_payload_bytes);
+            const uint8_t *payload = (payload_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+            buffer_log_event(kEventTypeWSARecvFrom, s, from, recv_flags, requested, transferred,
+                             (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u, payload, payload_len);
+        }
+        WSASetLastError(wsa);
+        return rc;
     }
 
     EnterCriticalSection(&g_reorder_cs);
@@ -313,6 +596,16 @@ static int WSAAPI Hooked_WSARecvFrom(
                 *fromlen = drain_srclen;
             }
             LeaveCriticalSection(&g_reorder_cs);
+            if (g_buffer_log_enabled) {
+                uint32_t requested = 0;
+                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
+                const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+                buffer_log_event(kEventTypeWSARecvFrom, s,
+                                 reinterpret_cast<const sockaddr *>(&drain_src),
+                                 0, requested, copied, 0u, pay, pay_len);
+            }
             WSASetLastError(0);
             return 0;
         }
@@ -332,6 +625,16 @@ static int WSAAPI Hooked_WSARecvFrom(
                 *fromlen = drain_srclen;
             }
             LeaveCriticalSection(&g_reorder_cs);
+            if (g_buffer_log_enabled) {
+                uint32_t requested = 0;
+                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
+                const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+                buffer_log_event(kEventTypeWSARecvFrom, s,
+                                 reinterpret_cast<const sockaddr *>(&drain_src),
+                                 0, requested, copied, 0u, pay, pay_len);
+            }
             WSASetLastError(0);
             return 0;
         }
@@ -383,7 +686,20 @@ static int WSAAPI Hooked_WSARecvFrom(
     pkt->used    = 0;
     if (pb->filled > 0) --pb->filled;
 
+    sockaddr_in deliver_from = pkt->from;
+
     LeaveCriticalSection(&g_reorder_cs);
+
+    if (g_buffer_log_enabled) {
+        uint32_t requested = 0;
+        for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+        uint16_t pay_len = static_cast<uint16_t>((delivered < g_buffer_payload_bytes) ? delivered : g_buffer_payload_bytes);
+        const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                             ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+        buffer_log_event(kEventTypeWSARecvFrom, s,
+                         reinterpret_cast<const sockaddr *>(&deliver_from),
+                         0, requested, delivered, 0u, pay, pay_len);
+    }
 
     WSASetLastError(0);
     return 0;
@@ -495,6 +811,12 @@ void InstallNetcodeHooks()
 {
     ProxyLog("InstallNetcodeHooks: starting");
 
+    if (!g_buffer_lock_ready) {
+        InitializeCriticalSection(&g_buffer_lock);
+        g_buffer_lock_ready = true;
+    }
+    init_buffer_log_if_needed();
+
     // Initialize reorder critical section
     if (!g_reorder_cs_ready) {
         InitializeCriticalSection(&g_reorder_cs);
@@ -596,5 +918,25 @@ void InstallNetcodeHooks()
     {
         if (savedRealClosesocket) g_realClosesocket = reinterpret_cast<PFN_closesocket>(savedRealClosesocket);
         ProxyLog("InstallNetcodeHooks: closesocket IAT patched OK");
+    }
+}
+
+void ShutdownNetcodeHooks()
+{
+    flush_buffer_log_files();
+
+    if (g_buffer_ring != nullptr) {
+        HeapFree(GetProcessHeap(), 0, g_buffer_ring);
+        g_buffer_ring = nullptr;
+    }
+    g_buffer_log_enabled = false;
+
+    if (g_buffer_lock_ready) {
+        DeleteCriticalSection(&g_buffer_lock);
+        g_buffer_lock_ready = false;
+    }
+    if (g_reorder_cs_ready) {
+        DeleteCriticalSection(&g_reorder_cs);
+        g_reorder_cs_ready = false;
     }
 }

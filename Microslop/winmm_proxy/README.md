@@ -5,6 +5,7 @@
 This patched `winmm.dll` proxy for 64-bit Windows improves network performance for **Battlezone 98 Redux** multiplayer by:
 1. **Enlarging UDP socket buffers** to handle burst traffic: SO_SNDBUF=512KB, SO_RCVBUF=4MB
 2. **Out-of-order packet reordering** (OOO) with per-peer buffering and time-based delivery to reduce lag and frame drops
+3. **Optional binary packet logging** to `bz_buffer_log.bin` for low-overhead capture and offline analysis
 
 The patch is deployed as a 32-bit DLL (for Windows 7/10/11 compatibility) that is injected into the game process at startup.
 
@@ -53,7 +54,7 @@ The netcode hook thread runs automatically inside DLL_PROCESS_ATTACH, resolves r
 
 ## Configuration
 
-All parameters are baked into code defaults for simplicity:
+Core runtime parameters are baked into code defaults for simplicity:
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
@@ -64,7 +65,15 @@ All parameters are baked into code defaults for simplicity:
 | Reorder Peers | 32 sources | Max distinct IPv4 sources (P2P peers) |
 | Reorder Drain | 96 calls | Real WSARecvFrom calls per hook invocation |
 
-**No environment variables are currently exposed for tuning.** All settings are code-baked to "bake in as much as possible" and keep the deployment simple.
+Optional logging controls:
+
+| Variable | Default | Notes |
+|-----------|---------|-------|
+| BZ_BUFFER_LOG | off | Set to `1` to enable binary packet capture |
+| BZ_BUFFER_LOG_BYTES | 32 | Payload prefix bytes stored per record |
+| BZ_BUFFER_LOG_RING | 65536 | Number of ring-buffer records held in memory |
+
+Reorder and socket tuning stay baked into defaults. Logging is the only runtime feature toggle.
 
 ## Verification
 
@@ -92,6 +101,22 @@ WSASocketW hook: sock=0x... af=2 type=2 proto=17  SO_SNDBUF set_rc=0 effective r
 ```
 
 If effective values are **less than target**, Windows may have clamped them due to registry limits. Consult Windows network tuning docs.
+
+### Check Binary Packet Logging
+
+If you launched with `BZ_BUFFER_LOG=1`, the proxy will flush these files into the game directory on exit:
+
+```
+bz_buffer_log.bin
+bz_buffer_log.meta.txt
+```
+
+`winmm_proxy.log` will also include startup/shutdown lines such as:
+
+```
+buffer_log: enabled payload=32 ring=65536 stride=84
+buffer_log: flushed records=... total_events=...
+```
 
 ## OOO Reorder Engine (Technical)
 
@@ -154,11 +179,10 @@ Both Linux (`dsound.dll`) and Windows (`winmm.dll`) proxies implement the same r
 | **Hook Target** | WSARecvFrom in Proton's WS2_32.dll | WSARecvFrom in native WS2_32.dll |
 | **Tuning** | SO_SNDBUF=524KB, SO_RCVBUF=4MB | SO_SNDBUF=524KB, SO_RCVBUF=4MB |
 | **Reorder Profile** | window=45ms, drain=96, depth=8, peers=32 | window=45ms, drain=96, depth=8, peers=32 |
-| **Logging** | Optional binary packet capture (BZ_BUFFER_LOG) | winmm_proxy.log (patching diagnostics only) |
+| **Logging** | Optional binary packet capture (BZ_BUFFER_LOG) | Optional binary packet capture (BZ_BUFFER_LOG) |
 
 ## Known Limitations
 
-- **No per-match diagnostics:** Windows version logs only patching success/failure, not packet events (to keep overhead low)
 - **32-bit only:** 64-bit wine/proton not supported; Windows native only (though 32-bit DLL runs on 64-bit Windows via SysWoW64)
 - **Assumes single UDP socket:** Resets entire peer buffer table on closesocket (correct for BZ which uses one socket per session)
 

@@ -114,9 +114,20 @@ For full Windows-specific notes, see [Microslop/winmm_proxy/README.md](Microslop
 
 ---
 
-## Optional Logging (Linux)
+## Optional Logging
 
 If you want hard data instead of vibes:
+
+Windows:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+& "$HOME\Downloads\battlezone-netcode-testing-main\buffer-logging\buffer_logger_windows.ps1" -Action Start
+# Play session
+& "$HOME\Downloads\battlezone-netcode-testing-main\buffer-logging\buffer_logger_windows.ps1" -Action Stop
+```
+
+Linux:
 
 ```bash
 ./buffer-logging/buffer_logger_linux.sh start "/path/to/Battlezone 98 Redux" 32 65536
@@ -130,7 +141,6 @@ Details: [logging_readme.md](logging_readme.md)
 
 ## Known Limits
 
-- Windows packet logging is not wired yet
 - Primary UDP path is hooked (matches BZ behavior)
 - This fixes out-of-order handling, not every form of packet loss physics
 

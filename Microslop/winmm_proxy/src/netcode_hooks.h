@@ -42,3 +42,7 @@ struct PeerBuf {
 // applies SO_SNDBUF / SO_RCVBUF to every UDP socket created, and enables
 // per-peer OOO packet reordering via WSARecvFrom hook with drain-and-deliver.
 void InstallNetcodeHooks();
+
+// Called from DllMain during DLL_PROCESS_DETACH.
+// Flushes binary packet logs if enabled and releases hook-owned resources.
+void ShutdownNetcodeHooks();
