@@ -14,8 +14,28 @@ For logging instructions, see [logging_readme.md](logging_readme.md).
 
 ## Windows
 
-> **Not yet implemented.** The Windows `winmm_proxy` does not yet contain recv-path hooks.
-> Use Patch 00 on Windows for now — it still applies the socket buffer fix.
+OOO reorder is now **fully implemented** for 64-bit Windows via `winmm.dll` proxy injection.
+
+### Quick Start
+
+1. **Build the patch** (requires Linux with MinGW):
+   ```bash
+   cd "$HOME/Downloads/Battlezone Netcode Testing"
+   cd Microslop/winmm_proxy && make
+   ```
+   This produces `build/winmm.dll`.
+
+2. **Deploy to game folder:**
+   ```bash
+   cp Microslop/winmm_proxy/build/winmm.dll \
+      "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\"
+   ```
+
+3. **Launch game normally** — no special Steam launch options needed. The patch activates automatically.
+
+4. **Verify patching succeeded** — check `winmm_proxy.log` in the game folder for hook status.
+
+For detailed Windows setup and troubleshooting, see [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md).
 
 ---
 

@@ -114,7 +114,7 @@ uint8_t *g_buffer_ring = nullptr;
 // ── Per-peer reorder buffer ──────────────────────────────────────────────────
 // Enabled by default.  Set BZ_REORDER=0 to disable.  WSARecvFrom packets are
 // held in a per-source priority queue ordered by sequence number and delivered
-// to the game in order.  BZ_REORDER_WINDOW_MS (default 30 ms) is the max time
+// to the game in order.  BZ_REORDER_WINDOW_MS (default 45 ms) is the max time
 // a packet may be held before being forced out regardless of whether its
 // predecessor arrived.
 //
@@ -122,10 +122,10 @@ uint8_t *g_buffer_ring = nullptr;
 // live binary capture analysis (resources/valid_capture_reorder_signal_only.csv).
 constexpr uint32_t kReorderSeqOffset   = 13;    // byte offset in payload
 constexpr uint32_t kReorderSeqMinPay   = 17;    // minimum payload length with seq field
-constexpr uint32_t kReorderDefaultMs   = 30;    // default hold window (ms)
+constexpr uint32_t kReorderDefaultMs   = 45;    // default hold window (ms), tuned from live captures
 constexpr uint32_t kReorderSlotCap     = 8;     // max per-peer buffered packet slots
 constexpr uint32_t kReorderPeerCap     = 32;    // max distinct IPv4 sources
-constexpr uint32_t kReorderDrainCapDef = 32;    // default real WSARecvFrom calls per hook invocation
+constexpr uint32_t kReorderDrainCapDef = 96;    // default real WSARecvFrom calls per hook invocation
 constexpr uint32_t kReorderDrainCapMax = 128;   // hard cap for drain loop
 constexpr uint32_t kReorderMaxPktBytes = 1500;  // max UDP datagram size
 
@@ -1636,9 +1636,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         }
         init_buffer_log_if_needed();
         {
-            // Default ON; set BZ_REORDER=0 to disable.
-            const char *rv = std::getenv("BZ_REORDER");
-            g_reorder_enabled = (rv == nullptr || *rv == '\0') ? true : env_truthy(rv);
+            // Finalized Linux profile: keep reorder enabled by default.
+            g_reorder_enabled = true;
             g_reorder_ms = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
             g_reorder_depth = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
             g_reorder_peers = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
@@ -1646,7 +1645,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
         log_line("reorder: %s window_ms=%u depth=%u peers=%u drain=%u seq_offset=%u",
-                 g_reorder_enabled ? "enabled" : "disabled (BZ_REORDER=0)",
+                 "enabled",
                  static_cast<unsigned>(g_reorder_ms),
                  static_cast<unsigned>(g_reorder_depth),
                  static_cast<unsigned>(g_reorder_peers),

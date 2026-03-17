@@ -52,13 +52,15 @@ From the repository root:
 
 ## Reorder Configuration
 
+The finalized profile is baked into defaults (window `45`, depth `8`, peers `32`,
+drain `96`), so these are optional overrides only.
+
 | Variable | Default | Description |
 |---|---|---|
-| `BZ_REORDER` | *(on)* | Set to `0` to disable reorder buffering |
-| `BZ_REORDER_WINDOW_MS` | `30` | Max hold time before releasing oldest queued packet |
+| `BZ_REORDER_WINDOW_MS` | `45` | Max hold time before releasing oldest queued packet |
 | `BZ_REORDER_DEPTH` | `8` | Active per-peer reorder queue depth (max `8`) |
 | `BZ_REORDER_PEERS` | `32` | Active peer table size (max `32`) |
-| `BZ_REORDER_DRAIN` | `32` | Max socket drain iterations per hook call (max `128`) |
+| `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`) |
 | `BZ_BUFFER_LOG` | *(off)* | Set to `1` to capture binary packet trace |
 
 ## Steam Launch Options
