@@ -11,7 +11,7 @@ I built a packet reordering engine that intercepts wayward packets mid-flight, b
 The patch runs entirely in userspace via DLL proxy injection. The game never knows it's there.
 
 
-## What War Actually Shipped (V1 -> V3)
+## What Was Actually Shipped (V1 -> V3)
 
 ### Version 1 (Patch 00)
 - Forced bigger UDP socket buffers
