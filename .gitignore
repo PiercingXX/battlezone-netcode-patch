@@ -8,6 +8,7 @@ build/
 *.so
 *.dll
 !**/Microslop/winmm.dll
+!prebuilt/windows/winmm.dll
 *.exe
 *.out
 

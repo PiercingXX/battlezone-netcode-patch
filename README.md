@@ -1,160 +1,144 @@
-# Battlezone Netcode Testing — Out-of-Order Packet Resequencing
+# Battlezone Netcode Testing
 
-This repo includes socket buffer sizing plus **in-proxy reorder buffering**.
+## Netcode, But Less Embarrassing
 
-Battlezone 98 Redux drops any UDP packet whose internal sequence number is not exactly the next expected value.  On bursty or wireless connections this causes cascading drops and visible player warping.  This patch intercepts `WSARecvFrom` in the proxy DLL, holds packets arriving just out of order in a small per-peer buffer, and delivers them to the game in the correct sequence — without touching the game binary.
+Battlezone drops out-of-order UDP packets like they're invalid by moral principle.
 
-> **These instructions assume you downloaded this repo as a ZIP from GitHub and extracted it to your Downloads folder.**
-> All commands below are fully copy-pasteable — `$USER` and `$HOME` expand automatically.
-> If your extracted folder name differs, replace `Battlezone Netcode Testing` in the commands below.
+That is fine on perfect links and garbage on real ones.
 
-For logging instructions, see [logging_readme.md](logging_readme.md).
+This repo ships the proxy patch that fixes that behavior.
 
----
-
-## Windows
-
-OOO reorder is now **fully implemented** for 64-bit Windows via `winmm.dll` proxy injection.
-
-### Quick Start
-
-1. **Build the patch** (requires Linux with MinGW):
-   ```bash
-   cd "$HOME/Downloads/Battlezone Netcode Testing"
-   cd Microslop/winmm_proxy && make
-   ```
-   This produces `build/winmm.dll`.
-
-2. **Deploy to game folder:**
-   ```bash
-   cp Microslop/winmm_proxy/build/winmm.dll \
-      "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\"
-   ```
-
-3. **Launch game normally** — no special Steam launch options needed. The patch activates automatically.
-
-4. **Verify patching succeeded** — check `winmm_proxy.log` in the game folder for hook status.
-
-For detailed Windows setup and troubleshooting, see [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md).
+No game binary edits. No ritual config voodoo. Just a DLL proxy that intercepts recv path traffic, reorders short-window out-of-order packets, and hands clean sequence flow back to the game.
 
 ---
 
-## Linux — Native Steam
+## What We Shipped (V1 -> V3)
 
-### Step 1: Install required tools
+### V1 (Patch 00)
+- Forced bigger UDP socket buffers
+- `SO_SNDBUF = 512 KB`
+- `SO_RCVBUF = 2 MB`
+- Immediate gain: better burst tolerance
 
-**Debian / Ubuntu:**
+### V2
+- Forced even bigger UDP socket buffers
+- SO_SNDBUF = 512 KB
+- SO_RCVBUF = 4 MB
+- Hardened hooks and improved deployment consistency
+
+### V3 (Current)
+- Added in-proxy out-of-order packet reordering (`WSARecvFrom` path)
+- Per-peer buffering with deterministic sequence release
+- Final tuned profile:
+- Reorder window `45 ms`
+- Drain budget `96`
+- Per-peer depth `8`
+- Peer cap `32`
+- Sequence location `payload[13..16]` (`u32le`)
+- Linux and Windows now have matching behavior
+
+---
+
+## Quick Start
+
+### Linux / Proton
+
+1. Install build tools.
+
+Debian/Ubuntu:
 ```bash
 sudo apt install mingw-w64 make
 ```
 
-**Arch / Manjaro:**
+Arch/Manjaro:
 ```bash
 sudo pacman -S mingw-w64-gcc make
 ```
 
-### Step 2: Deploy the patch
+2. Deploy proxy to your Battlezone install.
 
+Native Steam path:
 ```bash
 cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-### Step 3: Set Steam launch options
-
-1. Open Steam
-2. Right-click **Battlezone 98 Redux** → **Properties**
-3. Click **General** on the left
-4. In the **Launch Options** box paste:
-
-```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
-> Reordering is **on by default**.  Add `BZ_REORDER=0` to the front of the launch options only if you experience issues.
-
----
-
-## Linux — Snap Steam
-
-### Step 1: Install required tools
-
-**Debian / Ubuntu:**
-```bash
-sudo apt install mingw-w64 make
-```
-
-**Arch / Manjaro:**
-```bash
-sudo pacman -S mingw-w64-gcc make
-```
-
-### Step 2: Deploy the patch
-
+Snap Steam path:
 ```bash
 cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-### Step 3: Set Steam launch options
-
-```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
-```
-
----
-
-## Linux — Flatpak Steam
-
-### Step 1: Install required tools
-
-**Debian / Ubuntu:**
-```bash
-sudo apt install mingw-w64 make
-```
-
-**Arch / Manjaro:**
-```bash
-sudo pacman -S mingw-w64-gcc make
-```
-
-### Step 2: Deploy the patch
-
+Flatpak Steam path:
 ```bash
 cd "$HOME/Downloads/Battlezone Netcode Testing"
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
-### Step 3: Set Steam launch options
+3. Steam launch options:
 
-```
+```text
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
+### Windows
+
+1. No-build option (recommended): use the prebuilt DLL in this repo:
+
+```text
+prebuilt/windows/winmm.dll
+```
+
+Optional integrity check:
+
+```bash
+cd "Battlezone Netcode Testing/prebuilt/windows"
+sha256sum -c winmm.dll.sha256
+```
+
+2. Copy `winmm.dll` to your game folder:
+
+```text
+C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
+```
+
+3. Launch normally.
+
+If you want to build it yourself instead:
+
+```bash
+cd "$HOME/Downloads/Battlezone Netcode Testing"
+cd Microslop/winmm_proxy && make
+```
+
+For full Windows-specific notes, see [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md).
+
 ---
 
-## Environment Variables
+## Optional Logging (Linux)
 
-| Variable | Default | Description |
-|---|---|---|
-| `BZ_REORDER` | *(on)* | Set to `0` to disable reorder buffering |
-| `BZ_REORDER_WINDOW_MS` | `30` | Max time (ms) a packet may be held waiting for its predecessor. Increase to `50`–`60` for very bursty/wireless peers. |
-| `BZ_BUFFER_LOG` | *(off)* | Set to `1` to capture binary packet trace for analysis |
+If you want hard data instead of vibes:
+
+```bash
+./buffer-logging/buffer_logger_linux.sh start "/path/to/Battlezone 98 Redux" 32 65536
+# Play session
+./buffer-logging/buffer_logger_linux.sh stop
+```
+
+Details: [logging_readme.md](logging_readme.md)
 
 ---
 
-## What Changed vs. Patch 00
+## Known Limits
 
-This patch includes everything from Patch 00 (SO_SNDBUF / SO_RCVBUF forcing) and adds:
+- Windows packet logging is not wired yet
+- Primary UDP path is hooked (matches BZ behavior)
+- This fixes out-of-order handling, not every form of packet loss physics
 
-- Per-peer reorder buffer inside `hooked_WSARecvFrom`
-- Up to 8 packets held per peer, keyed by IPv4 source
-- Sequence field read from `payload[13..16]` (u32le) — confirmed via live binary capture analysis
-- Hold window eviction: oldest packet released once it exceeds `BZ_REORDER_WINDOW_MS`
-- Peer table cleared on `closesocket` to prevent stale state across reconnections
+---
 
-## Technical Details
+## More Technical Docs
 
-- Source: `Linux/proton_dsound_proxy/src/dsound_proxy.cpp`
-- Sequence field analysis: `resources/valid_capture_reorder_signal_only.csv`
-- Full investigation: `resources/INVESTIGATION_WRITEUP.md`
+- [Linux/proton_dsound_proxy/README.md](Linux/proton_dsound_proxy/README.md)
+- [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md)
+- [resources/INVESTIGATION_WRITEUP.md](resources/INVESTIGATION_WRITEUP.md)
