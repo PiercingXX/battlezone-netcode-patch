@@ -1,7 +1,6 @@
----
-
 ## Quick Start
 
+---
 
 ### Windows 🪟
 
