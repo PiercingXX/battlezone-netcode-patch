@@ -10,6 +10,8 @@ Step 1: paste this into PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
 ```
 
+This installs the known-good prebuilt `winmm.dll` for Windows and verifies its hash before deployment.
+
 Windows does not need any Steam launch option changes.
 
 

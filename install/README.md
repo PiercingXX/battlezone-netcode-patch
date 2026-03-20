@@ -1,8 +1,7 @@
 # One-Line Install
 
-These commands download the source from this repository, install missing build dependencies if needed, compile the patch locally on the machine that runs the command, and then install the resulting DLL into the Battlezone 98 Redux folder.
-
-If dependencies are missing, the installer explains what it wants to install and why before asking for confirmation.
+Linux builds from source on your machine.
+Windows installs the known-good prebuilt DLL with hash verification.
 
 ## Linux
 
@@ -40,4 +39,4 @@ Explicit game path:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:BZNET_GAME_PATH='D:\Steam\steamapps\common\Battlezone 98 Redux'; irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
 ```
 
-Windows installs MSYS2 plus the MinGW 32-bit compiler only if they are missing, then builds `winmm.dll` locally. No Steam launch option changes are required.
+Windows installs the known-good `winmm.dll` from this repo and verifies SHA256 before deploy. No Steam launch option changes are required.
