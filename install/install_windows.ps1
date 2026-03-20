@@ -6,6 +6,7 @@ $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "main" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $archiveUrl = if ($env:BZNET_ARCHIVE_URL) { $env:BZNET_ARCHIVE_URL } else { "https://github.com/$repoSlug/archive/$ref.zip" }
 $assumeYes = $env:BZNET_ASSUME_YES -eq "1"
+$enforceLocalBuild = $env:BZNET_ENFORCE_LOCAL_BUILD -eq "1"
 
 function Find-GamePath {
     $candidates = @(
@@ -117,6 +118,25 @@ function Expand-SourceArchive {
     return $root.FullName
 }
 
+function Get-ExpectedWinmmHash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot
+    )
+
+    $hashFile = Join-Path $SourceRoot "prebuilt\windows\winmm.dll.sha256"
+    if (-not (Test-Path $hashFile)) {
+        return $null
+    }
+
+    $line = (Get-Content -Path $hashFile -TotalCount 1).Trim()
+    if ($line -match '^([0-9a-fA-F]{64})\s+') {
+        return $matches[1].ToLowerInvariant()
+    }
+
+    return $null
+}
+
 if (-not $gamePath) {
     $gamePath = Find-GamePath
 }
@@ -159,6 +179,21 @@ try {
         throw "Build completed, but winmm.dll was not produced."
     }
 
+    $actualBuiltHash = (Get-FileHash -Algorithm SHA256 -Path $builtDll).Hash.ToLowerInvariant()
+    $expectedHash = Get-ExpectedWinmmHash -SourceRoot $sourceRoot
+    $dllToInstall = $builtDll
+
+    if ($expectedHash -and $actualBuiltHash -ne $expectedHash) {
+        $prebuiltDll = Join-Path $sourceRoot "prebuilt\windows\winmm.dll"
+        if ($enforceLocalBuild -or -not (Test-Path $prebuiltDll)) {
+            throw "Local build hash mismatch. Expected $expectedHash but built $actualBuiltHash. Set up a stable MinGW toolchain or remove BZNET_ENFORCE_LOCAL_BUILD to allow fallback."
+        }
+
+        Write-Warning "Local build hash mismatch (expected $expectedHash, built $actualBuiltHash)."
+        Write-Host "Falling back to known-good prebuilt winmm.dll from this source bundle."
+        $dllToInstall = $prebuiltDll
+    }
+
     $destPath = Join-Path $gamePath "winmm.dll"
     if (Test-Path $destPath) {
         Write-Host "Deleting existing winmm.dll before install"
@@ -166,7 +201,7 @@ try {
     }
 
     Write-Host "Installing patch to $destPath"
-    Copy-Item -Force $builtDll $destPath
+    Copy-Item -Force $dllToInstall $destPath
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gamePath "winmm_proxy.log")
 
     Write-Host ""
