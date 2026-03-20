@@ -60,7 +60,7 @@ function Get-MsysRoot {
 function Ensure-Msys2 {
     $msysRoot = Get-MsysRoot
     if ($msysRoot) {
-        return $msysRoot
+        return [string]$msysRoot
     }
 
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -68,14 +68,14 @@ function Ensure-Msys2 {
     }
 
     Confirm-InstallStep -Explanation "This installer needs MSYS2 so it can build the 32-bit winmm.dll locally from source. MSYS2 provides the bash shell, pacman package manager, and GNU build tools used only for compiling the patch."
-    winget install --id MSYS2.MSYS2 --accept-package-agreements --accept-source-agreements --disable-interactivity
+    winget install --id MSYS2.MSYS2 --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
 
     $msysRoot = Get-MsysRoot
     if (-not $msysRoot) {
         throw "MSYS2 installation completed, but the install path could not be detected."
     }
 
-    return $msysRoot
+    return [string]$msysRoot
 }
 
 function Ensure-BuildDependencies {
