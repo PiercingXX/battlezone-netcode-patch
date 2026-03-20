@@ -1,31 +1,22 @@
-### The Actual Problem
-Battlezone's netcode is brutally unforgiving: it drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
-
-It is now substantially less dumb.
-
-### The "Solution": Out-of-Order Packet Reordering
-I built a packet reordering engine that intercepts wayward packets mid-flight, buffers them for up to 45ms, then releases them once their predecessors arrive. Think traffic control, not packet panic.
-
-**The result:** ~4-5 fewer drops per minute on typical connections. On WiFi or high-latency links: better hit registration, smoother movement, and fewer "how did that even happen" moments...yes there are still drops, I said 'fewer'.
-
-The patch runs entirely in userspace via DLL proxy injection. The game never knows it's there.
-
-
-
-
-
-
 ---
 
 ## Quick Start
 
 
-What it does for you:
-- grabs the source from this repo,
-- installs missing build tools if needed,
-- tells you what it wants to install and why before it does anything,
-- builds the patch on your own machine,
-- deletes any old patch DLL first so you do not end up testing yesterday's mistakes.
+### Windows 🪟
+
+Step 1: paste this into PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
+```
+
+Windows does not need any Steam launch option changes, because for once Windows is the less annoying one here. 🙃
+
+
+
+--- 
+
 
 ### Linux / Proton 🐧
 
@@ -41,22 +32,27 @@ Step 2: set this in Steam launch options:
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-That is it. No scavenger hunt. No manual DLL juggling. 🛠️
-
 
 
 ---
 
-### Windows 🪟
 
-Step 1: paste this into PowerShell:
+---
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
-```
 
-Windows does not need any Steam launch option changes, because for once Windows is the less annoying one here. 🙃
 
+
+### The Actual Problem
+Battlezone's netcode is brutally unforgiving: it drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
+
+It is now substantially less dumb.
+
+### The "Solution": Out-of-Order Packet Reordering
+I built a packet reordering engine that intercepts wayward packets mid-flight, buffers them for up to 45ms, then releases them once their predecessors arrive. Think traffic control, not packet panic.
+
+**The result:** ~4-5 fewer drops per minute on typical connections. On WiFi or high-latency links: better hit registration, smoother movement, and fewer "how did that even happen" moments...yes there are still drops, I said 'fewer'.
+
+The patch runs entirely in userspace via DLL proxy injection. The game never knows it's there.
 
 
 
