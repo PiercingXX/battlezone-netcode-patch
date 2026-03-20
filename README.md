@@ -40,7 +40,75 @@ The patch runs entirely in userspace via DLL proxy injection. The game never kno
 
 ## Quick Start
 
+### Default Install Method
+
+This is the main install method now. Use this unless you enjoy doing things the hard way for character development. 😏
+
+What it does for you:
+- grabs the source from this repo,
+- installs missing build tools if needed,
+- tells you what it wants to install and why before it does anything,
+- builds the patch on your own machine,
+- deletes any old patch DLL first so you do not end up testing yesterday's mistakes.
+
+### Linux / Proton 🐧
+
+Step 1: paste this into terminal:
+
+```bash
+curl -fsSL https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_linux.sh | bash
+```
+
+If your game is in a weird custom location, use this instead:
+
+```bash
+curl -fsSL https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_linux.sh | bash -s -- --game-path "/path/to/Battlezone 98 Redux"
+```
+
+Step 2: set this in Steam launch options:
+
+```text
+WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+```
+
+Step 3: launch the game.
+
+That is it. No scavenger hunt. No manual DLL juggling. 🛠️
+
+### Windows 🪟
+
+Step 1: paste this into PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
+```
+
+If your game is installed somewhere cursed, use this instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:BZNET_GAME_PATH='D:\Steam\steamapps\common\Battlezone 98 Redux'; irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
+```
+
+Step 2: launch the game.
+
+Windows does not need any Steam launch option changes, because for once Windows is the less annoying one here. 🙃
+
+### What Happens If Stuff Is Missing? 🤖
+
+If your system is missing build tools, the installer will:
+- explain exactly what it wants to install,
+- explain why it needs those packages,
+- ask before installing anything.
+
+So no, it does not just start shoveling random nonsense onto your machine.
+
+### Want To Do It Manually Instead? 🔧
+
+Manual build and deployment steps are still listed below if you want full control or just do not trust automation. Fair.
+
 ### Linux / Proton
+
+Manual install path:
 
 1. Install build tools.
 
@@ -82,7 +150,34 @@ WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 
 ### Windows
 
-1. No-build option (recommended): use the prebuilt DLL in this repo:
+Manual install path:
+
+Windows Defender note (important):
+
+- Some users report Defender quarantining winmm.dll from GitHub source ZIP downloads as Program:Win32/Contebrew.A!ml.
+- This is a heuristic/PUA-style detection commonly triggered by unsigned DLL proxy/hook binaries.
+- If Defender quarantines the file, do not disable antivirus globally. See remediation below.
+
+1. Build-it-yourself option (recommended for source ZIP users):
+
+```bash
+cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd Microslop/winmm_proxy && make
+```
+
+Then copy:
+
+```text
+Microslop/winmm_proxy/build/winmm.dll
+```
+
+to your game folder:
+
+```text
+C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
+```
+
+2. Prebuilt option: use the prebuilt DLL in this repo if your AV policy allows it:
 
 ```text
 prebuilt/windows/winmm.dll
@@ -95,15 +190,28 @@ cd "$HOME/Downloads/battlezone-netcode-testing-main/prebuilt/windows"
 sha256sum -c winmm.dll.sha256
 ```
 
-2. Copy `winmm.dll` to your game folder:
+3. Copy winmm.dll to your game folder:
 
 ```text
 C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
 ```
 
-3. Launch normally.
+4. Launch normally.
 
-If you want to build it yourself instead:
+If Defender quarantines the DLL:
+
+- Open Windows Security -> Protection history.
+- Confirm affected item path and detection name.
+- If hash matches your expected build, restore the file and add a narrow exception for that one game-folder DLL only.
+- Submit a false-positive report to Microsoft with the DLL and detection details.
+- Prefer signed release artifacts when available.
+
+Maintainer release guidance (recommended):
+
+- Avoid shipping unsigned DLL binaries inside the source ZIP path when possible.
+- Prefer GitHub Releases assets with SHA256 + Authenticode signature.
+
+If you want to build from source:
 
 ```bash
 cd "$HOME/Downloads/battlezone-netcode-testing-main"
