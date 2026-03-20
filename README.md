@@ -37,8 +37,6 @@ WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ---
 
 
----
-
 
 
 
