@@ -194,6 +194,14 @@ Both Linux (`dsound.dll`) and Windows (`winmm.dll`) proxies implement the same r
 
 ## Troubleshooting
 
+### Windows Defender quarantines winmm.dll (Program:Win32/Contebrew.A!ml)
+
+- This project uses a DLL proxy/hook pattern, which can trigger heuristic or PUA detections on unsigned binaries.
+- If Defender quarantines winmm.dll, confirm the detection details in Protection history and verify file integrity against your expected hash/build.
+- Do not disable Defender globally. If you trust the exact file hash, restore only that item and apply a path-specific exception for the game-folder winmm.dll.
+- Submit the quarantined sample to Microsoft as a false positive and include the detection name and file path.
+- For maintainers/distribution: signed release artifacts and published SHA256 values reduce repeated false positives.
+
 ### "WSASocketW not found in game IAT"
 - Game exe may have been linked differently; reorder will not be enabled
 - Buffer tuning (SO_SNDBUF/SO_RCVBUF) may still help

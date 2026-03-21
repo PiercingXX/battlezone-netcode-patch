@@ -9,6 +9,11 @@ build/
 *.dll
 !**/Microslop/winmm.dll
 !prebuilt/windows/winmm.dll
+!prebuilt/linux/dsound.dll
+!prebuilt/linux/dsound.dll.sha256
+
+# Test bundles / captured run data
+test_bundles/
 *.exe
 *.out
 
