@@ -117,6 +117,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
     }
 
     case DLL_PROCESS_DETACH:
+        ShutdownNetcodeHooks();
         if (g_log)
         {
             fprintf(g_log, "=== winmm_proxy.dll unloaded ===\n");

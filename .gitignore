@@ -1,2 +1,36 @@
-/Linux/proton_dsound_proxy/build/
-/Microslop/winmm_proxy/build/
+# Build artifacts
+build/
+**/build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+!**/Microslop/winmm.dll
+!prebuilt/windows/winmm.dll
+!prebuilt/linux/dsound.dll
+!prebuilt/linux/dsound.dll.sha256
+
+# Test bundles / captured run data
+test_bundles/
+*.exe
+*.out
+
+# Generated logs and diagnostics
+*.log
+*.tmp
+*.cache
+
+# Shell/PowerShell transient outputs
+*.stackdump
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
