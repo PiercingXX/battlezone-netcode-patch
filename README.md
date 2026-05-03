@@ -7,7 +7,7 @@
 Step 1: paste this into PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/install/install_windows.ps1 | iex"
 ```
 
 This installs the known-good prebuilt `winmm.dll` for Windows and verifies its hash before deployment.
@@ -24,7 +24,7 @@ Windows does not need any Steam launch option changes.
 Step 1: paste this into terminal:
 
 ```bash
-curl -fsSL https://github.com/PiercingXX/battlezone-netcode-testing/raw/main/install/install_linux.sh | bash
+curl -fsSL https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/install/install_linux.sh | bash
 ```
 
 Step 2: set this in Steam launch options:
@@ -168,19 +168,19 @@ sudo pacman -S mingw-w64-gcc make
 
 Native Steam path:
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd "$HOME/Downloads/battlezone-netcode-patch-main"
 ./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Snap Steam path:
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd "$HOME/Downloads/battlezone-netcode-patch-main"
 ./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
 Flatpak Steam path:
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd "$HOME/Downloads/battlezone-netcode-patch-main"
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
 
@@ -200,10 +200,10 @@ Windows Defender note (important):
 - This is a heuristic/PUA-style detection commonly triggered by unsigned DLL proxy/hook binaries.
 - If Defender quarantines the file, do not disable antivirus globally. See remediation below.
 
-1. Build-it-yourself option (recommended for source ZIP users):
+1. Build-it-yourself option (advanced/troubleshooting only; some local Windows builds have been reported to crash in-game):
 
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd "$HOME/Downloads/battlezone-netcode-patch-main"
 cd Microslop/winmm_proxy && make
 ```
 
@@ -219,7 +219,7 @@ to your game folder:
 C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
 ```
 
-2. Prebuilt option: use the prebuilt DLL in this repo if your AV policy allows it:
+2. Recommended option: use the prebuilt DLL in this repo if your AV policy allows it:
 
 ```text
 prebuilt/windows/winmm.dll
@@ -228,7 +228,7 @@ prebuilt/windows/winmm.dll
 Optional integrity check:
 
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main/prebuilt/windows"
+cd "$HOME/Downloads/battlezone-netcode-patch-main/prebuilt/windows"
 sha256sum -c winmm.dll.sha256
 ```
 
@@ -256,7 +256,7 @@ Maintainer release guidance (recommended):
 If you want to build from source:
 
 ```bash
-cd "$HOME/Downloads/battlezone-netcode-testing-main"
+cd "$HOME/Downloads/battlezone-netcode-patch-main"
 cd Microslop/winmm_proxy && make
 ```
 
@@ -272,9 +272,9 @@ Windows:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass -Force
-& "$HOME\Downloads\battlezone-netcode-testing-main\buffer-logging\buffer_logger_windows.ps1" -Action Start
+& "$HOME\Downloads\battlezone-netcode-patch-main\buffer-logging\buffer_logger_windows.ps1" -Action Start
 # Play session
-& "$HOME\Downloads\battlezone-netcode-testing-main\buffer-logging\buffer_logger_windows.ps1" -Action Stop
+& "$HOME\Downloads\battlezone-netcode-patch-main\buffer-logging\buffer_logger_windows.ps1" -Action Stop
 ```
 
 Linux:

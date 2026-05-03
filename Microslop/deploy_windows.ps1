@@ -9,8 +9,7 @@
 #   cd "path\to\repo"
 #   .\Microslop\deploy_windows.ps1
 #
-# Default source is Microslop\winmm.dll (ready-to-copy artifact in this repo).
-# If that file is missing, the script falls back to Microslop\winmm_proxy\build\winmm.dll.
+# Default source is Microslop\winmm.dll (known-good artifact in this repo).
 # You can always override with -DllPath.
 
 [CmdletBinding()]
@@ -52,14 +51,9 @@ Write-Host "Game folder : $GamePath"
 # ---------------------------------------------------------------------------
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoDll    = Join-Path $scriptDir "winmm.dll"
-$buildDll   = Join-Path $scriptDir "winmm_proxy\build\winmm.dll"
 
 if (-not $DllPath) {
-    if (Test-Path $repoDll) {
-        $DllPath = $repoDll
-    } else {
-        $DllPath = $buildDll
-    }
+    $DllPath = $repoDll
 }
 
 if (-not (Test-Path $DllPath)) {
@@ -67,9 +61,8 @@ if (-not (Test-Path $DllPath)) {
     Write-Host "ERROR: winmm.dll not found at:" -ForegroundColor Red
     Write-Host "  $DllPath"
     Write-Host ""
-    Write-Host "Build it first on Linux:"
-    Write-Host "  cd Microslop/winmm_proxy && make"
-    Write-Host "Then copy build/winmm.dll to Microslop/winmm.dll"
+    Write-Host "Use install\\install_windows.ps1 to fetch the known-good prebuilt winmm.dll."
+    Write-Host "Building winmm.dll locally is not the recommended Windows path."
     exit 1
 }
 
