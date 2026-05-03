@@ -30,6 +30,13 @@ echo "Deploying dsound.dll to: $GAME_ROOT"
 command cp -f "$DLL_SRC" "$DLL_DST"
 rm -f "$GAME_ROOT/dsound_proxy.log"
 
+if [[ -x "$SCRIPT_DIR/repair_exu_linux.sh" ]]; then
+  echo "Running Linux EXU compatibility repair (best effort)..."
+  if ! "$SCRIPT_DIR/repair_exu_linux.sh" --game-path "$GAME_ROOT"; then
+    echo "Warning: EXU compatibility repair failed; continuing with dsound patch deploy." >&2
+  fi
+fi
+
 echo
 echo "Deployment complete."
 echo "Steam launch options should be:"

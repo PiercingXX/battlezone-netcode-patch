@@ -27,6 +27,8 @@ Step 1: paste this into terminal:
 curl -fsSL https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/install/install_linux.sh | bash
 ```
 
+This now also performs an automatic Linux EXU compatibility repair (best effort) after installing the proxy.
+
 Step 2: set this in Steam launch options:
 
 ```text
@@ -183,6 +185,8 @@ Flatpak Steam path:
 cd "$HOME/Downloads/battlezone-netcode-patch-main"
 ./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
 ```
+
+`deploy_linux.sh` also runs Linux EXU compatibility repair automatically (best effort).
 
 3. Steam launch options:
 

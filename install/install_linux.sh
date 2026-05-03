@@ -274,6 +274,14 @@ echo "Installing patch to $dest_path"
 command install -m 0644 "$built_dll" "$dest_path"
 rm -f "$GAME_PATH/dsound_proxy.log"
 
+exu_repair_script="$source_root/Linux/repair_exu_linux.sh"
+if [[ -x "$exu_repair_script" ]]; then
+    echo "Applying Linux EXU compatibility repair (best effort)"
+    if ! "$exu_repair_script" --game-path "$GAME_PATH"; then
+        echo "Warning: EXU compatibility repair failed; continuing with netcode patch install." >&2
+    fi
+fi
+
 cat <<EOF
 
 Install complete.
