@@ -1,107 +1,77 @@
-# Proton DSOUND Proxy
+# Proton DSOUND Proxy (Linux) — Buffer Sizing + OOO Resequencing
 
-This directory contains the working startup-time `dsound.dll` proxy used for Battlezone 98 Redux on Proton.
+This build forces socket buffer sizes and adds in-proxy packet resequencing in
+`WSARecvFrom`.
 
 ## Why DSOUND.dll
 
-The game imports `DSOUND.dll` very early, and in this build it only imports ordinal `1` from that DLL.
-
-That makes `DSOUND.dll` a lower-risk proxy target than `WS2_32.dll`, which would require a full network stack proxy.
-
-The goal is to get code execution inside the game process before the game reaches the startup socket initialization path.
+The game imports `DSOUND.dll` very early and only uses ordinal `1` from it, making it a low-risk proxy target compared to a full `WS2_32.dll` proxy.
 
 ## What This Proxy Does
 
 On process attach, the proxy:
 
 1. Installs an early `GetProcAddress` hook in the main module.
-2. Resolves and patches Winsock imports for:
-	- `setsockopt`
-	- `WSASetSocketOption`
-	- `getsockopt`
-	- `WSAGetSocketOption`
-	- `socket`
-	- `closesocket`
+2. Resolves and patches Winsock imports: `setsockopt`, `WSASetSocketOption`, `getsockopt`, `WSAGetSocketOption`, `socket`, `WSASocketW`, `closesocket`, `recvfrom`, `WSARecvFrom`, `ioctlsocket`, `WSAIoctl`.
 3. Forces these target values when Battlezone configures socket buffers:
-	- `SO_SNDBUF = 524288`
-	- `SO_RCVBUF = 4194304`
+   - `SO_SNDBUF = 524288`
+   - `SO_RCVBUF = 4194304`
 4. Immediately reads the effective values back from the same socket handle.
-5. Logs socket IDs, handles, force calls, readbacks, and close events to `dsound_proxy.log`.
-6. Forwards ordinal `1` to the real system `dsound.dll` on demand.
+5. If reorder is enabled, holds slightly out-of-order packets and delivers to the game in sequence.
+6. When `BZ_BUFFER_LOG=1` is set, writes a binary packet trace to `bz_buffer_log.bin`.
+7. Logs socket IDs, handles, force calls, readbacks, reorder state, and close events to `dsound_proxy.log`.
+8. Forwards ordinal `1` to the real system `dsound.dll` on demand.
 
 ## Important Behavioral Finding
 
-In the validated Proton path:
-
-- immediate proxy readback shows the target values are applied successfully
-- `BZLogger.txt` still prints the old default startup buffer line
-
-For this reason, `dsound_proxy.log` is the source of truth for verification.
+`BZLogger.txt` still prints the old default startup buffer line even when the patch is working.
+`dsound_proxy.log` is the source of truth for verification.
 
 ## Build Requirements
 
-You need a 32-bit MinGW cross-compiler because the game executable is 32-bit.
-
-Expected toolchain:
-
-- `i686-w64-mingw32-g++`
-- `i686-w64-mingw32-gcc`
-- `i686-w64-mingw32-dlltool`
-
-On many Linux distributions this comes from a package like:
-
 ```bash
-sudo apt install mingw-w64
+sudo apt install mingw-w64   # Debian/Ubuntu
+sudo pacman -S mingw-w64-gcc  # Arch
 ```
 
 ## Build
-
-From this directory:
 
 ```bash
 make
 ```
 
-Expected output:
-
-- `build/dsound.dll`
+Output: `build/dsound.dll`
 
 ## Deploy
 
-From the repository root, the preferred path is:
+From the repository root:
 
 ```bash
 ./Linux/deploy_linux.sh "/path/to/Battlezone 98 Redux"
 ```
 
-Manual copy is still:
+## Reorder Configuration
 
-```bash
-cp build/dsound.dll "/home/piercingxx/.local/share/Steam/steamapps/common/Battlezone 98 Redux/dsound.dll"
-```
+The finalized profile is baked into defaults (window `45`, depth `8`, peers `32`,
+drain `96`), so these are optional overrides only.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BZ_REORDER_WINDOW_MS` | `45` | Max hold time before releasing oldest queued packet |
+| `BZ_REORDER_DEPTH` | `8` | Active per-peer reorder queue depth (max `8`) |
+| `BZ_REORDER_PEERS` | `32` | Active peer table size (max `32`) |
+| `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`) |
+| `BZ_BUFFER_LOG` | *(off)* | Set to `1` to capture binary packet trace |
 
 ## Steam Launch Options
 
-Set the game's Steam launch options to:
-
-```text
+```
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
 
-Meaning:
-
-- `n` = prefer native DLL first
-- `b` = fall back to builtin Wine or Proton implementation if needed
-
-This causes Proton to load the local `dsound.dll` from the game directory first.
-
 ## Current Limitations
 
-- The implementation here is Proton-specific because it depends on Wine loading a local native `dsound.dll`.
-- Windows uses a separate implementation in `Microslop/winmm.dll` and `Microslop/winmm_proxy/`.
-
-## Current Result
-
-This proxy successfully reaches the startup socket path and forces the target values on the intercepted socket.
+- Proton-specific: depends on Wine loading a local native `dsound.dll`.
+- Windows uses a separate implementation in `Microslop/winmm_proxy/`.
 
 Linux and Windows now ship as separate startup-interception paths with matching socket buffer targets.

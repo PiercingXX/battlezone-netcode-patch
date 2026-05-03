@@ -111,6 +111,52 @@ uint32_t g_buffer_sequence = 0;
 uint64_t g_buffer_total_events = 0;
 uint8_t *g_buffer_ring = nullptr;
 
+// ── Per-peer reorder buffer ──────────────────────────────────────────────────
+// Enabled by default.  Set BZ_REORDER=0 to disable.  WSARecvFrom packets are
+// held in a per-source priority queue ordered by sequence number and delivered
+// to the game in order.  BZ_REORDER_WINDOW_MS (default 45 ms) is the max time
+// a packet may be held before being forced out regardless of whether its
+// predecessor arrived.
+//
+// Sequence field location: u32le at payload byte offset 13, confirmed via
+// live binary capture analysis (resources/valid_capture_reorder_signal_only.csv).
+constexpr uint32_t kReorderSeqOffset   = 13;    // byte offset in payload
+constexpr uint32_t kReorderSeqMinPay   = 17;    // minimum payload length with seq field
+constexpr uint32_t kReorderDefaultMs   = 45;    // default hold window (ms), tuned from live captures
+constexpr uint32_t kReorderSlotCap     = 8;     // max per-peer buffered packet slots
+constexpr uint32_t kReorderPeerCap     = 32;    // max distinct IPv4 sources
+constexpr uint32_t kReorderDrainCapDef = 96;    // default real WSARecvFrom calls per hook invocation
+constexpr uint32_t kReorderDrainCapMax = 128;   // hard cap for drain loop
+constexpr uint32_t kReorderMaxPktBytes = 1500;  // max UDP datagram size
+
+struct ReorderSlot {
+    uint64_t    ts;                          // GetTickCount64() on arrival
+    uint32_t    seq;                         // BZRNet sequence number (payload[13] u32le)
+    uint32_t    len;                         // payload byte count
+    uint32_t    used;                        // 1 = slot is occupied
+    uint32_t    _pad;
+    sockaddr_in from;                        // source address
+    uint8_t     data[kReorderMaxPktBytes];   // full packet contents
+};
+
+struct PeerBuf {
+    uint64_t    key;       // (ipv4_raw << 16) | port_host_order; 0 = empty
+    uint32_t    seq_init;  // 1 once last_seq is valid
+    uint32_t    last_seq;  // last sequence number delivered to the game
+    uint32_t    filled;    // number of occupied slots
+    uint32_t    _pad;
+    ReorderSlot slots[kReorderSlotCap];
+};
+
+static bool              g_reorder_enabled  = false;
+static uint32_t          g_reorder_ms       = kReorderDefaultMs;
+static uint32_t          g_reorder_depth    = kReorderSlotCap;
+static uint32_t          g_reorder_peers    = kReorderPeerCap;
+static uint32_t          g_reorder_drain    = kReorderDrainCapDef;
+static PeerBuf           g_peers[kReorderPeerCap];    // zero-initialized (BSS)
+static CRITICAL_SECTION  g_reorder_cs       = {};
+static bool              g_reorder_cs_ready = false;
+
 constexpr int kSocketTrackCap = 256;
 struct SocketTrack {
     SOCKET s;
@@ -167,6 +213,14 @@ uint32_t parse_env_u32(const char *name, uint32_t fallback) {
         return fallback;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+static inline int32_t seq_cmp_u32(uint32_t a, uint32_t b) {
+    return static_cast<int32_t>(a - b);
+}
+
+static inline bool seq_ahead_or_equal(uint32_t seq, uint32_t want) {
+    return seq_cmp_u32(seq, want) >= 0;
 }
 
 void init_buffer_paths() {
@@ -667,7 +721,152 @@ int WSAAPI hooked_closesocket(SOCKET s) {
     int rc = g_real_closesocket(s);
     log_line("hooked_closesocket: sid=%d sock=0x%08lx rc=%d wsa=%d", sid, static_cast<unsigned long>(s), rc, static_cast<int>(WSAGetLastError()));
     forget_socket_id(s);
+    // Reset per-peer reorder state.  BZ uses one UDP socket for all P2P; closing
+    // it ends the session, so all buffered packets are now stale.
+    if (g_reorder_cs_ready) {
+        EnterCriticalSection(&g_reorder_cs);
+        std::memset(g_peers, 0, sizeof(g_peers));
+        LeaveCriticalSection(&g_reorder_cs);
+    }
     return rc;
+}
+
+// ── Reorder buffer helpers ────────────────────────────────────────────────────
+
+// Copy from a flat buffer into caller's WSA scatter-gather segments.
+// Returns the number of bytes written across all segments.
+static uint32_t scatter_copy(LPWSABUF bufs, DWORD nbufs, const uint8_t *src, uint32_t srclen) {
+    uint32_t done = 0;
+    for (DWORD bi = 0; bi < nbufs && done < srclen; ++bi) {
+        if (bufs[bi].buf == nullptr || bufs[bi].len == 0) {
+            continue;
+        }
+        uint32_t chunk = srclen - done;
+        if (chunk > static_cast<uint32_t>(bufs[bi].len)) {
+            chunk = static_cast<uint32_t>(bufs[bi].len);
+        }
+        std::memcpy(bufs[bi].buf, src + done, chunk);
+        done += chunk;
+    }
+    return done;
+}
+
+// Look up or create the PeerBuf for addr.  Caller must hold g_reorder_cs.
+static PeerBuf *reorder_get_peer(const sockaddr_in &addr) {
+    uint64_t k = (static_cast<uint64_t>(static_cast<uint32_t>(addr.sin_addr.S_un.S_addr)) << 16)
+                 | static_cast<uint64_t>(ntohs(addr.sin_port));
+    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
+        if (g_peers[i].key == k) {
+            return &g_peers[i];
+        }
+    }
+    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
+        if (g_peers[i].key == 0) {
+            std::memset(&g_peers[i], 0, sizeof(g_peers[i]));
+            g_peers[i].key = k;
+            return &g_peers[i];
+        }
+    }
+    return nullptr; // peer table full
+}
+
+// Insert a received packet.  Duplicates are silently dropped.  When all slots
+// are full the oldest packet is evicted to make room.  Caller must hold g_reorder_cs.
+static void reorder_insert(PeerBuf *pb, uint32_t seq, uint64_t ts,
+                           const sockaddr_in &from, const uint8_t *data, uint32_t len) {
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+        if (pb->slots[i].used && pb->slots[i].seq == seq) {
+            return; // duplicate
+        }
+    }
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+        if (!pb->slots[i].used) {
+            pb->slots[i].used = 1;
+            pb->slots[i].seq  = seq;
+            pb->slots[i].ts   = ts;
+            pb->slots[i].from = from;
+            uint32_t n = (len > kReorderMaxPktBytes) ? kReorderMaxPktBytes : len;
+            std::memcpy(pb->slots[i].data, data, n);
+            pb->slots[i].len = n;
+            ++pb->filled;
+            return;
+        }
+    }
+    // All slots occupied: evict the oldest.
+    uint32_t oix = 0;
+    for (uint32_t i = 1; i < g_reorder_depth; ++i) {
+        if (pb->slots[i].used && pb->slots[i].ts < pb->slots[oix].ts) {
+            oix = i;
+        }
+    }
+    pb->slots[oix].used = 1;
+    pb->slots[oix].seq  = seq;
+    pb->slots[oix].ts   = ts;
+    pb->slots[oix].from = from;
+    uint32_t n = (len > kReorderMaxPktBytes) ? kReorderMaxPktBytes : len;
+    std::memcpy(pb->slots[oix].data, data, n);
+    pb->slots[oix].len = n;
+    // filled count unchanged: one evicted, one inserted
+}
+
+// Find the best slot to deliver.  Prefers the exact in-order successor of
+// last_seq, falling back to the lowest-seq packet once it has aged out.
+// Returns slot index or -1 if nothing is ready.  Caller must hold g_reorder_cs.
+static int reorder_pick(PeerBuf *pb, uint64_t now_ms) {
+    if (pb->filled == 0) {
+        return -1;
+    }
+    if (pb->seq_init) {
+        uint32_t want = pb->last_seq + 1;
+        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+            if (pb->slots[i].used && pb->slots[i].seq == want) {
+                return static_cast<int>(i);
+            }
+        }
+
+        int best_ahead = -1;
+        uint32_t best_dist = 0;
+        int best_oldest = -1;
+        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+            if (!pb->slots[i].used) {
+                continue;
+            }
+            if (now_ms < pb->slots[i].ts || (now_ms - pb->slots[i].ts) < g_reorder_ms) {
+                continue;
+            }
+
+            if (best_oldest < 0 || pb->slots[i].ts < pb->slots[best_oldest].ts) {
+                best_oldest = static_cast<int>(i);
+            }
+
+            if (seq_ahead_or_equal(pb->slots[i].seq, want)) {
+                uint32_t dist = pb->slots[i].seq - want;
+                if (best_ahead < 0 || dist < best_dist) {
+                    best_ahead = static_cast<int>(i);
+                    best_dist = dist;
+                }
+            }
+        }
+        if (best_ahead >= 0) {
+            return best_ahead;
+        }
+        if (best_oldest >= 0) {
+            return best_oldest;
+        }
+        return -1;
+    }
+
+    // On first packet for a peer, deliver the oldest buffered slot immediately.
+    int oldest = -1;
+    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+        if (!pb->slots[i].used) {
+            continue;
+        }
+        if (oldest < 0 || pb->slots[i].ts < pb->slots[oldest].ts) {
+            oldest = static_cast<int>(i);
+        }
+    }
+    return oldest;
 }
 
 int WSAAPI hooked_recvfrom(SOCKET s, char *buf, int len, int flags, sockaddr *from, int *fromlen) {
@@ -712,44 +911,175 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
         return SOCKET_ERROR;
     }
 
-    int rc = g_real_wsarecvfrom(s, buffers, buffer_count, bytes_received, inout_flags, from, fromlen, overlapped, completion_routine);
-    int wsa = static_cast<int>(WSAGetLastError());
+    // ── Bypass: overlapped/async path, reorder disabled, or bad arguments ────
+    if (!g_reorder_enabled || !g_reorder_cs_ready
+        || overlapped != nullptr || completion_routine != nullptr
+        || buffers == nullptr || buffer_count == 0) {
+        int rc = g_real_wsarecvfrom(s, buffers, buffer_count, bytes_received, inout_flags,
+                                    from, fromlen, overlapped, completion_routine);
+        int wsa = static_cast<int>(WSAGetLastError());
+        if (g_buffer_log_enabled) {
+            uint32_t requested = 0;
+            for (DWORD i = 0; i < buffer_count && buffers != nullptr; ++i) {
+                requested += buffers[i].len;
+            }
+            uint32_t transferred = (rc == 0 && bytes_received != nullptr) ? *bytes_received : 0u;
+            uint16_t recv_flags  = (inout_flags != nullptr) ? static_cast<uint16_t>(*inout_flags & 0xffffUL) : 0;
+            uint16_t payload_len = static_cast<uint16_t>((transferred < g_buffer_payload_bytes) ? transferred : g_buffer_payload_bytes);
+            const uint8_t *payload = (payload_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+            buffer_log_event(kEventTypeWSARecvFrom, s, from, recv_flags, requested, transferred,
+                             (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u, payload, payload_len);
+        }
+        WSASetLastError(wsa);
+        return rc;
+    }
+
+    // ── Reorder-buffered synchronous path ────────────────────────────────────
+    //
+    // Strategy: drain all available UDP datagrams from the socket into per-peer
+    // priority queues, then return the best in-order candidate to the caller.
+    // Packets that are still waiting for their predecessor are held up to
+    // g_reorder_ms milliseconds before being forced out.
+
+    uint8_t drain_buf[kReorderMaxPktBytes];
+    WSABUF  drain_wsabuf;
+    drain_wsabuf.buf = reinterpret_cast<char *>(drain_buf);
+    drain_wsabuf.len = kReorderMaxPktBytes;
+
+    EnterCriticalSection(&g_reorder_cs);
+
+    for (uint32_t di = 0; di < g_reorder_drain; ++di) {
+        DWORD       drain_bytes  = 0;
+        DWORD       drain_flags  = 0;
+        sockaddr_in drain_src    = {};
+        int         drain_srclen = static_cast<int>(sizeof(drain_src));
+
+        int drc = g_real_wsarecvfrom(s, &drain_wsabuf, 1, &drain_bytes, &drain_flags,
+                                     reinterpret_cast<sockaddr *>(&drain_src), &drain_srclen,
+                                     nullptr, nullptr);
+        if (drc != 0 || drain_bytes == 0) {
+            break; // socket drained (WSAEWOULDBLOCK) or error
+        }
+
+        // Packets too short for a sequence field, or from non-IPv4 sources,
+        // cannot be reordered: deliver the first such packet immediately.
+        if (drain_src.sin_family != AF_INET || drain_bytes < kReorderSeqMinPay) {
+            uint32_t copied = scatter_copy(buffers, buffer_count, drain_buf, drain_bytes);
+            if (bytes_received != nullptr) *bytes_received = copied;
+            if (inout_flags != nullptr) *inout_flags = 0;
+            if (from != nullptr && fromlen != nullptr) {
+                int sa = (*fromlen < drain_srclen) ? *fromlen : drain_srclen;
+                if (sa > 0) std::memcpy(from, &drain_src, static_cast<size_t>(sa));
+                *fromlen = drain_srclen;
+            }
+            LeaveCriticalSection(&g_reorder_cs);
+            if (g_buffer_log_enabled) {
+                uint32_t requested = 0;
+                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
+                const uint8_t *pay = (pay_len > 0 && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+                buffer_log_event(kEventTypeWSARecvFrom, s,
+                                 reinterpret_cast<const sockaddr *>(&drain_src),
+                                 0, requested, copied, 0u, pay, pay_len);
+            }
+            WSASetLastError(0);
+            return 0;
+        }
+
+        uint32_t seq = 0;
+        std::memcpy(&seq, drain_buf + kReorderSeqOffset, sizeof(seq));
+
+        PeerBuf *pb = reorder_get_peer(drain_src);
+        if (pb == nullptr) {
+            // Peer table is full: deliver this packet immediately (fallback).
+            uint32_t copied = scatter_copy(buffers, buffer_count, drain_buf, drain_bytes);
+            if (bytes_received != nullptr) *bytes_received = copied;
+            if (inout_flags != nullptr) *inout_flags = 0;
+            if (from != nullptr && fromlen != nullptr) {
+                int sa = (*fromlen < drain_srclen) ? *fromlen : drain_srclen;
+                if (sa > 0) std::memcpy(from, &drain_src, static_cast<size_t>(sa));
+                *fromlen = drain_srclen;
+            }
+            LeaveCriticalSection(&g_reorder_cs);
+            if (g_buffer_log_enabled) {
+                uint32_t requested = 0;
+                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
+                const uint8_t *pay = (pay_len > 0 && buffers[0].buf != nullptr)
+                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+                buffer_log_event(kEventTypeWSARecvFrom, s,
+                                 reinterpret_cast<const sockaddr *>(&drain_src),
+                                 0, requested, copied, 0u, pay, pay_len);
+            }
+            WSASetLastError(0);
+            return 0;
+        }
+
+        uint64_t arrival_ms = GetTickCount64();
+        reorder_insert(pb, seq, arrival_ms, drain_src, drain_buf, drain_bytes);
+    }
+
+    // Scan the peer table for the first packet that is ready to deliver.
+    uint64_t now_ms = GetTickCount64();
+    int best_pi = -1;
+    int best_si = -1;
+    for (uint32_t pi = 0; pi < g_reorder_peers; ++pi) {
+        if (g_peers[pi].key == 0) {
+            continue;
+        }
+        int si = reorder_pick(&g_peers[pi], now_ms);
+        if (si >= 0) {
+            best_pi = pi;
+            best_si = si;
+            break;
+        }
+    }
+
+    if (best_pi < 0) {
+        // Nothing is ready yet: tell the game the socket is empty for now.
+        LeaveCriticalSection(&g_reorder_cs);
+        WSASetLastError(WSAEWOULDBLOCK);
+        return SOCKET_ERROR;
+    }
+
+    // Deliver the chosen packet to the caller.
+    PeerBuf     *pb  = &g_peers[best_pi];
+    ReorderSlot *pkt = &pb->slots[best_si];
+
+    uint32_t    delivered      = scatter_copy(buffers, buffer_count, pkt->data, pkt->len);
+    sockaddr_in deliver_from   = pkt->from;
+
+    if (bytes_received != nullptr) *bytes_received = delivered;
+    if (inout_flags != nullptr) *inout_flags = 0;
+    if (from != nullptr && fromlen != nullptr) {
+        int sa = (*fromlen < static_cast<int>(sizeof(pkt->from)))
+                 ? *fromlen : static_cast<int>(sizeof(pkt->from));
+        if (sa > 0) std::memcpy(from, &pkt->from, static_cast<size_t>(sa));
+        *fromlen = static_cast<int>(sizeof(pkt->from));
+    }
+
+    pb->last_seq = pkt->seq;
+    pb->seq_init = 1;
+    pkt->used    = 0;
+    if (pb->filled > 0) --pb->filled;
+
+    LeaveCriticalSection(&g_reorder_cs);
 
     if (g_buffer_log_enabled) {
         uint32_t requested = 0;
-        for (DWORD i = 0; i < buffer_count; ++i) {
-            requested += buffers[i].len;
-        }
-
-        uint32_t transferred = 0;
-        if (rc == 0 && bytes_received != nullptr) {
-            transferred = *bytes_received;
-        }
-
-        uint16_t recv_flags = 0;
-        if (inout_flags != nullptr) {
-            recv_flags = static_cast<uint16_t>(*inout_flags & 0xffffUL);
-        }
-
-        uint16_t payload_len = static_cast<uint16_t>((transferred < g_buffer_payload_bytes) ? transferred : g_buffer_payload_bytes);
-        const uint8_t *payload = nullptr;
-        if (payload_len > 0 && buffer_count > 0 && buffers != nullptr && buffers[0].buf != nullptr) {
-            payload = reinterpret_cast<const uint8_t *>(buffers[0].buf);
-        }
-
-        buffer_log_event(kEventTypeWSARecvFrom,
-                         s,
-                         from,
-                         recv_flags,
-                         requested,
-                         transferred,
-                         (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
-                         payload,
-                         payload_len);
+        for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
+        uint16_t pay_len = static_cast<uint16_t>((delivered < g_buffer_payload_bytes) ? delivered : g_buffer_payload_bytes);
+        const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                             ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+        buffer_log_event(kEventTypeWSARecvFrom, s,
+                         reinterpret_cast<const sockaddr *>(&deliver_from),
+                         0, requested, delivered, 0u, pay, pay_len);
     }
 
-    WSASetLastError(wsa);
-    return rc;
+    WSASetLastError(0);
+    return 0;
 }
 
 int WSAAPI hooked_ioctlsocket(SOCKET s, long cmd, u_long *argp) {
@@ -1300,8 +1630,27 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             InitializeCriticalSection(&g_buffer_lock);
             g_buffer_lock_ready = true;
         }
+        if (!g_reorder_cs_ready) {
+            InitializeCriticalSection(&g_reorder_cs);
+            g_reorder_cs_ready = true;
+        }
         init_buffer_log_if_needed();
+        {
+            // Finalized Linux profile: keep reorder enabled by default.
+            g_reorder_enabled = true;
+            g_reorder_ms = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
+            g_reorder_depth = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
+            g_reorder_peers = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
+            g_reorder_drain = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
+        }
         log_line("DllMain: DLL_PROCESS_ATTACH");
+        log_line("reorder: %s window_ms=%u depth=%u peers=%u drain=%u seq_offset=%u",
+                 "enabled",
+                 static_cast<unsigned>(g_reorder_ms),
+                 static_cast<unsigned>(g_reorder_depth),
+                 static_cast<unsigned>(g_reorder_peers),
+                 static_cast<unsigned>(g_reorder_drain),
+                 static_cast<unsigned>(kReorderSeqOffset));
         if (!hook_setsockopt_iat()) {
             log_line("DllMain: initial hook install attempt failed");
         }
@@ -1324,6 +1673,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         if (g_track_lock_ready) {
             DeleteCriticalSection(&g_track_lock);
             g_track_lock_ready = false;
+        }
+        if (g_reorder_cs_ready) {
+            DeleteCriticalSection(&g_reorder_cs);
+            g_reorder_cs_ready = false;
         }
     }
 
