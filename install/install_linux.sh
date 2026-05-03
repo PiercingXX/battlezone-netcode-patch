@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_SLUG="PiercingXX/battlezone-netcode-testing"
+REPO_SLUG="PiercingXX/battlezone-netcode-patch"
 REF="${BZNET_REF:-main}"
 GAME_PATH="${BZNET_GAME_PATH:-}"
 ARCHIVE_URL="${BZNET_ARCHIVE_URL:-https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz}"

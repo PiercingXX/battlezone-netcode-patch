@@ -1,6 +1,6 @@
 # Signal-Only Reorder Events
 
-- Source: /media/Working-Storage/GitHub/Battlezone Netcode Testing/resources/valid_capture_reorder_events.csv
+- Source: /media/Working-Storage/GitHub/Battlezone Netcode Patch/resources/valid_capture_reorder_events.csv
 - Filter: classes in ['backward', 'forward_gap_small']
 - Retained events: 240
 

@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$repoSlug = "PiercingXX/battlezone-netcode-testing"
+$repoSlug = "PiercingXX/battlezone-netcode-patch"
 $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "main" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://github.com/$repoSlug/raw/$ref/prebuilt/windows/winmm.dll" }
