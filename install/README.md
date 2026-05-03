@@ -18,6 +18,7 @@ curl -fsSL https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/insta
 ```
 
 Linux installs the MinGW cross-compiler only if it is missing, then builds `dsound.dll` locally.
+After deployment, it also runs a Linux EXU compatibility repair pass (best effort) so Workshop EXU files are mirrored into paths the game loader checks.
 
 After install, set Steam launch options once:
 
