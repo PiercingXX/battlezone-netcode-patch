@@ -2,9 +2,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoSlug = "PiercingXX/battlezone-netcode-patch"
-$ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "main" }
+$ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
-$dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://github.com/$repoSlug/raw/$ref/prebuilt/windows/winmm.dll" }
+$dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
 $expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "29f9555c8ef6fb1e7600c4e953b3637d6489b54db324041957e068717a367acb" }
 
 function Find-GamePath {
