@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_SLUG="PiercingXX/battlezone-netcode-patch"
-REF="${BZNET_REF:-main}"
+REF="${BZNET_REF:-master}"
 GAME_PATH="${BZNET_GAME_PATH:-}"
 ARCHIVE_URL="${BZNET_ARCHIVE_URL:-https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz}"
 ASSUME_YES="${BZNET_ASSUME_YES:-0}"

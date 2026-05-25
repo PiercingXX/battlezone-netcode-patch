@@ -7,7 +7,7 @@
 Step 1: paste this into PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/install/install_windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
 This installs the known-good prebuilt `winmm.dll` for Windows and verifies its hash before deployment.
@@ -24,7 +24,7 @@ Windows does not need any Steam launch option changes.
 Step 1: paste this into terminal:
 
 ```bash
-curl -fsSL https://github.com/PiercingXX/battlezone-netcode-patch/raw/main/install/install_linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_linux.sh | bash
 ```
 
 This now also performs an automatic Linux EXU compatibility repair (best effort) after installing the proxy.
