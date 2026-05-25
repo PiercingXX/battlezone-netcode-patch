@@ -12,6 +12,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$steamAppId = "301650"
+$steamGameExeName = "battlezone98redux.exe"
+$defaultInstallDir = "Battlezone 98 Redux"
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $stateRoot = Join-Path $repoRoot "test_bundles\buffer_log_state"
 $currentFile = Join-Path $stateRoot "windows_current_session.txt"
@@ -19,15 +23,94 @@ New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 
 function Get-ResolvedGamePath {
     param([string]$Candidate)
-    if ($Candidate -and (Test-Path $Candidate)) { return $Candidate }
-    $defaultPaths = @(
-        "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux",
-        "C:\Program Files\Steam\steamapps\common\Battlezone 98 Redux",
-        "$env:PROGRAMFILES\Steam\steamapps\common\Battlezone 98 Redux"
-    )
-    foreach ($p in $defaultPaths) {
-        if (Test-Path $p) { return $p }
+
+    function Get-SteamRoots {
+        $roots = New-Object System.Collections.Generic.List[string]
+
+        foreach ($location in @(
+            @{ Path = "HKCU:\Software\Valve\Steam"; Names = @("SteamPath", "Path") },
+            @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam"; Names = @("InstallPath") },
+            @{ Path = "HKLM:\SOFTWARE\Valve\Steam"; Names = @("InstallPath") }
+        )) {
+            try {
+                $item = Get-ItemProperty -Path $location.Path -ErrorAction Stop
+                foreach ($name in $location.Names) {
+                    $value = [string]$item.$name
+                    if ($value) {
+                        $roots.Add($value)
+                    }
+                }
+            }
+            catch {
+            }
+        }
+
+        foreach ($fallback in @(
+            (Join-Path ${env:ProgramFiles(x86)} "Steam"),
+            (Join-Path $env:PROGRAMFILES "Steam")
+        )) {
+            if ($fallback) {
+                $roots.Add($fallback)
+            }
+        }
+
+        $roots | Where-Object { $_ } | Select-Object -Unique
     }
+
+    function Get-SteamLibraryRoots {
+        param([string]$SteamRoot)
+
+        $libraryRoots = New-Object System.Collections.Generic.List[string]
+        $libraryRoots.Add($SteamRoot)
+
+        $libraryVdf = Join-Path $SteamRoot "steamapps\libraryfolders.vdf"
+        if (Test-Path $libraryVdf) {
+            foreach ($line in Get-Content -Path $libraryVdf) {
+                $match = [regex]::Match($line, '"path"\s+"([^"]+)"')
+                if (-not $match.Success) {
+                    $match = [regex]::Match($line, '^\s*"\d+"\s+"([^"]+)"')
+                }
+
+                if ($match.Success) {
+                    $libraryRoots.Add($match.Groups[1].Value.Replace('\\', '\'))
+                }
+            }
+        }
+
+        $libraryRoots | Where-Object { $_ } | Select-Object -Unique
+    }
+
+    if ($Candidate -and (Test-Path (Join-Path $Candidate $steamGameExeName))) {
+        return $Candidate
+    }
+
+    foreach ($steamRoot in Get-SteamRoots) {
+        foreach ($libraryRoot in Get-SteamLibraryRoots -SteamRoot $steamRoot) {
+            $steamApps = Join-Path $libraryRoot "steamapps"
+            $manifest = Join-Path $steamApps "appmanifest_$steamAppId.acf"
+            if (Test-Path $manifest) {
+                $installDir = $defaultInstallDir
+                foreach ($line in Get-Content -Path $manifest) {
+                    $match = [regex]::Match($line, '"installdir"\s+"([^"]+)"')
+                    if ($match.Success) {
+                        $installDir = $match.Groups[1].Value
+                        break
+                    }
+                }
+
+                $candidatePath = Join-Path $steamApps (Join-Path "common" $installDir)
+                if (Test-Path (Join-Path $candidatePath $steamGameExeName)) {
+                    return $candidatePath
+                }
+            }
+
+            $fallbackPath = Join-Path $steamApps (Join-Path "common" $defaultInstallDir)
+            if (Test-Path (Join-Path $fallbackPath $steamGameExeName)) {
+                return $fallbackPath
+            }
+        }
+    }
+
     return ""
 }
 

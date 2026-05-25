@@ -17,19 +17,105 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$steamAppId = "301650"
+$gameExeName = "battlezone98redux.exe"
+$defaultInstallDir = "Battlezone 98 Redux"
+
+function Get-SteamRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    foreach ($location in @(
+        @{ Path = "HKCU:\Software\Valve\Steam"; Names = @("SteamPath", "Path") },
+        @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam"; Names = @("InstallPath") },
+        @{ Path = "HKLM:\SOFTWARE\Valve\Steam"; Names = @("InstallPath") }
+    )) {
+        try {
+            $item = Get-ItemProperty -Path $location.Path -ErrorAction Stop
+            foreach ($name in $location.Names) {
+                $value = [string]$item.$name
+                if ($value) {
+                    $roots.Add($value)
+                }
+            }
+        }
+        catch {
+        }
+    }
+
+    foreach ($fallback in @(
+        (Join-Path ${env:ProgramFiles(x86)} "Steam"),
+        (Join-Path $env:PROGRAMFILES "Steam")
+    )) {
+        if ($fallback) {
+            $roots.Add($fallback)
+        }
+    }
+
+    $roots | Where-Object { $_ } | Select-Object -Unique
+}
+
+function Get-SteamLibraryRoots {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SteamRoot
+    )
+
+    $libraryRoots = New-Object System.Collections.Generic.List[string]
+    $libraryRoots.Add($SteamRoot)
+
+    $libraryVdf = Join-Path $SteamRoot "steamapps\libraryfolders.vdf"
+    if (Test-Path $libraryVdf) {
+        foreach ($line in Get-Content -Path $libraryVdf) {
+            $match = [regex]::Match($line, '"path"\s+"([^"]+)"')
+            if (-not $match.Success) {
+                $match = [regex]::Match($line, '^\s*"\d+"\s+"([^"]+)"')
+            }
+
+            if ($match.Success) {
+                $libraryRoots.Add($match.Groups[1].Value.Replace('\\', '\'))
+            }
+        }
+    }
+
+    $libraryRoots | Where-Object { $_ } | Select-Object -Unique
+}
+
+function Find-InstalledGamePath {
+    foreach ($steamRoot in Get-SteamRoots) {
+        foreach ($libraryRoot in Get-SteamLibraryRoots -SteamRoot $steamRoot) {
+            $steamApps = Join-Path $libraryRoot "steamapps"
+            $manifest = Join-Path $steamApps "appmanifest_$steamAppId.acf"
+            if (Test-Path $manifest) {
+                $installDir = $defaultInstallDir
+                foreach ($line in Get-Content -Path $manifest) {
+                    $match = [regex]::Match($line, '"installdir"\s+"([^"]+)"')
+                    if ($match.Success) {
+                        $installDir = $match.Groups[1].Value
+                        break
+                    }
+                }
+
+                $candidate = Join-Path $steamApps (Join-Path "common" $installDir)
+                if (Test-Path (Join-Path $candidate $gameExeName)) {
+                    return $candidate
+                }
+            }
+
+            $fallbackCandidate = Join-Path $steamApps (Join-Path "common" $defaultInstallDir)
+            if (Test-Path (Join-Path $fallbackCandidate $gameExeName)) {
+                return $fallbackCandidate
+            }
+        }
+    }
+
+    return ""
+}
+
 # ---------------------------------------------------------------------------
 # Resolve game path
 # ---------------------------------------------------------------------------
-$defaultPaths = @(
-    "C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux",
-    "C:\Program Files\Steam\steamapps\common\Battlezone 98 Redux",
-    "$env:PROGRAMFILES\Steam\steamapps\common\Battlezone 98 Redux"
-)
-
 if (-not $GamePath) {
-    foreach ($p in $defaultPaths) {
-        if (Test-Path $p) { $GamePath = $p; break }
-    }
+    $GamePath = Find-InstalledGamePath
 }
 
 if (-not $GamePath -or -not (Test-Path $GamePath)) {
