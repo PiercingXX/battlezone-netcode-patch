@@ -630,8 +630,14 @@ static int WSAAPI Hooked_WSARecvFrom(
         return SOCKET_ERROR;
     }
 
-    if (!g_reorder_enabled || !g_reorder_cs_ready) {
-        // Passthrough if reorder not configured or not ready
+    // Bypass: overlapped/async path, reorder disabled, or bad arguments.
+    // The overlapped check is load-bearing: the game's asio engine uses
+    // IOCP overlapped receives on Windows, and routing those through the
+    // synchronous drain path stalls its completion loop forever (game
+    // freezes at the splash screen).  Parity with the Linux dsound proxy.
+    if (!g_reorder_enabled || !g_reorder_cs_ready
+        || ov != nullptr || cr != nullptr
+        || buffers == nullptr || buffer_count == 0) {
         int rc = g_realWSARecvFrom(s, buffers, buffer_count, bytes_received, inout_flags,
                                    from, fromlen, ov, cr);
         int wsa = static_cast<int>(WSAGetLastError());
@@ -964,8 +970,11 @@ static DWORD WINAPI ReorderWakeThread(LPVOID)
 // replaces the slot with newFunc.  If oldFunc is non-null,
 // the previous value is stored there.
 // ---------------------------------------------------------
+// `ordinal` handles ws2_32's classic winsock functions (closesocket=3,
+// sendto=20, ...): the game exe imports those by ordinal, not by name, so
+// a name-only walk never finds them.  Pass 0 to match by name only.
 static bool PatchIAT(HMODULE module, const char* dllName,
-    const char* funcName, void* newFunc, void** oldFunc)
+    const char* funcName, WORD ordinal, void* newFunc, void** oldFunc)
 {
     if (!module) return false;
 
@@ -1001,14 +1010,20 @@ static bool PatchIAT(HMODULE module, const char* dllName,
 
         for (; origThunk->u1.AddressOfData; ++origThunk, ++iatThunk)
         {
-            if (IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) continue;
+            if (IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal))
+            {
+                if (ordinal == 0 || IMAGE_ORDINAL(origThunk->u1.Ordinal) != ordinal)
+                    continue;
+            }
+            else
+            {
+                auto* ibn = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
+                    reinterpret_cast<BYTE*>(module) +
+                    origThunk->u1.AddressOfData);
 
-            auto* ibn = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(
-                reinterpret_cast<BYTE*>(module) +
-                origThunk->u1.AddressOfData);
-
-            if (strcmp(reinterpret_cast<const char*>(ibn->Name), funcName) != 0)
-                continue;
+                if (strcmp(reinterpret_cast<const char*>(ibn->Name), funcName) != 0)
+                    continue;
+            }
 
             // Patch: make the page writable, swap the pointer, restore.
             void** slot = reinterpret_cast<void**>(&iatThunk->u1.Function);
@@ -1105,20 +1120,20 @@ void InstallNetcodeHooks()
     void* savedRealSocket = nullptr;
     void* savedRealRecvFrom = nullptr;
 
-    bool patchedSocket = PatchIAT(exe, "WS2_32.dll", "WSASocketW",
+    bool patchedSocket = PatchIAT(exe, "WS2_32.dll", "WSASocketW", 0,
         reinterpret_cast<void*>(Hooked_WSASocketW), &savedRealSocket);
     if (!patchedSocket)
     {
         // Some builds lowercase the DLL name in the import directory.
-        patchedSocket = PatchIAT(exe, "ws2_32.dll", "WSASocketW",
+        patchedSocket = PatchIAT(exe, "ws2_32.dll", "WSASocketW", 0,
             reinterpret_cast<void*>(Hooked_WSASocketW), &savedRealSocket);
     }
 
-    bool patchedRecvFrom = PatchIAT(exe, "WS2_32.dll", "WSARecvFrom",
+    bool patchedRecvFrom = PatchIAT(exe, "WS2_32.dll", "WSARecvFrom", 0,
         reinterpret_cast<void*>(Hooked_WSARecvFrom), &savedRealRecvFrom);
     if (!patchedRecvFrom)
     {
-        patchedRecvFrom = PatchIAT(exe, "ws2_32.dll", "WSARecvFrom",
+        patchedRecvFrom = PatchIAT(exe, "ws2_32.dll", "WSARecvFrom", 0,
             reinterpret_cast<void*>(Hooked_WSARecvFrom), &savedRealRecvFrom);
     }
 
@@ -1159,11 +1174,11 @@ void InstallNetcodeHooks()
 
     // Also patch closesocket to reset reorder state when socket closes
     void* savedRealClosesocket = nullptr;
-    bool patchedClosesocket = PatchIAT(exe, "WS2_32.dll", "closesocket",
+    bool patchedClosesocket = PatchIAT(exe, "WS2_32.dll", "closesocket", 3,
         reinterpret_cast<void*>(Hooked_closesocket), &savedRealClosesocket);
     if (!patchedClosesocket)
     {
-        patchedClosesocket = PatchIAT(exe, "ws2_32.dll", "closesocket",
+        patchedClosesocket = PatchIAT(exe, "ws2_32.dll", "closesocket", 3,
             reinterpret_cast<void*>(Hooked_closesocket), &savedRealClosesocket);
     }
 
@@ -1175,11 +1190,11 @@ void InstallNetcodeHooks()
 
     // Patch sendto for opt-in outbound duplication (passthrough when disabled).
     void* savedRealSendto = nullptr;
-    bool patchedSendto = PatchIAT(exe, "WS2_32.dll", "sendto",
+    bool patchedSendto = PatchIAT(exe, "WS2_32.dll", "sendto", 20,
         reinterpret_cast<void*>(Hooked_sendto), &savedRealSendto);
     if (!patchedSendto)
     {
-        patchedSendto = PatchIAT(exe, "ws2_32.dll", "sendto",
+        patchedSendto = PatchIAT(exe, "ws2_32.dll", "sendto", 20,
             reinterpret_cast<void*>(Hooked_sendto), &savedRealSendto);
     }
 
