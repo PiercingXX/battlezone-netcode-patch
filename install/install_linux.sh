@@ -172,6 +172,75 @@ ensure_build_dependencies() {
     install_packages
 }
 
+# The proxy asks for SO_RCVBUF=4MB / SO_SNDBUF=512KB, but the Linux kernel
+# silently clamps setsockopt to net.core.rmem_max / net.core.wmem_max
+# (~208KB by default on most distros).  Without raising these limits the
+# patch's buffer enlargement is mostly fictional under Proton.
+apply_socket_buffer_sysctls() {
+    local target_rmem=4194304
+    local target_wmem=524288
+    local sysctl_file="/etc/sysctl.d/99-battlezone-netcode.conf"
+    local current_rmem current_wmem
+
+    current_rmem="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)"
+    current_wmem="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)"
+
+    if [[ "$current_rmem" -ge "$target_rmem" && "$current_wmem" -ge "$target_wmem" ]]; then
+        echo "Kernel UDP buffer limits already sufficient (rmem_max=$current_rmem wmem_max=$current_wmem)."
+        return 0
+    fi
+
+    echo
+    echo "Kernel UDP buffer limits are below the patch targets:"
+    echo "  net.core.rmem_max=$current_rmem (need >= $target_rmem)"
+    echo "  net.core.wmem_max=$current_wmem (need >= $target_wmem)"
+    echo "Without this, the kernel silently clamps the enlarged socket buffers."
+
+    # This step is optional tuning: never abort the install over it.
+    local manual_hint
+    manual_hint=$(cat <<EOF
+To apply manually later, run:
+  sudo sysctl -w net.core.rmem_max=$target_rmem net.core.wmem_max=$target_wmem
+  printf 'net.core.rmem_max=$target_rmem\\nnet.core.wmem_max=$target_wmem\\n' | sudo tee $sysctl_file
+EOF
+)
+
+    # A permission check on /dev/tty is not enough: without a controlling
+    # terminal (CI, setsid) the node is "readable" but opening it fails.
+    if [[ "$ASSUME_YES" != "1" ]] && ! { : < /dev/tty; } 2>/dev/null; then
+        echo "No interactive terminal available; skipping kernel limit change."
+        echo "$manual_hint"
+        return 0
+    fi
+
+    if ! prompt_yes_no "Raise kernel UDP buffer limits now (persisted in $sysctl_file)?"; then
+        echo "Skipped."
+        echo "$manual_hint"
+        return 0
+    fi
+
+    local sudo_cmd=""
+    if [[ "$(id -u)" -ne 0 ]]; then
+        if command -v sudo >/dev/null 2>&1; then
+            sudo_cmd="sudo"
+        else
+            echo "Warning: sudo not available; skipping kernel limit change." >&2
+            echo "$manual_hint"
+            return 0
+        fi
+    fi
+
+    if ! printf 'net.core.rmem_max=%s\nnet.core.wmem_max=%s\n' "$target_rmem" "$target_wmem" \
+            | $sudo_cmd tee "$sysctl_file" >/dev/null; then
+        echo "Warning: could not write $sysctl_file; continuing without it." >&2
+        echo "$manual_hint"
+        return 0
+    fi
+    if ! $sudo_cmd sysctl -w "net.core.rmem_max=$target_rmem" "net.core.wmem_max=$target_wmem"; then
+        echo "Warning: sysctl apply failed; limits will take effect after reboot via $sysctl_file." >&2
+    fi
+}
+
 detect_game_path() {
     local candidates=()
 
@@ -273,6 +342,8 @@ fi
 echo "Installing patch to $dest_path"
 command install -m 0644 "$built_dll" "$dest_path"
 rm -f "$GAME_PATH/dsound_proxy.log"
+
+apply_socket_buffer_sysctls
 
 exu_repair_script="$source_root/Linux/repair_exu_linux.sh"
 if [[ -x "$exu_repair_script" ]]; then

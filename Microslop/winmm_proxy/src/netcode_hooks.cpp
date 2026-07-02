@@ -78,12 +78,19 @@ typedef int (WSAAPI* PFN_WSARecvFrom)(
     struct sockaddr *from, LPINT fromlen, LPWSAOVERLAPPED ov,
     LPWSAOVERLAPPED_COMPLETION_ROUTINE cr);
 typedef int (WSAAPI* PFN_closesocket)(SOCKET s);
+typedef SOCKET (WSAAPI* PFN_socket)(int af, int type, int protocol);
+typedef int (WSAAPI* PFN_sendto)(SOCKET s, const char* buf, int len, int flags,
+    const struct sockaddr* to, int tolen);
+typedef int (WSAAPI* PFN_getsockname)(SOCKET s, struct sockaddr* name, int* namelen);
 
 static PFN_WSASocketW  g_realWSASocketW = nullptr;
 static PFN_setsockopt  g_realSetsockopt  = nullptr;
 static PFN_getsockopt  g_realGetsockopt  = nullptr;
 static PFN_WSARecvFrom g_realWSARecvFrom = nullptr;
 static PFN_closesocket g_realClosesocket = nullptr;
+static PFN_socket      g_realSocket      = nullptr;
+static PFN_sendto      g_realSendto      = nullptr;
+static PFN_getsockname g_realGetsockname = nullptr;
 
 static wchar_t          g_buffer_bin_path[MAX_PATH] = L"bz_buffer_log.bin";
 static wchar_t          g_buffer_meta_path[MAX_PATH] = L"bz_buffer_log.meta.txt";
@@ -104,14 +111,40 @@ static uint8_t         *g_buffer_ring = nullptr;
 // ---------------------------------------------------------
 // Reorder globals (per-peer packet buffering)
 // ---------------------------------------------------------
-static bool              g_reorder_enabled     = true;   // always on (finalized profile)
-static uint32_t          g_reorder_ms          = kReorderDefaultMs;
+static bool              g_reorder_enabled     = true;   // BZ_REORDER=0 disables
+static bool              g_reorder_adapt       = true;   // BZ_REORDER_ADAPT=0 -> fixed window
+static uint32_t          g_reorder_ms          = kReorderDefaultMs;   // window ceiling
+static uint32_t          g_reorder_min_ms      = kReorderMinMsDef;    // adaptive floor
 static uint32_t          g_reorder_depth       = kReorderSlotCap;
 static uint32_t          g_reorder_peers       = kReorderPeerCap;
 static uint32_t          g_reorder_drain       = kReorderDrainCapDef;
 static PeerBuf           g_peers[kReorderPeerCap];        // zero-initialized (BSS)
 static CRITICAL_SECTION  g_reorder_cs          = {};
 static bool              g_reorder_cs_ready    = false;
+
+// ---------------------------------------------------------
+// Wake helper: the reorder hook drains the kernel socket, so a game thread
+// sleeping in select()/WSAEventSelect() never sees the socket readable while
+// packets sit in our userspace queue.  A background thread sends a tiny magic
+// datagram to the game socket's own bound port to mark it readable, waking
+// the game so held packets are released within the reorder window instead of
+// stranding until the next real packet arrives.  BZ_REORDER_WAKE=0 disables.
+// ---------------------------------------------------------
+static const uint8_t     kWakeMagic[8]         = {'B','Z','W','K','P','K','T','1'};
+static bool              g_wake_enabled        = true;
+static volatile LONG     g_wake_stop           = 0;
+static HANDLE            g_wake_thread         = nullptr;
+static SOCKET            g_wake_sender         = INVALID_SOCKET;
+static SOCKET            g_reorder_sock        = INVALID_SOCKET;  // last socket seen in reorder path
+static uint64_t          g_last_recv_call_ms   = 0;               // last game WSARecvFrom (reorder path)
+static bool              g_wake_logged         = false;
+
+// Opt-in loss redundancy: BZ_SEND_DUP=1 sends every outbound game P2P
+// datagram twice.  Reordering cannot recover a packet the network dropped;
+// a duplicate can.  The receiver tolerates duplicates whether patched (the
+// reorder buffer dedups by sequence) or vanilla (BZRNet drops stale
+// sequence numbers).  Costs 2x upstream bandwidth on the P2P socket.
+static bool              g_send_dup            = false;
 
 static bool env_truthy(const char *s) {
     if (s == nullptr || *s == '\0') {
@@ -371,10 +404,68 @@ static PeerBuf *reorder_get_peer(const sockaddr_in &addr) {
         if (g_peers[i].key == 0) {
             std::memset(&g_peers[i], 0, sizeof(g_peers[i]));
             g_peers[i].key = k;
+            g_peers[i].win_ms = g_reorder_adapt ? g_reorder_min_ms : g_reorder_ms;
+            g_peers[i].last_adjust_ms = GetTickCount64();
             return &g_peers[i];
         }
     }
     return nullptr; // peer table full
+}
+
+// Adapt the peer's hold window based on the arriving packet, BEFORE insertion.
+// Grow on evidence that reordering actually happens on this link:
+//   - a packet we already skipped past arrives late (window was too small), or
+//   - the awaited in-order successor arrives while later packets are held
+//     (the wait it resolved tells us how big the window needs to be).
+// True loss never grows the window: a lost packet simply never arrives.
+// Caller must hold g_reorder_cs.
+static void reorder_adapt_on_arrival(PeerBuf *pb, uint32_t seq, uint64_t now_ms) {
+    if (!g_reorder_adapt || !pb->seq_init) {
+        return;
+    }
+
+    int cmp = seq_cmp_u32(seq, pb->last_seq);
+    if (cmp == 0) {
+        // Exact duplicate of the last delivered packet (link-layer retransmit,
+        // common on WiFi): not reorder evidence, must not grow the window.
+        return;
+    }
+    if (cmp < 0) {
+        // Late/backward arrival: we released its successors too early.
+        uint32_t grown = pb->win_ms * 2 + kReorderGrowPadMs;
+        pb->win_ms = (grown > g_reorder_ms) ? g_reorder_ms : grown;
+        pb->last_adjust_ms = now_ms;
+        return;
+    }
+
+    if (seq == pb->last_seq + 1 && pb->filled > 0) {
+        // Gap just closed: measure how long the held packets waited.
+        uint64_t oldest_ts = now_ms;
+        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
+            if (pb->slots[i].used && pb->slots[i].ts < oldest_ts) {
+                oldest_ts = pb->slots[i].ts;
+            }
+        }
+        uint32_t waited = static_cast<uint32_t>(now_ms - oldest_ts) + kReorderGrowPadMs;
+        if (waited > g_reorder_ms) {
+            waited = g_reorder_ms;
+        }
+        if (waited > pb->win_ms) {
+            pb->win_ms = waited;
+            pb->last_adjust_ms = now_ms;
+        }
+    }
+}
+
+// Shrink the window back toward the floor after a quiet period with no
+// reorder evidence.  Called on delivery.  Caller must hold g_reorder_cs.
+static void reorder_decay(PeerBuf *pb, uint64_t now_ms) {
+    if (!g_reorder_adapt || now_ms - pb->last_adjust_ms < kReorderDecayMs) {
+        return;
+    }
+    pb->win_ms = (pb->win_ms > g_reorder_min_ms + kReorderDecayStepMs)
+                 ? pb->win_ms - kReorderDecayStepMs : g_reorder_min_ms;
+    pb->last_adjust_ms = now_ms;
 }
 
 // Insert a received packet.  Duplicates are silently dropped.  When all slots
@@ -438,7 +529,7 @@ static int reorder_pick(PeerBuf *pb, uint64_t now_ms) {
             if (!pb->slots[i].used) {
                 continue;
             }
-            if (now_ms < pb->slots[i].ts || (now_ms - pb->slots[i].ts) < g_reorder_ms) {
+            if (now_ms < pb->slots[i].ts || (now_ms - pb->slots[i].ts) < pb->win_ms) {
                 continue;
             }
 
@@ -563,6 +654,14 @@ static int WSAAPI Hooked_WSARecvFrom(
 
     EnterCriticalSection(&g_reorder_cs);
 
+    // Tell the wake thread the game is actively polling the reorder socket.
+    // Only polls of THAT socket count: a second UDP socket (lobby/discovery)
+    // must neither retarget wakes nor suppress them.  g_reorder_sock itself
+    // is assigned below, at the point a reorderable packet is buffered.
+    if (s == g_reorder_sock) {
+        g_last_recv_call_ms = GetTickCount64();
+    }
+
     // Drain loop: pull up to g_reorder_drain packets from the socket without
     // delivering them, buffer them per-source, then deliver the first ready one.
     uint8_t  drain_buf[kReorderMaxPktBytes];
@@ -582,6 +681,13 @@ static int WSAAPI Hooked_WSARecvFrom(
                                     nullptr, nullptr);
         if (drc != 0 || drain_bytes == 0) {
             break; // socket drained (WSAEWOULDBLOCK) or error
+        }
+
+        // Discard our own wake datagrams (see wake thread): they exist only
+        // to mark the socket readable and must never reach the game.
+        if (drain_bytes == sizeof(kWakeMagic)
+            && std::memcmp(drain_buf, kWakeMagic, sizeof(kWakeMagic)) == 0) {
+            continue;
         }
 
         // Packets too short for a sequence field, or from non-IPv4 sources,
@@ -640,7 +746,12 @@ static int WSAAPI Hooked_WSARecvFrom(
         }
 
         uint64_t arrival_ms = GetTickCount64();
+        reorder_adapt_on_arrival(pb, seq, arrival_ms);
         reorder_insert(pb, seq, arrival_ms, drain_src, drain_buf, drain_bytes);
+        // This socket demonstrably carries reorderable traffic: it is the one
+        // the wake thread should target, and its polls reset the wake budget.
+        g_reorder_sock = s;
+        g_last_recv_call_ms = arrival_ms;
     }
 
     // Scan the peer table for the first packet that is ready to deliver.
@@ -685,6 +796,7 @@ static int WSAAPI Hooked_WSARecvFrom(
     pb->seq_init = 1;
     pkt->used    = 0;
     if (pb->filled > 0) --pb->filled;
+    reorder_decay(pb, now_ms);
 
     sockaddr_in deliver_from = pkt->from;
 
@@ -721,10 +833,129 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
     if (g_reorder_cs_ready) {
         EnterCriticalSection(&g_reorder_cs);
         std::memset(g_peers, 0, sizeof(g_peers));
+        if (s == g_reorder_sock) {
+            g_reorder_sock = INVALID_SOCKET;
+        }
         LeaveCriticalSection(&g_reorder_cs);
     }
 
     return rc;
+}
+
+// ---------------------------------------------------------
+// Our sendto hook – opt-in outbound duplication (BZ_SEND_DUP)
+// ---------------------------------------------------------
+static int WSAAPI Hooked_sendto(SOCKET s, const char* buf, int len, int flags,
+    const struct sockaddr* to, int tolen)
+{
+    if (!g_realSendto) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_realSendto(s, buf, len, flags, to, tolen);
+
+    // Duplicate only IPv4 datagrams large enough to carry a BZRNet sequence
+    // field: control/wake packets stay single-shot.  The first call's result
+    // and error state are what the game sees.
+    if (g_send_dup && rc >= 0 && buf != nullptr && to != nullptr
+        && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)) {
+        int wsa = static_cast<int>(WSAGetLastError());
+        g_realSendto(s, buf, len, flags, to, tolen);
+        WSASetLastError(wsa);
+    }
+
+    return rc;
+}
+
+// ---------------------------------------------------------
+// Wake thread – prevents held packets from stranding.
+// While the reorder queue holds packets and the game is not actively polling
+// WSARecvFrom, nudge the (drained) socket readable again by sending a small
+// magic datagram to its own bound address.  The game's select()/event wait
+// fires, it calls WSARecvFrom, our hook discards the magic packet and
+// releases any packet whose hold window has expired.
+// ---------------------------------------------------------
+static DWORD WINAPI ReorderWakeThread(LPVOID)
+{
+    uint64_t seen_call = 0;   // last g_last_recv_call_ms we acted on
+    uint32_t burst     = 0;   // wakes sent since the game last polled
+
+    while (InterlockedCompareExchange(&g_wake_stop, 0, 0) == 0) {
+        Sleep(kReorderWakeTickMs);
+
+        if (!g_reorder_enabled || !g_reorder_cs_ready
+            || !g_realGetsockname || !g_realSendto || !g_realSocket) {
+            continue;
+        }
+
+        SOCKET   target    = INVALID_SOCKET;
+        bool     held      = false;
+        uint64_t last_call = 0;
+
+        EnterCriticalSection(&g_reorder_cs);
+        for (uint32_t i = 0; i < g_reorder_peers; ++i) {
+            if (g_peers[i].key != 0 && g_peers[i].filled > 0) {
+                held = true;
+                break;
+            }
+        }
+        target = g_reorder_sock;
+        last_call = g_last_recv_call_ms;
+        LeaveCriticalSection(&g_reorder_cs);
+
+        if (!held || target == INVALID_SOCKET) {
+            continue;
+        }
+
+        // Game is polling on its own: no need to wake it.
+        uint64_t now = GetTickCount64();
+        if (now - last_call < kReorderWakeIdleMs) {
+            continue;
+        }
+
+        // Burst cap: a game poll resets the budget.  If several nudges in a
+        // row produced no poll, the game is not sleeping in select() — it is
+        // paused (level load, alt-tab).  Piling more datagrams into the
+        // receive buffer would only crowd out real packets.
+        if (last_call != seen_call) {
+            seen_call = last_call;
+            burst = 0;
+        }
+        if (burst >= kReorderWakeBurstCap) {
+            continue;
+        }
+
+        sockaddr_in bound = {};
+        int bound_len = static_cast<int>(sizeof(bound));
+        if (g_realGetsockname(target, reinterpret_cast<sockaddr*>(&bound), &bound_len) != 0
+            || bound.sin_family != AF_INET || bound.sin_port == 0) {
+            continue; // unbound or already closed
+        }
+        if (bound.sin_addr.S_un.S_addr == htonl(INADDR_ANY)) {
+            bound.sin_addr.S_un.S_addr = htonl(INADDR_LOOPBACK);
+        }
+
+        if (g_wake_sender == INVALID_SOCKET) {
+            g_wake_sender = g_realSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (g_wake_sender == INVALID_SOCKET) {
+                continue;
+            }
+        }
+
+        g_realSendto(g_wake_sender,
+                     reinterpret_cast<const char*>(kWakeMagic),
+                     static_cast<int>(sizeof(kWakeMagic)), 0,
+                     reinterpret_cast<const sockaddr*>(&bound),
+                     static_cast<int>(sizeof(bound)));
+        ++burst;
+
+        if (!g_wake_logged) {
+            g_wake_logged = true;
+            ProxyLog("reorder: wake helper active (held packets, idle game poll)");
+        }
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------
@@ -838,6 +1069,9 @@ void InstallNetcodeHooks()
     g_realGetsockopt = (PFN_getsockopt) GetProcAddress(ws2, "getsockopt");
     g_realWSARecvFrom = (PFN_WSARecvFrom) GetProcAddress(ws2, "WSARecvFrom");
     g_realClosesocket = (PFN_closesocket) GetProcAddress(ws2, "closesocket");
+    g_realSocket      = (PFN_socket)      GetProcAddress(ws2, "socket");
+    g_realSendto      = (PFN_sendto)      GetProcAddress(ws2, "sendto");
+    g_realGetsockname = (PFN_getsockname) GetProcAddress(ws2, "getsockname");
 
     if (!g_realWSASocketW || !g_realSetsockopt || !g_realGetsockopt || !g_realWSARecvFrom || !g_realClosesocket)
     {
@@ -845,11 +1079,26 @@ void InstallNetcodeHooks()
         return;
     }
 
-    // Apply user-tunable reorder parameters (all optional, all have defaults baked in)
-    g_reorder_ms = g_reorder_ms;     // already set to kReorderDefaultMs, no env read
-    g_reorder_depth = g_reorder_depth;
-    g_reorder_peers = g_reorder_peers;
-    g_reorder_drain = g_reorder_drain;
+    // Apply user-tunable reorder parameters (all optional; parity with the
+    // Linux dsound proxy env vars)
+    {
+        const char *reorder_env = std::getenv("BZ_REORDER");
+        g_reorder_enabled = (reorder_env == nullptr || *reorder_env == '\0')
+                            ? true : env_truthy(reorder_env);
+        const char *adapt_env = std::getenv("BZ_REORDER_ADAPT");
+        g_reorder_adapt = (adapt_env == nullptr || *adapt_env == '\0')
+                          ? true : env_truthy(adapt_env);
+        const char *wake_env = std::getenv("BZ_REORDER_WAKE");
+        g_wake_enabled = (wake_env == nullptr || *wake_env == '\0')
+                         ? true : env_truthy(wake_env);
+        g_reorder_ms     = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
+        g_reorder_min_ms = clamp_u32(parse_env_u32("BZ_REORDER_MIN_MS", kReorderMinMsDef), 0, g_reorder_ms);
+        g_reorder_depth  = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
+        g_reorder_peers  = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
+        g_reorder_drain  = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
+        // Off by default: doubles upstream bandwidth on the P2P socket.
+        g_send_dup = env_truthy(std::getenv("BZ_SEND_DUP"));
+    }
 
     // IAT-patch WSASocketW and WSARecvFrom in the game EXE.
     HMODULE exe = GetModuleHandleA(nullptr);
@@ -892,8 +1141,12 @@ void InstallNetcodeHooks()
     {
         if (savedRealRecvFrom) g_realWSARecvFrom = reinterpret_cast<PFN_WSARecvFrom>(savedRealRecvFrom);
         ProxyLog("InstallNetcodeHooks: WSARecvFrom IAT patched OK"
-                 "  OOO reorder enabled window_ms=%u depth=%u peers=%u drain=%u",
+                 "  OOO reorder %s max_window_ms=%u min_window_ms=%u adapt=%d wake=%d depth=%u peers=%u drain=%u",
+                 g_reorder_enabled ? "enabled" : "DISABLED",
                  static_cast<unsigned>(g_reorder_ms),
+                 static_cast<unsigned>(g_reorder_min_ms),
+                 g_reorder_adapt ? 1 : 0,
+                 g_wake_enabled ? 1 : 0,
                  static_cast<unsigned>(g_reorder_depth),
                  static_cast<unsigned>(g_reorder_peers),
                  static_cast<unsigned>(g_reorder_drain));
@@ -919,10 +1172,55 @@ void InstallNetcodeHooks()
         if (savedRealClosesocket) g_realClosesocket = reinterpret_cast<PFN_closesocket>(savedRealClosesocket);
         ProxyLog("InstallNetcodeHooks: closesocket IAT patched OK");
     }
+
+    // Patch sendto for opt-in outbound duplication (passthrough when disabled).
+    void* savedRealSendto = nullptr;
+    bool patchedSendto = PatchIAT(exe, "WS2_32.dll", "sendto",
+        reinterpret_cast<void*>(Hooked_sendto), &savedRealSendto);
+    if (!patchedSendto)
+    {
+        patchedSendto = PatchIAT(exe, "ws2_32.dll", "sendto",
+            reinterpret_cast<void*>(Hooked_sendto), &savedRealSendto);
+    }
+
+    if (patchedSendto)
+    {
+        if (savedRealSendto) g_realSendto = reinterpret_cast<PFN_sendto>(savedRealSendto);
+        ProxyLog("InstallNetcodeHooks: sendto IAT patched OK  send_dup=%s",
+                 g_send_dup ? "enabled" : "disabled");
+    }
+    else if (g_send_dup)
+    {
+        ProxyLog("InstallNetcodeHooks: sendto not found in game IAT"
+                 " - BZ_SEND_DUP will NOT be applied");
+    }
+
+    // Start the wake thread only if the reorder hook is actually in place.
+    if (patchedRecvFrom && g_reorder_enabled && g_wake_enabled && g_wake_thread == nullptr)
+    {
+        g_wake_thread = CreateThread(nullptr, 0, ReorderWakeThread, nullptr, 0, nullptr);
+        if (g_wake_thread == nullptr)
+        {
+            ProxyLog("InstallNetcodeHooks: wake thread creation failed (err=%lu)", GetLastError());
+        }
+    }
 }
 
 void ShutdownNetcodeHooks()
 {
+    // Signal the wake thread to exit.  Do not wait on it here: this runs
+    // under the loader lock during DLL_PROCESS_DETACH and joining a thread
+    // would deadlock.  At process exit the thread is gone anyway.
+    InterlockedExchange(&g_wake_stop, 1);
+    if (g_wake_sender != INVALID_SOCKET && g_realClosesocket != nullptr) {
+        g_realClosesocket(g_wake_sender);
+        g_wake_sender = INVALID_SOCKET;
+    }
+    if (g_wake_thread != nullptr) {
+        CloseHandle(g_wake_thread);
+        g_wake_thread = nullptr;
+    }
+
     flush_buffer_log_files();
 
     if (g_buffer_ring != nullptr) {
