@@ -49,6 +49,26 @@ else
   echo "(no $PROXY_LOG_FILE found)"
 fi
 
+# Kernel limit check: the kernel clamps setsockopt to these maxima, and the
+# Wine getsockopt readback can report the requested value rather than the
+# clamped effective one.  A passing readback with limits below target is
+# therefore NOT proof the buffers are actually enlarged.
+rmem_max="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)"
+wmem_max="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)"
+echo "Kernel limits: net.core.rmem_max=$rmem_max net.core.wmem_max=$wmem_max"
+if [[ "$rmem_max" -lt "$EXPECTED_RECV" || "$wmem_max" -lt "$EXPECTED_SEND" ]]; then
+  echo "WARNING: kernel limits are below patch targets; effective socket buffers are clamped."
+  echo "Fix: sudo sysctl -w net.core.rmem_max=$EXPECTED_RECV net.core.wmem_max=$EXPECTED_SEND"
+  echo "To inspect the live socket while the game runs: ss -uampn | grep -A1 battlezone"
+fi
+
+# Game-side drop metric: BZRNet logs every packet it rejects.  "Type 0 ...
+# expected" lines are the out-of-order drops the reorder patch targets, so
+# this count per session is the before/after number that matters.
+ooo_drops=$(grep -ac "Dropping Packet Type 0" "$session_log" || true)
+total_drops=$(grep -ac "Dropping Packet" "$session_log" || true)
+echo "Game-side packet drops this session: total=$total_drops out_of_order=$ooo_drops"
+
 if [[ -n "$EXPECTED_SRC" ]]; then
   echo "Expected net.ini source should contain:"
   echo "$EXPECTED_SRC"

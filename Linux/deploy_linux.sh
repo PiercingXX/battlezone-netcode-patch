@@ -30,6 +30,21 @@ echo "Deploying dsound.dll to: $GAME_ROOT"
 command cp -f "$DLL_SRC" "$DLL_DST"
 rm -f "$GAME_ROOT/dsound_proxy.log"
 
+# The kernel silently clamps setsockopt to these limits; below the patch
+# targets the enlarged socket buffers are mostly fictional under Proton.
+rmem_max="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)"
+wmem_max="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)"
+if [[ "$rmem_max" -lt 4194304 || "$wmem_max" -lt 524288 ]]; then
+  echo
+  echo "WARNING: kernel UDP buffer limits are below the patch targets:" >&2
+  echo "  net.core.rmem_max=$rmem_max (need >= 4194304)" >&2
+  echo "  net.core.wmem_max=$wmem_max (need >= 524288)" >&2
+  echo "Apply with:" >&2
+  echo "  sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=524288" >&2
+  echo "Persist across reboots with:" >&2
+  echo "  printf 'net.core.rmem_max=4194304\\nnet.core.wmem_max=524288\\n' | sudo tee /etc/sysctl.d/99-battlezone-netcode.conf" >&2
+fi
+
 if [[ -x "$SCRIPT_DIR/repair_exu_linux.sh" ]]; then
   echo "Running Linux EXU compatibility repair (best effort)..."
   if ! "$SCRIPT_DIR/repair_exu_linux.sh" --game-path "$GAME_ROOT"; then

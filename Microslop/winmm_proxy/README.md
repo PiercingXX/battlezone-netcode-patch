@@ -54,16 +54,36 @@ The netcode hook thread runs automatically inside DLL_PROCESS_ATTACH, resolves r
 
 ## Configuration
 
-Core runtime parameters are baked into code defaults for simplicity:
+Socket buffer targets are baked into code defaults:
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
 | SO_SNDBUF | 524,288 bytes (512 KB) | Set at socket creation via WSASocketW hook |
 | SO_RCVBUF | 4,194,304 bytes (4 MB) | Set at socket creation via WSASocketW hook |
-| Reorder Window | 45 ms | Max hold time before forced delivery |
-| Reorder Depth | 8 packets | Max buffered packets per peer |
-| Reorder Peers | 32 sources | Max distinct IPv4 sources (P2P peers) |
-| Reorder Drain | 96 calls | Real WSARecvFrom calls per hook invocation |
+
+The reorder hold window is **adaptive per peer**: it starts at a small floor
+(`BZ_REORDER_MIN_MS`, default 5 ms) so clean connections get near-zero added
+latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default 45 ms)
+only when reordering is actually observed on that link, and decays back down
+after ~2 s without reorder evidence.
+
+A background **wake thread** prevents held packets from stranding when the
+game sleeps in `select()` on the (already drained) socket: it nudges the
+socket readable with a tiny internal datagram that the hook discards.
+
+Runtime tuning (same env vars as the Linux dsound proxy):
+
+| Variable | Default | Notes |
+|-----------|---------|-------|
+| BZ_REORDER | 1 | Set to `0` to disable reordering entirely |
+| BZ_REORDER_WINDOW_MS | 45 | Max (ceiling) hold time before forced delivery (clamp 5–200) |
+| BZ_REORDER_MIN_MS | 5 | Adaptive window floor; `0` = deliver immediately unless reordering seen |
+| BZ_REORDER_ADAPT | 1 | Set to `0` for a fixed window equal to BZ_REORDER_WINDOW_MS |
+| BZ_REORDER_WAKE | 1 | Set to `0` to disable the wake thread |
+| BZ_REORDER_DEPTH | 8 | Max buffered packets per peer (max 8) |
+| BZ_REORDER_PEERS | 32 | Max distinct IPv4 sources (max 32) |
+| BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128) |
+| BZ_SEND_DUP | 0 | Set to `1` to send every outbound P2P datagram twice. Loss redundancy for genuinely lossy links; costs 2x upstream bandwidth. Receivers dedup whether patched or vanilla |
 
 Optional logging controls:
 
@@ -72,8 +92,6 @@ Optional logging controls:
 | BZ_BUFFER_LOG | off | Set to `1` to enable binary packet capture |
 | BZ_BUFFER_LOG_BYTES | 32 | Payload prefix bytes stored per record |
 | BZ_BUFFER_LOG_RING | 65536 | Number of ring-buffer records held in memory |
-
-Reorder and socket tuning stay baked into defaults. Logging is the only runtime feature toggle.
 
 ## Verification
 
@@ -88,7 +106,7 @@ Look for log output in `winmm_proxy.log` (same directory as the game exe):
 ...
 InstallNetcodeHooks: starting
 InstallNetcodeHooks: WSASocketW IAT patched OK  SO_SNDBUF target=524288  SO_RCVBUF target=4194304
-InstallNetcodeHooks: WSARecvFrom IAT patched OK  OOO reorder enabled window_ms=45 depth=8 peers=32 drain=96
+InstallNetcodeHooks: WSARecvFrom IAT patched OK  OOO reorder enabled max_window_ms=45 min_window_ms=5 adapt=1 wake=1 depth=8 peers=32 drain=96
 InstallNetcodeHooks: closesocket IAT patched OK
 ```
 
@@ -129,7 +147,7 @@ buffer_log: flushed records=... total_events=...
    - Buffers each packet per source IP:port into per-peer PeerBuf
 3. **Delivery Selection:** Scan per-peer buffers for ready packets:
    - Prefer exact in-order successor of last_seq
-   - Fallback to lowest-seq packet once it's aged ≥45ms
+   - Fallback to lowest-seq packet once it's aged past the peer's adaptive window
    - On first packet per peer, deliver oldest immediately
 4. **Return to Game:** Copy selected packet to game's WSA buffers, update per-peer sequence state, return
 
@@ -178,7 +196,7 @@ Both Linux (`dsound.dll`) and Windows (`winmm.dll`) proxies implement the same r
 | **Real DLL** | dsound.dll (audio output) | winmm.dll (multimedia) |
 | **Hook Target** | WSARecvFrom in Proton's WS2_32.dll | WSARecvFrom in native WS2_32.dll |
 | **Tuning** | SO_SNDBUF=524KB, SO_RCVBUF=4MB | SO_SNDBUF=524KB, SO_RCVBUF=4MB |
-| **Reorder Profile** | window=45ms, drain=96, depth=8, peers=32 | window=45ms, drain=96, depth=8, peers=32 |
+| **Reorder Profile** | adaptive 5–45ms, drain=96, depth=8, peers=32 | adaptive 5–45ms, drain=96, depth=8, peers=32 |
 | **Logging** | Optional binary packet capture (BZ_BUFFER_LOG) | Optional binary packet capture (BZ_BUFFER_LOG) |
 
 ## Known Limitations
@@ -189,7 +207,7 @@ Both Linux (`dsound.dll`) and Windows (`winmm.dll`) proxies implement the same r
 ## Testing Notes
 
 - **Optimal lobby quality:** ~4.38 packet drops per minute (45ms window, 96 drain on clean peers)
-- **Longer RTT (100ms+):** Drop rate may increase due to higher variance; window may need tuning (but currently hardcoded)
+- **Longer RTT (100ms+):** Drop rate may increase due to higher variance; tune `BZ_REORDER_WINDOW_MS` (ceiling) and `BZ_REORDER_MIN_MS` (floor) via env vars
 - **Patching failures:** Check `winmm_proxy.log` for IAT patching errors; common causes are different DLL names in import table (code tries both "WS2_32.dll" and "ws2_32.dll")
 
 ## Troubleshooting

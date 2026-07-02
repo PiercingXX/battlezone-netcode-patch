@@ -52,16 +52,44 @@ From the repository root:
 
 ## Reorder Configuration
 
-The finalized profile is baked into defaults (window `45`, depth `8`, peers `32`,
-drain `96`), so these are optional overrides only.
+The hold window is **adaptive per peer**: it starts at a small floor
+(`BZ_REORDER_MIN_MS`, default `5` ms) so clean connections get near-zero
+added latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default
+`45` ms) only when reordering is actually observed on that link, and decays
+back down after ~2 s without reorder evidence.
+
+A background **wake thread** prevents held packets from stranding when the
+game sleeps in `select()` on the (already drained) socket: it nudges the
+socket readable with a tiny internal datagram that the hook discards.
 
 | Variable | Default | Description |
 |---|---|---|
-| `BZ_REORDER_WINDOW_MS` | `45` | Max hold time before releasing oldest queued packet |
+| `BZ_REORDER` | `1` | Set to `0` to disable reordering entirely |
+| `BZ_REORDER_WINDOW_MS` | `45` | Max (ceiling) hold time before releasing oldest queued packet |
+| `BZ_REORDER_MIN_MS` | `5` | Adaptive window floor; `0` = deliver immediately unless reordering seen |
+| `BZ_REORDER_ADAPT` | `1` | Set to `0` for a fixed window equal to `BZ_REORDER_WINDOW_MS` |
+| `BZ_REORDER_WAKE` | `1` | Set to `0` to disable the wake thread |
 | `BZ_REORDER_DEPTH` | `8` | Active per-peer reorder queue depth (max `8`) |
 | `BZ_REORDER_PEERS` | `32` | Active peer table size (max `32`) |
 | `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`) |
+| `BZ_SEND_DUP` | `0` | Set to `1` to send every outbound P2P datagram twice — loss redundancy for genuinely lossy links, costs 2x upstream bandwidth |
 | `BZ_BUFFER_LOG` | *(off)* | Set to `1` to capture binary packet trace |
+
+## Kernel Socket Buffer Limits (Required for Full Effect)
+
+The Linux kernel silently clamps `setsockopt(SO_RCVBUF/SO_SNDBUF)` to
+`net.core.rmem_max` / `net.core.wmem_max` (~208 KB on most distros).
+Without raising them, the 4 MB receive buffer is mostly fictional — and the
+Wine `getsockopt` readback can still report the requested value, so the
+proxy log alone does not prove the kernel honored it.
+
+```bash
+sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=524288
+printf 'net.core.rmem_max=4194304\nnet.core.wmem_max=524288\n' | sudo tee /etc/sysctl.d/99-battlezone-netcode.conf
+```
+
+The installer (`install/install_linux.sh`) offers to do this automatically.
+Inspect the live socket while the game runs with `ss -uampn`.
 
 ## Steam Launch Options
 
@@ -74,4 +102,4 @@ WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 - Proton-specific: depends on Wine loading a local native `dsound.dll`.
 - Windows uses a separate implementation in `Microslop/winmm_proxy/`.
 
-Linux and Windows now ship as separate startup-interception paths with matching socket buffer targets.
+Linux and Windows now ship as separate startup-interception paths with matching socket buffer targets and matching reorder/tuning env vars.
