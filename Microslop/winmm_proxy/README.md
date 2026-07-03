@@ -63,7 +63,7 @@ Socket buffer targets are baked into code defaults:
 
 The reorder hold window is **adaptive per peer**: it starts at a small floor
 (`BZ_REORDER_MIN_MS`, default 5 ms) so clean connections get near-zero added
-latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default 45 ms)
+latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default 100 ms)
 only when reordering is actually observed on that link, and decays back down
 after ~2 s without reorder evidence.
 
@@ -76,7 +76,7 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | Variable | Default | Notes |
 |-----------|---------|-------|
 | BZ_REORDER | 1 | Set to `0` to disable reordering entirely |
-| BZ_REORDER_WINDOW_MS | 45 | Max (ceiling) hold time before forced delivery (clamp 5–200) |
+| BZ_REORDER_WINDOW_MS | 100 | Max (ceiling) hold time before forced delivery (clamp 5–200) |
 | BZ_REORDER_MIN_MS | 5 | Adaptive window floor; `0` = deliver immediately unless reordering seen |
 | BZ_REORDER_ADAPT | 1 | Set to `0` for a fixed window equal to BZ_REORDER_WINDOW_MS |
 | BZ_REORDER_WAKE | 1 | Set to `0` to disable the wake thread |
@@ -106,7 +106,7 @@ Look for log output in `winmm_proxy.log` (same directory as the game exe):
 ...
 InstallNetcodeHooks: starting
 InstallNetcodeHooks: WSASocketW IAT patched OK  SO_SNDBUF target=524288  SO_RCVBUF target=4194304
-InstallNetcodeHooks: WSARecvFrom IAT patched OK  OOO reorder enabled max_window_ms=45 min_window_ms=5 adapt=1 wake=1 depth=8 peers=32 drain=96
+InstallNetcodeHooks: WSARecvFrom IAT patched OK  OOO reorder enabled max_window_ms=100 min_window_ms=5 adapt=1 wake=1 depth=8 peers=32 drain=96
 InstallNetcodeHooks: closesocket IAT patched OK
 ```
 

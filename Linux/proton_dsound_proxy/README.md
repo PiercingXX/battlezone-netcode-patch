@@ -55,7 +55,7 @@ From the repository root:
 The hold window is **adaptive per peer**: it starts at a small floor
 (`BZ_REORDER_MIN_MS`, default `5` ms) so clean connections get near-zero
 added latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default
-`45` ms) only when reordering is actually observed on that link, and decays
+`100` ms) only when reordering is actually observed on that link, and decays
 back down after ~2 s without reorder evidence.
 
 A background **wake thread** prevents held packets from stranding when the
@@ -65,7 +65,7 @@ socket readable with a tiny internal datagram that the hook discards.
 | Variable | Default | Description |
 |---|---|---|
 | `BZ_REORDER` | `1` | Set to `0` to disable reordering entirely |
-| `BZ_REORDER_WINDOW_MS` | `45` | Max (ceiling) hold time before releasing oldest queued packet |
+| `BZ_REORDER_WINDOW_MS` | `100` | Max (ceiling) hold time before releasing oldest queued packet |
 | `BZ_REORDER_MIN_MS` | `5` | Adaptive window floor; `0` = deliver immediately unless reordering seen |
 | `BZ_REORDER_ADAPT` | `1` | Set to `0` for a fixed window equal to `BZ_REORDER_WINDOW_MS` |
 | `BZ_REORDER_WAKE` | `1` | Set to `0` to disable the wake thread |

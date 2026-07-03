@@ -1,26 +1,30 @@
+# Battlezone 98 Redux Netcode Patch
+
+Battlezone's netcode drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
+
+This patch intercepts wayward packets mid-flight, buffers them briefly, and releases them in order. The game never knows it's there.
+
+**Measured result (live A/B, same map, same opponent): 121 drops → 40 drops per match. ~65% fewer out-of-order drops.**
+
+---
+
 ## Quick Start
 
 **Everyone in the lobby should install this** — the fix is receive-side, so each install only protects that player's own inbound packets. See [Who Should Install It?](#who-should-install-it) below.
 
----
-
 ### Windows 🪟
 
-Step 1: paste this into PowerShell:
+Paste into PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
-The installer auto-detects your Battlezone 98 Redux install (registry + Steam library folders), downloads the known-good prebuilt `winmm.dll` (verifying its SHA256 hash), and installs the tuned host-side `net.ini` (backing up any existing one). It warns if a Workshop mod's net.ini would override it — unsubscribing is required; disabling in-game is not enough.
-
-Windows does not need any Steam launch option changes.
-
----
+Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed.
 
 ### Linux / Proton 🐧
 
-Step 1: paste this into terminal:
+Step 1 — paste into terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_linux.sh | bash
@@ -28,34 +32,20 @@ curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch
 
 The installer will:
 
-- auto-detect your Battlezone 98 Redux install (native, Snap, or Flatpak Steam)
+- auto-detect your install (native, Snap, or Flatpak Steam)
 - ask before installing build dependencies (MinGW cross-compiler, make) via apt, pacman, or dnf
-- build `dsound.dll` locally from source and install it into the game folder
-- offer to raise the kernel UDP buffer limits (`net.core.rmem_max` / `net.core.wmem_max`) — without this, the kernel silently clamps the enlarged socket buffers to ~208 KB and most of the buffer patch does nothing
-- install the tuned host-side `net.ini` (backing up any existing one), warning if a Workshop mod's net.ini would override it
+- build `dsound.dll` locally from source and install it
+- offer to raise the kernel UDP buffer limits — without this, the kernel silently clamps the enlarged socket buffers to ~208 KB
+- install the tuned `net.ini` as a local mod
 - run the Linux EXU compatibility repair (best effort)
 
-Running non-interactively? Set `BZNET_ASSUME_YES=1` to skip the confirmation prompts.
+Non-interactive? Set `BZNET_ASSUME_YES=1`.
 
-Step 2: set this in Steam launch options:
+Step 2 — set Steam launch options:
 
 ```text
 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 ```
-
----
-
-### The Actual Problem
-Battlezone's netcode is brutally unforgiving: it drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
-
-It is now substantially less dumb.
-
-### The "Solution": Out-of-Order Packet Reordering
-I built a packet reordering engine that intercepts wayward packets mid-flight, buffers them for up to 45ms, then releases them once their predecessors arrive. Think traffic control, not packet panic.
-
-**The result:** ~4-5 fewer drops per minute on typical connections. On WiFi or high-latency links: better hit registration, smoother movement, and fewer "how did that even happen" moments...yes there are still drops, I said 'fewer'.
-
-The patch runs entirely in userspace via DLL proxy injection. The game never knows it's there.
 
 ### Who Should Install It?
 
@@ -66,84 +56,36 @@ Everyone playing, ideally. Battlezone drops out-of-order packets **at the receiv
 | Reorder buffer | Only you (your inbound from every peer) |
 | Bigger socket buffers | Only you (your burst tolerance) |
 | `BZ_SEND_DUP=1` (opt-in) | The **other** players — protects your outbound against loss, works even if they're unpatched |
-| Tuned net.ini | Everyone in the game, but only if you're the host |
+| Tuned net.ini | Your own send governor (it runs on every machine, not just the host's) |
 
 Playing with someone who can't or won't install? Enable `BZ_SEND_DUP=1` on your side — it's the only piece that helps an unpatched peer.
 
 ---
 
-## What Was Actually Shipped (V1 -> V4.1)
+## How It Works
 
-### Version 1 (Patch 00)
-- Forced bigger UDP socket buffers
-- `SO_SNDBUF = 512 KB`
-- `SO_RCVBUF = 2 MB`
-- Result: better burst tolerance, fewer immediate choke events
+- **Adaptive per-peer reorder window:** starts at a 5 ms floor so clean connections pay near-zero added latency, grows toward a 100 ms ceiling only when reordering is actually observed on that link, and decays back down when the link is clean. The 100 ms ceiling is what produced the measured 65% drop reduction (the old 45 ms default left too many near-misses on the table).
+- **Wake thread:** the reorder hook drains the kernel socket, so a game sleeping in `select()` could leave held packets stranded. A background thread nudges the socket readable so held packets release on time.
+- **4 MB receive / 512 KB send socket buffers**, forced at socket creation for burst tolerance.
+- **Opt-in loss redundancy (`BZ_SEND_DUP=1`):** sends every outbound P2P datagram twice via the `WSASendTo` hook. Reordering can't recover a packet the network actually dropped; a duplicate can. Receivers dedup it whether patched or vanilla. Costs 2x upstream — for genuinely lossy links only.
+- Everything runs in userspace via DLL proxy injection (`dsound.dll` on Proton, `winmm.dll` on Windows). Same code, same tuning env vars (`BZ_REORDER_*`, `BZ_SEND_DUP`) on both platforms — see the proxy READMEs.
 
-### Version 2
-- Forced even bigger UDP socket buffers
-- `SO_SNDBUF = 512 KB`
-- `SO_RCVBUF = 4 MB`
-- Hardened hooks and improved deployment consistency
+## What We Learned About the Game (the hard way)
 
-### V3
-- Added in-proxy out-of-order packet reordering (`WSARecvFrom` path)
-- Per-peer buffering with deterministic sequence release
-- Tuned profile:
-- Reorder window `45 ms`
-- Drain budget `96`
-- Per-peer depth `8`
-- Peer cap `32`
-- Sequence location `payload[13..16]` (`u32le`)
-- Linux and Windows now have matching behavior
+Verified in live testing, because the community wisdom was mostly stale:
 
-### V4
-- **Adaptive reorder window:** the fixed 45 ms hold added latency to every
-  gap, even on clean connections. The window is now per-peer: it starts at a
-  5 ms floor, grows toward the 45 ms ceiling only when reordering is actually
-  observed on that link, and decays back down when the link is clean.
-  Clean connections now pay near-zero added latency.
-- **Stranded-packet fix (wake thread):** the reorder hook drains the kernel
-  socket, so a game sleeping in `select()` could leave held packets stuck far
-  past the window until the next real packet arrived. A background thread now
-  nudges the socket readable so held packets release on time.
-- **Linux kernel clamp fix:** the installer raises
-  `net.core.rmem_max`/`net.core.wmem_max` (with consent) — previously the
-  kernel silently clamped the 4 MB receive buffer to ~208 KB on most distros.
-- **Tuning parity:** Windows now honors the same `BZ_REORDER_*` env vars as
-  Linux (`BZ_REORDER`, `BZ_REORDER_WINDOW_MS`, `BZ_REORDER_MIN_MS`,
-  `BZ_REORDER_ADAPT`, `BZ_REORDER_WAKE`, `BZ_REORDER_DEPTH`,
-  `BZ_REORDER_PEERS`, `BZ_REORDER_DRAIN`). See the proxy READMEs.
-- **Opt-in loss redundancy (`BZ_SEND_DUP=1`):** sends every outbound P2P
-  datagram twice. Reordering can't recover a packet the network actually
-  dropped; a duplicate can. Receivers dedup it whether patched or vanilla.
-  Costs 2x upstream bandwidth — for genuinely lossy links only.
-- **Host-side net.ini tuning:** the game's send-rate governor
-  (`MaxPing`/`MaxBandwidth`/`MinBandwidth`) can collapse throughput on
-  jittery links — a problem no receive-side proxy can fix. A tuned
-  [net.ini](net-ini/README.md) ships with the repo; it only takes effect on
-  the hosting machine.
-- **Drop metric in verify:** `Linux/verify_net_patch.sh` now prints the
-  game-side packet drop counts (total and out-of-order) for the latest
-  session, so patch changes can be measured instead of vibed.
+- **net.ini only loads through the mod system.** A copy next to `battlezone98redux.exe` is silently ignored. The installers deliver it as a local mod at `packaged_mods/9990001/net.ini`, which the game provably loads on both platforms.
+- **Disabling a workshop mod in-game does NOT stop its net.ini loading.** Only unsubscribing does. If you're subscribed to the "Auto-Kick Reduction Patch" (workshop `1895622040`), it overrides the local mod — and it caps your send rate at 32 KB/s.
+- **The send-rate governor runs on every machine**, not just the host's. And it always starts at a hardcoded 4,000 bytes/s, ramping up slowly — `MinBandwidth` does not set the starting rate, and in short matches the `MaxBandwidth` ceiling is never reached.
+- The game exe imports classic winsock functions **by ordinal** and sends all P2P traffic via `WSASendTo` (`sendto` isn't in its import table at all). On real Windows its receives are overlapped/IOCP; under Proton they aren't.
 
-### V4.1 (Current — Windows hotfix)
- Fixed. Re-run the installer.
+## Version History
 
-- **Windows launch freeze fixed:** the `WSARecvFrom` hook was routing the
-  game's overlapped (IOCP) receives through the synchronous reorder path,
-  hanging the game the moment it contacted the matchmaking server. Real
-  Windows uses overlapped receives; Proton doesn't, which is why Linux was
-  never affected. Overlapped calls now pass straight through — the same
-  guard the Linux proxy had all along. This bug existed in V3 too and
-  likely explains earlier "local Windows builds crash in-game" reports.
-- **Ordinal IAT patching:** the game exe imports classic winsock functions
-  (`closesocket`, `sendto`) by *ordinal*, not by name, so those hooks were
-  silently failing to install on Windows. The IAT walker now matches both.
-- **`BZ_SEND_DUP` actually works now:** the game sends all P2P traffic via
-  `WSASendTo` — plain `sendto` isn't in its import table at all — so the
-  duplication hook moved there, on both Windows and Linux. It was silently
-  inert before.
+- **V1–V2:** forced bigger UDP socket buffers (final: 512 KB send / 4 MB receive). Better burst tolerance.
+- **V3:** in-proxy out-of-order packet reordering (`WSARecvFrom` hook), per-peer buffering with deterministic sequence release. Sequence field located at `payload[13..16]` (u32le) via binary capture analysis.
+- **V4:** adaptive reorder window (5 ms floor), wake thread for stranded packets, Linux kernel-clamp fix in the installer, Windows/Linux tuning parity, `BZ_SEND_DUP`, drop metrics in the verify script.
+- **V4.1:** **Windows launch-freeze hotfix** — the hook was routing the game's overlapped (IOCP) receives through the synchronous reorder path, hanging the game at the loading screen (Proton was unaffected; the bug existed since V3). Also: ordinal IAT patching, and `BZ_SEND_DUP` moved to the `WSASendTo` hook where it actually works.
+- **V4.2 (current):** reorder ceiling default raised 45 → 100 ms after live A/B testing measured ~65% fewer drops (121 → 40/43 on the same map/opponent); harmless on clean links thanks to the adaptive floor. net.ini now installs as a local packaged mod, since the game-root location turned out to be dead.
 
 ---
 
@@ -151,36 +93,33 @@ Playing with someone who can't or won't install? Enable `BZ_SEND_DUP=1` on your 
 
 Launch the game once (start or join a multiplayer session), quit, then:
 
-Linux — run from the game folder:
+**Linux** — run from the game folder:
 
 ```bash
 cd "/path/to/Battlezone 98 Redux"
 /path/to/battlezone-netcode-patch-master/Linux/verify_net_patch.sh
 ```
 
-It checks `BZLogger.txt`, the `dsound_proxy.log` effective-buffer readback, and warns if the kernel limits are still below the patch targets. Expect `VERIFY RESULT: PASS`.
+Expect `VERIFY RESULT: PASS` plus a per-session drop count (`Game-side packet drops this session: ...`) you can compare across matches.
 
-Windows:
+**Windows:**
 
 ```powershell
 .\Microslop\verify_windows.ps1
 ```
 
-Auto-detects the game path (or pass `-GamePath "D:\...\Battlezone 98 Redux"`) and confirms the `winmm.dll` proxy deployed and the socket buffer hook fired.
+Quick manual checks in any log:
 
-You can also just look at the proxy log in the game folder (`dsound_proxy.log` on Linux, `winmm_proxy.log` on Windows) for a `reorder: enabled` line and `effective readback SO_SNDBUF=524288 ... SO_RCVBUF=4194304`.
+- Proxy log (`dsound_proxy.log` / `winmm_proxy.log`): `reorder: enabled max_window_ms=100 ...` and `effective readback SO_SNDBUF=524288 ... SO_RCVBUF=4194304`
+- `BZLogger.txt`: `MOD FOUND net.ini at ...packaged_mods\9990001` confirms the net.ini mod loaded
 
 ---
 
-### Want To Do It Manually Instead? 🔧
+## Want To Do It Manually Instead? 🔧
 
-Manual build and deployment steps are still listed below if you want full control or just do not trust automation. Fair.
-
-These steps assume you downloaded and extracted the source archive to `~/Downloads/battlezone-netcode-patch-master`.
+These steps assume the source archive is extracted to `~/Downloads/battlezone-netcode-patch-master`.
 
 ### Linux / Proton
-
-Manual install path:
 
 1. Install build tools.
 
@@ -194,34 +133,21 @@ Arch/Manjaro:
 sudo pacman -S mingw-w64-gcc make
 ```
 
-2. Raise the kernel UDP buffer limits (the deploy script warns about this but does not apply it):
+2. Raise the kernel UDP buffer limits (the deploy script warns but does not apply this):
 
 ```bash
 sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=524288
 printf 'net.core.rmem_max=4194304\nnet.core.wmem_max=524288\n' | sudo tee /etc/sysctl.d/99-battlezone-netcode.conf
 ```
 
-3. Deploy proxy to your Battlezone install.
+3. Deploy to your Battlezone install (builds from source, installs the DLL and net.ini mod, runs EXU repair):
 
-Native Steam path:
 ```bash
 cd "$HOME/Downloads/battlezone-netcode-patch-master"
-./Linux/deploy_linux.sh "/home/$USER/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+./Linux/deploy_linux.sh "/path/to/steamapps/common/Battlezone 98 Redux"
 ```
 
-Snap Steam path:
-```bash
-cd "$HOME/Downloads/battlezone-netcode-patch-master"
-./Linux/deploy_linux.sh "/home/$USER/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-Flatpak Steam path:
-```bash
-cd "$HOME/Downloads/battlezone-netcode-patch-master"
-./Linux/deploy_linux.sh "/home/$USER/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
-```
-
-`deploy_linux.sh` builds the proxy from source, installs it, and also runs Linux EXU compatibility repair automatically (best effort).
+Common game paths: native `~/.local/share/Steam/steamapps/common/...`, Snap `~/snap/steam/common/.local/share/Steam/steamapps/common/...`, Flatpak `~/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/...`
 
 4. Steam launch options:
 
@@ -231,58 +157,15 @@ WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
 
 ### Windows
 
-Manual install path:
+**Defender note:** some users report Defender quarantining `winmm.dll` from source ZIP downloads as `Program:Win32/Contebrew.A!ml` — a heuristic detection common for unsigned DLL proxies. If it triggers: restore from Protection history, add a narrow exception for that one game-folder DLL only, and report the false positive. Don't disable AV globally.
 
-Windows Defender note (important):
+1. Recommended: use the prebuilt DLL (`prebuilt/windows/winmm.dll`; verify with `sha256sum -c winmm.dll.sha256`).
+2. Or build it yourself (advanced): `cd Microslop/winmm_proxy && make` → `build/winmm.dll`.
+3. Copy `winmm.dll` to the game folder (`...\steamapps\common\Battlezone 98 Redux\`).
+4. Optionally copy `net-ini/net.ini` to `...\Battlezone 98 Redux\packaged_mods\9990001\net.ini`.
+5. Launch normally — no launch option changes on Windows.
 
-- Some users report Defender quarantining winmm.dll from GitHub source ZIP downloads as Program:Win32/Contebrew.A!ml.
-- This is a heuristic/PUA-style detection commonly triggered by unsigned DLL proxy/hook binaries.
-- If Defender quarantines the file, do not disable antivirus globally. See remediation below.
-
-1. Recommended option: use the prebuilt DLL in this repo if your AV policy allows it:
-
-```text
-prebuilt/windows/winmm.dll
-```
-
-Optional integrity check:
-
-```bash
-cd "$HOME/Downloads/battlezone-netcode-patch-master/prebuilt/windows"
-sha256sum -c winmm.dll.sha256
-```
-
-2. Build-it-yourself option (advanced/troubleshooting only; some local Windows builds have been reported to crash in-game):
-
-```bash
-cd "$HOME/Downloads/battlezone-netcode-patch-master"
-cd Microslop/winmm_proxy && make
-```
-
-The built DLL lands in `Microslop/winmm_proxy/build/winmm.dll`.
-
-3. Copy winmm.dll to your game folder:
-
-```text
-C:\Program Files (x86)\Steam\steamapps\common\Battlezone 98 Redux\
-```
-
-4. Launch normally. No Steam launch option changes are needed on Windows.
-
-If Defender quarantines the DLL:
-
-- Open Windows Security -> Protection history.
-- Confirm affected item path and detection name.
-- If hash matches your expected build, restore the file and add a narrow exception for that one game-folder DLL only.
-- Submit a false-positive report to Microsoft with the DLL and detection details.
-- Prefer signed release artifacts when available.
-
-Maintainer release guidance (recommended):
-
-- Avoid shipping unsigned DLL binaries inside the source ZIP path when possible.
-- Prefer GitHub Releases assets with SHA256 + Authenticode signature.
-
-For full Windows-specific notes, see [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md).
+Full Windows notes: [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md)
 
 ---
 
@@ -313,20 +196,9 @@ Details: [logging_readme.md](logging_readme.md)
 
 ## Known Limits
 
-- Primary UDP path is hooked (matches BZ behavior)
-- This fixes out-of-order handling, not every form of packet loss physics
-
----
-
-## Hosting a Game?
-
-The proxy fixes the receive side. The send side has its own failure mode:
-the game's bandwidth governor cuts your send rate every time ping crosses
-`MaxPing` and caps it at `MaxBandwidth` — with stock values one jitter spike
-can collapse your outbound rate and the lag feeds itself. Copy
-[net-ini/net.ini](net-ini/net.ini) into your game folder before hosting; see
-[net-ini/README.md](net-ini/README.md) for the workshop-mod precedence
-gotcha.
+- Fixes out-of-order handling; true packet loss is only mitigated by the opt-in `BZ_SEND_DUP` redundancy.
+- The game's send governor always ramps from a hardcoded 4 KB/s at match start — net.ini can't change the starting rate, and short matches never reach any bandwidth ceiling. Start-of-match traffic bursts remain the main unsolved drop source.
+- If you're subscribed to a workshop mod that ships net.ini, it overrides the patch's tuned copy — unsubscribe (disabling in-game is not enough).
 
 ---
 
