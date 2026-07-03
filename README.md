@@ -1,8 +1,5 @@
 # Battlezone 98 Redux Netcode Patch
 
-Battlezone's netcode drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
-
-This patch intercepts wayward packets mid-flight, buffers them briefly, and releases them in order. The game never knows it's there.
 
 
 ## *** New Update Needs Testing!!! ***
@@ -13,11 +10,21 @@ This patch intercepts wayward packets mid-flight, buffers them briefly, and rele
 > **Linux:** use the launch options below (they include `BZ_SEND_DUP=1`).
 > **Windows:** run `setx BZ_SEND_DUP 1` in a command prompt, then fully restart Steam. Confirm with `send_dup=enabled` in `winmm_proxy.log`.
 >
-> Report your before/after drop counts (the verify script prints them).
+> Send me your logs after games:
+>   Linux users I need `dsound_proxy.log` and `BZLogger.txt`.
+>   Windows users I need `winmm_proxy.log` and `BZLogger.txt`.
 
 
 
 
+
+
+---
+
+
+Battlezone's netcode drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
+
+This patch intercepts wayward packets mid-flight, buffers them briefly, and releases them in order. The game never knows it's there.
 
 
 **Measured result (live A/B, same map, same opponent): 121 drops → 40 drops per match. ~65% fewer out-of-order drops.**
