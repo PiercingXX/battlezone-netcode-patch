@@ -8,7 +8,7 @@ $defaultInstallDir = "Battlezone 98 Redux"
 $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
-$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "a8477e49432e250b901a81cbd561968934410892e42d5e76ed6b327c315eacb0" }
+$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "c81539edecf108d90b0874d754856466522b98fc855d6b0af57a133108ac0edd" }
 
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]

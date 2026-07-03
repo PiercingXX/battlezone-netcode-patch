@@ -81,6 +81,11 @@ typedef int (WSAAPI* PFN_closesocket)(SOCKET s);
 typedef SOCKET (WSAAPI* PFN_socket)(int af, int type, int protocol);
 typedef int (WSAAPI* PFN_sendto)(SOCKET s, const char* buf, int len, int flags,
     const struct sockaddr* to, int tolen);
+typedef int (WSAAPI* PFN_WSASendTo)(
+    SOCKET s, LPWSABUF buffers, DWORD buffer_count,
+    LPDWORD bytes_sent, DWORD flags,
+    const struct sockaddr* to, int tolen, LPWSAOVERLAPPED ov,
+    LPWSAOVERLAPPED_COMPLETION_ROUTINE cr);
 typedef int (WSAAPI* PFN_getsockname)(SOCKET s, struct sockaddr* name, int* namelen);
 
 static PFN_WSASocketW  g_realWSASocketW = nullptr;
@@ -90,6 +95,7 @@ static PFN_WSARecvFrom g_realWSARecvFrom = nullptr;
 static PFN_closesocket g_realClosesocket = nullptr;
 static PFN_socket      g_realSocket      = nullptr;
 static PFN_sendto      g_realSendto      = nullptr;
+static PFN_WSASendTo   g_realWSASendTo   = nullptr;
 static PFN_getsockname g_realGetsockname = nullptr;
 
 static wchar_t          g_buffer_bin_path[MAX_PATH] = L"bz_buffer_log.bin";
@@ -875,6 +881,58 @@ static int WSAAPI Hooked_sendto(SOCKET s, const char* buf, int len, int flags,
 }
 
 // ---------------------------------------------------------
+// Our WSASendTo hook – the game sends all P2P traffic through WSASendTo
+// (its IAT has no plain sendto import), so BZ_SEND_DUP lives here.
+// ---------------------------------------------------------
+static int WSAAPI Hooked_WSASendTo(
+    SOCKET s, LPWSABUF buffers, DWORD buffer_count,
+    LPDWORD bytes_sent, DWORD flags,
+    const struct sockaddr* to, int tolen,
+    LPWSAOVERLAPPED ov, LPWSAOVERLAPPED_COMPLETION_ROUTINE cr)
+{
+    if (!g_realWSASendTo) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_realWSASendTo(s, buffers, buffer_count, bytes_sent, flags, to, tolen, ov, cr);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    // Duplicate only IPv4 datagrams large enough to carry a BZRNet sequence
+    // field.  The duplicate is a separate synchronous send from a flat copy,
+    // which keeps it safe for overlapped originals too: the caller's buffers
+    // are only guaranteed valid for the duration of this call.
+    if (g_send_dup && to != nullptr && to->sa_family == AF_INET
+        && buffers != nullptr && buffer_count > 0
+        && (rc == 0 || (rc == SOCKET_ERROR && wsa == WSA_IO_PENDING))) {
+        uint8_t flat[kReorderMaxPktBytes];
+        uint32_t total = 0;
+        bool fits = true;
+        for (DWORD i = 0; i < buffer_count; ++i) {
+            if (buffers[i].buf == nullptr || buffers[i].len == 0) {
+                continue;
+            }
+            if (total + buffers[i].len > kReorderMaxPktBytes) {
+                fits = false;
+                break;
+            }
+            std::memcpy(flat + total, buffers[i].buf, buffers[i].len);
+            total += buffers[i].len;
+        }
+        if (fits && total >= kReorderSeqMinPay) {
+            WSABUF dup_buf;
+            dup_buf.buf = reinterpret_cast<char*>(flat);
+            dup_buf.len = static_cast<u_long>(total);
+            DWORD dup_sent = 0;
+            g_realWSASendTo(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+        }
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
+// ---------------------------------------------------------
 // Wake thread – prevents held packets from stranding.
 // While the reorder queue holds packets and the game is not actively polling
 // WSARecvFrom, nudge the (drained) socket readable again by sending a small
@@ -1086,6 +1144,7 @@ void InstallNetcodeHooks()
     g_realClosesocket = (PFN_closesocket) GetProcAddress(ws2, "closesocket");
     g_realSocket      = (PFN_socket)      GetProcAddress(ws2, "socket");
     g_realSendto      = (PFN_sendto)      GetProcAddress(ws2, "sendto");
+    g_realWSASendTo   = (PFN_WSASendTo)   GetProcAddress(ws2, "WSASendTo");
     g_realGetsockname = (PFN_getsockname) GetProcAddress(ws2, "getsockname");
 
     if (!g_realWSASocketW || !g_realSetsockopt || !g_realGetsockopt || !g_realWSARecvFrom || !g_realClosesocket)
@@ -1204,9 +1263,27 @@ void InstallNetcodeHooks()
         ProxyLog("InstallNetcodeHooks: sendto IAT patched OK  send_dup=%s",
                  g_send_dup ? "enabled" : "disabled");
     }
-    else if (g_send_dup)
+
+    // The game's own P2P sends go through WSASendTo (sendto is not in its
+    // IAT at all), so this is the patch that makes BZ_SEND_DUP effective.
+    void* savedRealWSASendTo = nullptr;
+    bool patchedWSASendTo = PatchIAT(exe, "WS2_32.dll", "WSASendTo", 0,
+        reinterpret_cast<void*>(Hooked_WSASendTo), &savedRealWSASendTo);
+    if (!patchedWSASendTo)
     {
-        ProxyLog("InstallNetcodeHooks: sendto not found in game IAT"
+        patchedWSASendTo = PatchIAT(exe, "ws2_32.dll", "WSASendTo", 0,
+            reinterpret_cast<void*>(Hooked_WSASendTo), &savedRealWSASendTo);
+    }
+
+    if (patchedWSASendTo)
+    {
+        if (savedRealWSASendTo) g_realWSASendTo = reinterpret_cast<PFN_WSASendTo>(savedRealWSASendTo);
+        ProxyLog("InstallNetcodeHooks: WSASendTo IAT patched OK  send_dup=%s",
+                 g_send_dup ? "enabled" : "disabled");
+    }
+    else if (g_send_dup && !patchedSendto)
+    {
+        ProxyLog("InstallNetcodeHooks: neither WSASendTo nor sendto found in game IAT"
                  " - BZ_SEND_DUP will NOT be applied");
     }
 

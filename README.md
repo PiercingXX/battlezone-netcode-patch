@@ -71,7 +71,7 @@ Playing with someone who can't or won't install? Enable `BZ_SEND_DUP=1` on your 
 
 ---
 
-## What Was Actually Shipped (V1 -> V4)
+## What Was Actually Shipped (V1 -> V4.1)
 
 ### Version 1 (Patch 00)
 - Forced bigger UDP socket buffers
@@ -96,7 +96,7 @@ Playing with someone who can't or won't install? Enable `BZ_SEND_DUP=1` on your 
 - Sequence location `payload[13..16]` (`u32le`)
 - Linux and Windows now have matching behavior
 
-### V4 (Current)
+### V4
 - **Adaptive reorder window:** the fixed 45 ms hold added latency to every
   gap, even on clean connections. The window is now per-peer: it starts at a
   5 ms floor, grows toward the 45 ms ceiling only when reordering is actually
@@ -125,6 +125,24 @@ Playing with someone who can't or won't install? Enable `BZ_SEND_DUP=1` on your 
 - **Drop metric in verify:** `Linux/verify_net_patch.sh` now prints the
   game-side packet drop counts (total and out-of-order) for the latest
   session, so patch changes can be measured instead of vibed.
+
+### V4.1 (Current — Windows hotfix)
+ Fixed. Re-run the installer.
+
+- **Windows launch freeze fixed:** the `WSARecvFrom` hook was routing the
+  game's overlapped (IOCP) receives through the synchronous reorder path,
+  hanging the game the moment it contacted the matchmaking server. Real
+  Windows uses overlapped receives; Proton doesn't, which is why Linux was
+  never affected. Overlapped calls now pass straight through — the same
+  guard the Linux proxy had all along. This bug existed in V3 too and
+  likely explains earlier "local Windows builds crash in-game" reports.
+- **Ordinal IAT patching:** the game exe imports classic winsock functions
+  (`closesocket`, `sendto`) by *ordinal*, not by name, so those hooks were
+  silently failing to install on Windows. The IAT walker now matches both.
+- **`BZ_SEND_DUP` actually works now:** the game sends all P2P traffic via
+  `WSASendTo` — plain `sendto` isn't in its import table at all — so the
+  duplication hook moved there, on both Windows and Linux. It was silently
+  inert before.
 
 ---
 
