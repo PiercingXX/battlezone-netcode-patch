@@ -4,6 +4,7 @@
 #pragma once
 // winsock2.h must come before windows.h to avoid the double-inclusion warning.
 #include <winsock2.h>
+#include <ws2tcpip.h>   // IP_TOS / IPPROTO_IP for DSCP marking
 #include <windows.h>
 #include <cstdint>
 

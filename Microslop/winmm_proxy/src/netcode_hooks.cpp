@@ -29,6 +29,15 @@ extern void ProxyLog(const char* fmt, ...);
 static const int kTargetSndBuf = 524288;   // 512 KB
 static const int kTargetRcvBuf = 4194304;  //   4 MB
 
+// DSCP class for the game P2P socket.  46 == Expedited Forwarding: routers
+// with WMM (WiFi voice queue) or SQM/fq_codel serve these ahead of bulk
+// traffic, which directly targets the queueing-delay mechanism behind the
+// stale-drop bursts we measured.  On Proton, Wine forwards IP_TOS to the
+// Linux socket and the kernel honours it; on stock Windows setsockopt(IP_TOS)
+// is silently ignored (needs qWAVE), so this is a safe no-op there.
+// BZ_DSCP overrides the class; BZ_DSCP=0 disables the marking entirely.
+static const uint32_t kDscpDefault = 46;   // EF
+
 constexpr wchar_t kBufferBinName[] = L"bz_buffer_log.bin";
 constexpr wchar_t kBufferMetaName[] = L"bz_buffer_log.meta.txt";
 constexpr uint32_t kBufferLogVersion = 1;
@@ -145,12 +154,49 @@ static SOCKET            g_reorder_sock        = INVALID_SOCKET;  // last socket
 static uint64_t          g_last_recv_call_ms   = 0;               // last game WSARecvFrom (reorder path)
 static bool              g_wake_logged         = false;
 
-// Opt-in loss redundancy: BZ_SEND_DUP=1 sends every outbound game P2P
-// datagram twice.  Reordering cannot recover a packet the network dropped;
-// a duplicate can.  The receiver tolerates duplicates whether patched (the
-// reorder buffer dedups by sequence) or vanilla (BZRNet drops stale
-// sequence numbers).  Costs 2x upstream bandwidth on the P2P socket.
+// Opt-in loss redundancy: BZ_SEND_DUP=1 re-sends outbound game P2P datagrams.
+// Reordering cannot recover a packet the network dropped; a duplicate can.
+// The receiver tolerates duplicates whether patched (the reorder buffer
+// dedups by sequence) or vanilla (BZRNet drops stale sequence numbers).
+//
+// Live testing (2026-07-03 KFK set) showed naive back-to-back duplication
+// degrades constrained uplinks: it doubles packets-per-second at the exact
+// moment the link is queueing, and a copy sent in the same burst dies in the
+// same burst.  Three mitigations, all sender-side and safe against unpatched
+// receivers:
+//   - never duplicate to loopback (the game keeps a P2P connection to
+//     itself; duplicating it only pollutes drop metrics),
+//   - transmit the copy BZ_DUP_DELAY_MS later (RFC2198-style time shift, so
+//     one queue spike cannot kill both copies; 0 = legacy back-to-back),
+//   - cap duplicates at BZ_DUP_MAX_PPS per second (low-rate control traffic
+//     gets redundancy first; bulk bursts shed theirs; 0 = unlimited).
+constexpr uint32_t       kDupQueueSlots        = 128;
+constexpr uint32_t       kDupTickMs            = 5;
+constexpr uint32_t       kDupDelayMsDef        = 25;
+constexpr uint32_t       kDupMaxPpsDef         = 40;
+
 static bool              g_send_dup            = false;
+static uint32_t          g_dup_delay_ms        = kDupDelayMsDef;
+static uint32_t          g_dup_max_pps         = kDupMaxPpsDef;
+static uint32_t          g_dscp                = kDscpDefault;
+
+struct DupEntry {
+    SOCKET           sock;
+    uint64_t         due_ms;
+    int              tolen;
+    uint32_t         len;
+    sockaddr_storage to;
+    uint8_t          data[kReorderMaxPktBytes];
+};
+static DupEntry          g_dup_q[kDupQueueSlots];
+static uint32_t          g_dup_q_head          = 0;
+static uint32_t          g_dup_q_count         = 0;
+static CRITICAL_SECTION  g_dup_cs              = {};
+static bool              g_dup_cs_ready        = false;
+static volatile LONG     g_dup_stop            = 0;
+static HANDLE            g_dup_thread          = nullptr;
+static uint64_t          g_dup_bucket_start_ms = 0;
+static uint32_t          g_dup_bucket_sent     = 0;
 
 static bool env_truthy(const char *s) {
     if (s == nullptr || *s == '\0') {
@@ -192,6 +238,98 @@ static uint32_t parse_env_u32(const char *name, uint32_t fallback) {
         return fallback;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+// True when the destination is the game's loopback self-connection.
+static bool dup_is_loopback(const sockaddr *to) {
+    if (to == nullptr || to->sa_family != AF_INET) {
+        return false;
+    }
+    const sockaddr_in *in4 = reinterpret_cast<const sockaddr_in *>(to);
+    return (ntohl(in4->sin_addr.s_addr) >> 24) == 127;
+}
+
+// Rate-gate and enqueue a delayed duplicate.  Drops the duplicate (never
+// blocks, never fails the original send) when the budget or queue is full.
+static void dup_enqueue(SOCKET s, const uint8_t *data, uint32_t len,
+                        const sockaddr *to, int tolen) {
+    if (!g_dup_cs_ready || data == nullptr || len == 0 || len > kReorderMaxPktBytes) {
+        return;
+    }
+    if (to == nullptr || tolen <= 0
+        || static_cast<size_t>(tolen) > sizeof(sockaddr_storage)) {
+        return;
+    }
+    uint64_t now = GetTickCount64();
+    EnterCriticalSection(&g_dup_cs);
+    if (now - g_dup_bucket_start_ms >= 1000) {
+        g_dup_bucket_start_ms = now;
+        g_dup_bucket_sent = 0;
+    }
+    if ((g_dup_max_pps != 0 && g_dup_bucket_sent >= g_dup_max_pps)
+        || g_dup_q_count >= kDupQueueSlots) {
+        LeaveCriticalSection(&g_dup_cs);
+        return;
+    }
+    g_dup_bucket_sent++;
+    DupEntry &e = g_dup_q[(g_dup_q_head + g_dup_q_count) % kDupQueueSlots];
+    e.sock = s;
+    e.due_ms = now + g_dup_delay_ms;
+    e.tolen = tolen;
+    e.len = len;
+    std::memcpy(&e.to, to, static_cast<size_t>(tolen));
+    std::memcpy(e.data, data, len);
+    g_dup_q_count++;
+    LeaveCriticalSection(&g_dup_cs);
+}
+
+// Drop queued duplicates for a socket the game just closed: the handle may
+// be reused, and a stale duplicate on a fresh socket would corrupt state.
+static void dup_purge_socket(SOCKET s) {
+    if (!g_dup_cs_ready) {
+        return;
+    }
+    EnterCriticalSection(&g_dup_cs);
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < g_dup_q_count; ++i) {
+        DupEntry &e = g_dup_q[(g_dup_q_head + i) % kDupQueueSlots];
+        if (e.sock == s) {
+            continue;
+        }
+        if (kept != i) {
+            g_dup_q[(g_dup_q_head + kept) % kDupQueueSlots] = e;
+        }
+        kept++;
+    }
+    g_dup_q_count = kept;
+    LeaveCriticalSection(&g_dup_cs);
+}
+
+// Pacer thread: transmits queued duplicates once their delay elapses.
+static DWORD WINAPI DupPacerThread(LPVOID) {
+    while (InterlockedCompareExchange(&g_dup_stop, 0, 0) == 0) {
+        Sleep(kDupTickMs);
+        if (!g_dup_cs_ready || g_realSendto == nullptr) {
+            continue;
+        }
+        for (;;) {
+            DupEntry local;
+            EnterCriticalSection(&g_dup_cs);
+            if (g_dup_q_count == 0
+                || g_dup_q[g_dup_q_head].due_ms > GetTickCount64()) {
+                LeaveCriticalSection(&g_dup_cs);
+                break;
+            }
+            local = g_dup_q[g_dup_q_head];
+            g_dup_q_head = (g_dup_q_head + 1) % kDupQueueSlots;
+            g_dup_q_count--;
+            LeaveCriticalSection(&g_dup_cs);
+            g_realSendto(local.sock, reinterpret_cast<const char *>(local.data),
+                         static_cast<int>(local.len), 0,
+                         reinterpret_cast<const sockaddr *>(&local.to), local.tolen);
+        }
+    }
+    return 0;
 }
 
 static void init_buffer_paths() {
@@ -578,6 +716,21 @@ static int reorder_pick(PeerBuf *pb, uint64_t now_ms) {
 // ---------------------------------------------------------
 // Our WSASocketW hook
 // ---------------------------------------------------------
+// Mark a UDP socket with the configured DSCP class via IP_TOS.  No-op when
+// g_dscp is 0 or setsockopt is unavailable.  Returns the setsockopt rc (or 0
+// when disabled) so the caller can log it.  Effective on Proton; harmless on
+// stock Windows, where the option is ignored by policy.
+static int apply_dscp(SOCKET s)
+{
+    if (g_dscp == 0 || g_realSetsockopt == nullptr) {
+        return 0;
+    }
+    // The TOS byte carries DSCP in its top 6 bits.
+    int tos = static_cast<int>(g_dscp << 2);
+    return g_realSetsockopt(s, IPPROTO_IP, IP_TOS,
+        (const char*)&tos, sizeof(tos));
+}
+
 static SOCKET WSAAPI Hooked_WSASocketW(
     int af, int type, int protocol,
     LPWSAPROTOCOL_INFOW lpProtocolInfo,
@@ -598,6 +751,7 @@ static SOCKET WSAAPI Hooked_WSASocketW(
             (const char*)&sndVal, sizeof(sndVal));
         int rc_rcv = g_realSetsockopt(s, SOL_SOCKET, SO_RCVBUF,
             (const char*)&rcvVal, sizeof(rcvVal));
+        int rc_tos = apply_dscp(s);
 
         // Immediate readback – this is what testers verify in the log.
         int snd_read = -1, rcv_read = -1;
@@ -608,13 +762,48 @@ static SOCKET WSAAPI Hooked_WSASocketW(
         ProxyLog(
             "WSASocketW hook: sock=0x%p af=%d type=%d proto=%d"
             "  SO_SNDBUF set_rc=%d effective readback SO_SNDBUF=%d"
-            "  SO_RCVBUF set_rc=%d effective readback SO_RCVBUF=%d",
+            "  SO_RCVBUF set_rc=%d effective readback SO_RCVBUF=%d"
+            "  DSCP=%u IP_TOS set_rc=%d",
             (void*)s, af, type, protocol,
             rc_snd, snd_read,
-            rc_rcv, rcv_read);
+            rc_rcv, rcv_read,
+            g_dscp, rc_tos);
     }
 
     return s;
+}
+
+// ---------------------------------------------------------
+// Our setsockopt hook – re-force the socket buffers and DSCP that the game
+// clobbers.  On real Windows the game issues its own setsockopt(SO_SNDBUF,
+// 32768) after WSASocketW returns, undoing our enlargement; intercepting it
+// keeps the buffers (and QoS marking) at our targets.  Parity with the Linux
+// dsound proxy.  Non-buffer options pass through untouched.
+// ---------------------------------------------------------
+static int WSAAPI Hooked_setsockopt(SOCKET s, int level, int optname,
+    const char* optval, int optlen)
+{
+    if (!g_realSetsockopt) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    if (level == SOL_SOCKET && optname == SO_SNDBUF) {
+        int forced = kTargetSndBuf;
+        int rc = g_realSetsockopt(s, level, optname,
+            (const char*)&forced, sizeof(forced));
+        apply_dscp(s);
+        return rc;
+    }
+
+    if (level == SOL_SOCKET && optname == SO_RCVBUF) {
+        int forced = kTargetRcvBuf;
+        int rc = g_realSetsockopt(s, level, optname,
+            (const char*)&forced, sizeof(forced));
+        return rc;
+    }
+
+    return g_realSetsockopt(s, level, optname, optval, optlen);
 }
 
 // ---------------------------------------------------------
@@ -851,6 +1040,8 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
         LeaveCriticalSection(&g_reorder_cs);
     }
 
+    dup_purge_socket(s);
+
     return rc;
 }
 
@@ -871,9 +1062,15 @@ static int WSAAPI Hooked_sendto(SOCKET s, const char* buf, int len, int flags,
     // field: control/wake packets stay single-shot.  The first call's result
     // and error state are what the game sees.
     if (g_send_dup && rc >= 0 && buf != nullptr && to != nullptr
-        && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)) {
+        && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)
+        && !dup_is_loopback(to)) {
         int wsa = static_cast<int>(WSAGetLastError());
-        g_realSendto(s, buf, len, flags, to, tolen);
+        if (g_dup_delay_ms == 0) {
+            g_realSendto(s, buf, len, flags, to, tolen);
+        } else {
+            dup_enqueue(s, reinterpret_cast<const uint8_t *>(buf),
+                        static_cast<uint32_t>(len), to, tolen);
+        }
         WSASetLastError(wsa);
     }
 
@@ -903,6 +1100,7 @@ static int WSAAPI Hooked_WSASendTo(
     // which keeps it safe for overlapped originals too: the caller's buffers
     // are only guaranteed valid for the duration of this call.
     if (g_send_dup && to != nullptr && to->sa_family == AF_INET
+        && !dup_is_loopback(to)
         && buffers != nullptr && buffer_count > 0
         && (rc == 0 || (rc == SOCKET_ERROR && wsa == WSA_IO_PENDING))) {
         uint8_t flat[kReorderMaxPktBytes];
@@ -920,11 +1118,15 @@ static int WSAAPI Hooked_WSASendTo(
             total += buffers[i].len;
         }
         if (fits && total >= kReorderSeqMinPay) {
-            WSABUF dup_buf;
-            dup_buf.buf = reinterpret_cast<char*>(flat);
-            dup_buf.len = static_cast<u_long>(total);
-            DWORD dup_sent = 0;
-            g_realWSASendTo(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+            if (g_dup_delay_ms == 0) {
+                WSABUF dup_buf;
+                dup_buf.buf = reinterpret_cast<char*>(flat);
+                dup_buf.len = static_cast<u_long>(total);
+                DWORD dup_sent = 0;
+                g_realWSASendTo(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+            } else {
+                dup_enqueue(s, flat, total, to, tolen);
+            }
         }
     }
 
@@ -1127,6 +1329,12 @@ void InstallNetcodeHooks()
         g_reorder_cs_ready = true;
     }
 
+    // Initialize dup pacer critical section
+    if (!g_dup_cs_ready) {
+        InitializeCriticalSection(&g_dup_cs);
+        g_dup_cs_ready = true;
+    }
+
     // Resolve WS2 functions we need.
     HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
     if (!ws2) ws2 = LoadLibraryA("ws2_32.dll");
@@ -1170,8 +1378,12 @@ void InstallNetcodeHooks()
         g_reorder_depth  = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
         g_reorder_peers  = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
         g_reorder_drain  = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
-        // Off by default: doubles upstream bandwidth on the P2P socket.
+        // Off by default: adds upstream traffic on the P2P socket.
         g_send_dup = env_truthy(std::getenv("BZ_SEND_DUP"));
+        g_dup_delay_ms = clamp_u32(parse_env_u32("BZ_DUP_DELAY_MS", kDupDelayMsDef), 0, 500);
+        g_dup_max_pps  = clamp_u32(parse_env_u32("BZ_DUP_MAX_PPS", kDupMaxPpsDef), 0, 2000);
+        // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
+        g_dscp = clamp_u32(parse_env_u32("BZ_DSCP", kDscpDefault), 0, 63);
     }
 
     // IAT-patch WSASocketW and WSARecvFrom in the game EXE.
@@ -1247,6 +1459,30 @@ void InstallNetcodeHooks()
         ProxyLog("InstallNetcodeHooks: closesocket IAT patched OK");
     }
 
+    // Patch setsockopt so the game cannot shrink our enlarged buffers back
+    // down (it re-sets SO_SNDBUF=32768 on real Windows) and so DSCP survives.
+    void* savedRealSetsockopt = nullptr;
+    bool patchedSetsockopt = PatchIAT(exe, "WS2_32.dll", "setsockopt", 21,
+        reinterpret_cast<void*>(Hooked_setsockopt), &savedRealSetsockopt);
+    if (!patchedSetsockopt)
+    {
+        patchedSetsockopt = PatchIAT(exe, "ws2_32.dll", "setsockopt", 21,
+            reinterpret_cast<void*>(Hooked_setsockopt), &savedRealSetsockopt);
+    }
+
+    if (patchedSetsockopt)
+    {
+        if (savedRealSetsockopt) g_realSetsockopt = reinterpret_cast<PFN_setsockopt>(savedRealSetsockopt);
+        ProxyLog("InstallNetcodeHooks: setsockopt IAT patched OK"
+                 "  re-force SO_SNDBUF=%d SO_RCVBUF=%d DSCP=%u",
+                 kTargetSndBuf, kTargetRcvBuf, g_dscp);
+    }
+    else
+    {
+        ProxyLog("InstallNetcodeHooks: setsockopt not found in game IAT"
+                 " - game may shrink buffers back on real Windows");
+    }
+
     // Patch sendto for opt-in outbound duplication (passthrough when disabled).
     void* savedRealSendto = nullptr;
     bool patchedSendto = PatchIAT(exe, "WS2_32.dll", "sendto", 20,
@@ -1278,8 +1514,10 @@ void InstallNetcodeHooks()
     if (patchedWSASendTo)
     {
         if (savedRealWSASendTo) g_realWSASendTo = reinterpret_cast<PFN_WSASendTo>(savedRealWSASendTo);
-        ProxyLog("InstallNetcodeHooks: WSASendTo IAT patched OK  send_dup=%s",
-                 g_send_dup ? "enabled" : "disabled");
+        ProxyLog("InstallNetcodeHooks: WSASendTo IAT patched OK  send_dup=%s"
+                 "  dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip",
+                 g_send_dup ? "enabled" : "disabled",
+                 g_dup_delay_ms, g_dup_max_pps);
     }
     else if (g_send_dup && !patchedSendto)
     {
@@ -1296,6 +1534,19 @@ void InstallNetcodeHooks()
             ProxyLog("InstallNetcodeHooks: wake thread creation failed (err=%lu)", GetLastError());
         }
     }
+
+    // Start the dup pacer only when delayed duplication can actually fire.
+    if (g_send_dup && g_dup_delay_ms > 0
+        && (patchedWSASendTo || patchedSendto) && g_dup_thread == nullptr)
+    {
+        g_dup_thread = CreateThread(nullptr, 0, DupPacerThread, nullptr, 0, nullptr);
+        if (g_dup_thread == nullptr)
+        {
+            ProxyLog("InstallNetcodeHooks: dup pacer thread creation failed (err=%lu)"
+                     " - falling back to back-to-back duplicates", GetLastError());
+            g_dup_delay_ms = 0;
+        }
+    }
 }
 
 void ShutdownNetcodeHooks()
@@ -1304,6 +1555,7 @@ void ShutdownNetcodeHooks()
     // under the loader lock during DLL_PROCESS_DETACH and joining a thread
     // would deadlock.  At process exit the thread is gone anyway.
     InterlockedExchange(&g_wake_stop, 1);
+    InterlockedExchange(&g_dup_stop, 1);
     if (g_wake_sender != INVALID_SOCKET && g_realClosesocket != nullptr) {
         g_realClosesocket(g_wake_sender);
         g_wake_sender = INVALID_SOCKET;
@@ -1311,6 +1563,10 @@ void ShutdownNetcodeHooks()
     if (g_wake_thread != nullptr) {
         CloseHandle(g_wake_thread);
         g_wake_thread = nullptr;
+    }
+    if (g_dup_thread != nullptr) {
+        CloseHandle(g_dup_thread);
+        g_dup_thread = nullptr;
     }
 
     flush_buffer_log_files();
@@ -1328,5 +1584,9 @@ void ShutdownNetcodeHooks()
     if (g_reorder_cs_ready) {
         DeleteCriticalSection(&g_reorder_cs);
         g_reorder_cs_ready = false;
+    }
+    if (g_dup_cs_ready) {
+        DeleteCriticalSection(&g_dup_cs);
+        g_dup_cs_ready = false;
     }
 }

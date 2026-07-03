@@ -25,6 +25,14 @@ bool g_buffer_paths_ready = false;
 constexpr int kSendBuf = 524288;
 constexpr int kRecvBuf = 4194304;
 
+// DSCP class for the game P2P socket.  46 == Expedited Forwarding: routers
+// with WMM (WiFi voice queue) or SQM/fq_codel serve these ahead of bulk
+// traffic, directly targeting the queueing-delay mechanism behind the
+// stale-drop bursts we measured.  Under Proton, Wine forwards IP_TOS to the
+// Linux socket and the kernel honours it (real effect on this platform).
+// BZ_DSCP overrides the class; BZ_DSCP=0 disables the marking entirely.
+constexpr uint32_t kDscpDefault = 46;   // EF
+
 HMODULE g_real_dsound = nullptr;
 FARPROC g_real_ordinal_1 = nullptr;
 using SetSockOptFn = int(WSAAPI *)(SOCKET, int, int, const char *, int);
@@ -183,12 +191,55 @@ static bool              g_wake_logged      = false;
 using SendToFn = int(WSAAPI *)(SOCKET, const char *, int, int, const sockaddr *, int);
 static SendToFn g_real_sendto = nullptr;
 
-// Opt-in loss redundancy: BZ_SEND_DUP=1 sends every outbound game P2P
-// datagram twice.  Reordering cannot recover a packet the network dropped;
-// a duplicate can.  The receiver tolerates duplicates whether patched (the
-// reorder buffer dedups by sequence) or vanilla (BZRNet drops stale
-// sequence numbers).  Costs 2x upstream bandwidth on the P2P socket.
+// Opt-in loss redundancy: BZ_SEND_DUP=1 re-sends outbound game P2P datagrams.
+// Reordering cannot recover a packet the network dropped; a duplicate can.
+// The receiver tolerates duplicates whether patched (the reorder buffer
+// dedups by sequence) or vanilla (BZRNet drops stale sequence numbers).
+//
+// Live testing (2026-07-03 KFK set) showed naive back-to-back duplication
+// degrades constrained uplinks: it doubles packets-per-second at the exact
+// moment the link is queueing, and a copy sent in the same burst dies in the
+// same burst.  Three mitigations, all sender-side and safe against unpatched
+// receivers:
+//   - never duplicate to loopback (the game keeps a P2P connection to
+//     itself; duplicating it only pollutes drop metrics),
+//   - transmit the copy BZ_DUP_DELAY_MS later (RFC2198-style time shift, so
+//     one queue spike cannot kill both copies; 0 = legacy back-to-back),
+//   - cap duplicates at BZ_DUP_MAX_PPS per second (low-rate control traffic
+//     gets redundancy first; bulk bursts shed theirs; 0 = unlimited).
+constexpr uint32_t       kDupQueueSlots     = 128;
+constexpr uint32_t       kDupTickMs         = 5;
+constexpr uint32_t       kDupDelayMsDef     = 25;
+constexpr uint32_t       kDupMaxPpsDef      = 40;
+
 static bool              g_send_dup         = false;
+static uint32_t          g_dup_delay_ms     = kDupDelayMsDef;
+static uint32_t          g_dup_max_pps      = kDupMaxPpsDef;
+static uint32_t          g_dscp             = kDscpDefault;
+// Opt-in diagnostic (BZ_GOV_SCAN=1, default off).  The exe is SteamStub-DRM
+// wrapped so .text is encrypted on disk and cannot be signature-scanned
+// offline; this scans the DECRYPTED .text at runtime for the governor's
+// hardcoded 4000-byte/s start constant (0x00000FA0) and logs each candidate
+// site with surrounding bytes, so the real runtime governor patch can be
+// built from a genuine signature next iteration.  Read-only; never patches.
+static bool              g_gov_scan         = false;
+
+struct DupEntry {
+    SOCKET           sock;
+    uint64_t         due_ms;
+    int              tolen;
+    uint32_t         len;
+    sockaddr_storage to;
+    uint8_t          data[kReorderMaxPktBytes];
+};
+static DupEntry          g_dup_q[kDupQueueSlots];
+static uint32_t          g_dup_q_head       = 0;
+static uint32_t          g_dup_q_count      = 0;
+static CRITICAL_SECTION  g_dup_cs           = {};
+static bool              g_dup_cs_ready     = false;
+static volatile LONG     g_dup_stop         = 0;
+static uint64_t          g_dup_bucket_start_ms = 0;
+static uint32_t          g_dup_bucket_sent  = 0;
 bool g_logged_real_sendto = false;
 // The game exe's IAT has no plain sendto import: all P2P sends go through
 // WSASendTo, so that hook is the one that makes BZ_SEND_DUP effective.
@@ -254,6 +305,110 @@ uint32_t parse_env_u32(const char *name, uint32_t fallback) {
         return fallback;
     }
     return static_cast<uint32_t>(parsed);
+}
+
+// True when the destination is the game's loopback self-connection.
+static bool dup_is_loopback(const sockaddr *to) {
+    if (to == nullptr || to->sa_family != AF_INET) {
+        return false;
+    }
+    const sockaddr_in *in4 = reinterpret_cast<const sockaddr_in *>(to);
+    return (ntohl(in4->sin_addr.s_addr) >> 24) == 127;
+}
+
+// Mark a UDP socket with the configured DSCP class via IP_TOS.  No-op when
+// g_dscp is 0 or setsockopt is unavailable.  Returns the setsockopt rc.
+static int apply_dscp(SOCKET s) {
+    if (g_dscp == 0 || g_real_setsockopt == nullptr) {
+        return 0;
+    }
+    // The TOS byte carries DSCP in its top 6 bits.
+    int tos = static_cast<int>(g_dscp << 2);
+    return g_real_setsockopt(s, IPPROTO_IP, IP_TOS,
+        reinterpret_cast<const char *>(&tos), static_cast<int>(sizeof(tos)));
+}
+
+// Rate-gate and enqueue a delayed duplicate.  Drops the duplicate (never
+// blocks, never fails the original send) when the budget or queue is full.
+static void dup_enqueue(SOCKET s, const uint8_t *data, uint32_t len,
+                        const sockaddr *to, int tolen) {
+    if (!g_dup_cs_ready || data == nullptr || len == 0 || len > kReorderMaxPktBytes) {
+        return;
+    }
+    if (to == nullptr || tolen <= 0
+        || static_cast<size_t>(tolen) > sizeof(sockaddr_storage)) {
+        return;
+    }
+    uint64_t now = GetTickCount64();
+    EnterCriticalSection(&g_dup_cs);
+    if (now - g_dup_bucket_start_ms >= 1000) {
+        g_dup_bucket_start_ms = now;
+        g_dup_bucket_sent = 0;
+    }
+    if ((g_dup_max_pps != 0 && g_dup_bucket_sent >= g_dup_max_pps)
+        || g_dup_q_count >= kDupQueueSlots) {
+        LeaveCriticalSection(&g_dup_cs);
+        return;
+    }
+    g_dup_bucket_sent++;
+    DupEntry &e = g_dup_q[(g_dup_q_head + g_dup_q_count) % kDupQueueSlots];
+    e.sock = s;
+    e.due_ms = now + g_dup_delay_ms;
+    e.tolen = tolen;
+    e.len = len;
+    std::memcpy(&e.to, to, static_cast<size_t>(tolen));
+    std::memcpy(e.data, data, len);
+    g_dup_q_count++;
+    LeaveCriticalSection(&g_dup_cs);
+}
+
+// Drop queued duplicates for a socket the game just closed: the handle may
+// be reused, and a stale duplicate on a fresh socket would corrupt state.
+static void dup_purge_socket(SOCKET s) {
+    if (!g_dup_cs_ready) {
+        return;
+    }
+    EnterCriticalSection(&g_dup_cs);
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < g_dup_q_count; ++i) {
+        DupEntry &e = g_dup_q[(g_dup_q_head + i) % kDupQueueSlots];
+        if (e.sock == s) {
+            continue;
+        }
+        if (kept != i) {
+            g_dup_q[(g_dup_q_head + kept) % kDupQueueSlots] = e;
+        }
+        kept++;
+    }
+    g_dup_q_count = kept;
+    LeaveCriticalSection(&g_dup_cs);
+}
+
+// Pacer thread: transmits queued duplicates once their delay elapses.
+static DWORD WINAPI dup_pacer_thread(LPVOID) {
+    while (InterlockedCompareExchange(&g_dup_stop, 0, 0) == 0) {
+        Sleep(kDupTickMs);
+        if (!g_dup_cs_ready || g_real_sendto == nullptr) {
+            continue;
+        }
+        for (;;) {
+            DupEntry local;
+            EnterCriticalSection(&g_dup_cs);
+            if (g_dup_q_count == 0
+                || g_dup_q[g_dup_q_head].due_ms > GetTickCount64()) {
+                LeaveCriticalSection(&g_dup_cs);
+                break;
+            }
+            local = g_dup_q[g_dup_q_head];
+            g_dup_q_head = (g_dup_q_head + 1) % kDupQueueSlots;
+            g_dup_q_count--;
+            LeaveCriticalSection(&g_dup_cs);
+            g_real_sendto(local.sock, reinterpret_cast<const char *>(local.data),
+                          static_cast<int>(local.len), 0,
+                          reinterpret_cast<const sockaddr *>(&local.to), local.tolen);
+        }
+    }
+    return 0;
 }
 
 static inline int32_t seq_cmp_u32(uint32_t a, uint32_t b) {
@@ -625,6 +780,7 @@ int WSAAPI hooked_setsockopt(SOCKET s, int level, int optname, const char *optva
         int sid = get_socket_id(s, true);
         log_line("hooked_setsockopt: sid=%d sock=0x%08lx forcing SO_SNDBUF=%d", sid, static_cast<unsigned long>(s), forced);
         int rc = g_real_setsockopt(s, level, optname, reinterpret_cast<const char *>(&forced), static_cast<int>(sizeof(forced)));
+        apply_dscp(s);
         log_line("hooked_setsockopt: sid=%d sock=0x%08lx SO_SNDBUF rc=%d wsa=%d", sid, static_cast<unsigned long>(s), rc, static_cast<int>(WSAGetLastError()));
         log_effective_bufs("hooked_setsockopt", s);
         return rc;
@@ -736,8 +892,9 @@ SOCKET WSAAPI hooked_WSASocketW(int af, int type, int protocol, LPWSAPROTOCOL_IN
         int snd_wsa = static_cast<int>(WSAGetLastError());
         int rcv_rc = g_real_setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&rcv), static_cast<int>(sizeof(rcv)));
         int rcv_wsa = static_cast<int>(WSAGetLastError());
+        int tos_rc = apply_dscp(s);
 
-        log_line("hooked_WSASocketW: sid=%d sock=0x%08lx apply SO_SNDBUF=%d rc=%d wsa=%d | SO_RCVBUF=%d rc=%d wsa=%d",
+        log_line("hooked_WSASocketW: sid=%d sock=0x%08lx apply SO_SNDBUF=%d rc=%d wsa=%d | SO_RCVBUF=%d rc=%d wsa=%d | DSCP=%u IP_TOS rc=%d",
                  sid,
                  static_cast<unsigned long>(s),
                  kSendBuf,
@@ -745,7 +902,9 @@ SOCKET WSAAPI hooked_WSASocketW(int af, int type, int protocol, LPWSAPROTOCOL_IN
                  snd_wsa,
                  kRecvBuf,
                  rcv_rc,
-                 rcv_wsa);
+                 rcv_wsa,
+                 static_cast<unsigned>(g_dscp),
+                 tos_rc);
 
         log_effective_bufs("hooked_WSASocketW", s);
     }
@@ -772,6 +931,7 @@ int WSAAPI hooked_closesocket(SOCKET s) {
         }
         LeaveCriticalSection(&g_reorder_cs);
     }
+    dup_purge_socket(s);
     return rc;
 }
 
@@ -1308,9 +1468,15 @@ int WSAAPI hooked_sendto(SOCKET s, const char *buf, int len, int flags, const so
     // field: control/wake packets stay single-shot.  The first call's result
     // and error state are what the game sees.
     if (g_send_dup && rc >= 0 && buf != nullptr && to != nullptr
-        && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)) {
+        && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)
+        && !dup_is_loopback(to)) {
         int wsa = static_cast<int>(WSAGetLastError());
-        g_real_sendto(s, buf, len, flags, to, tolen);
+        if (g_dup_delay_ms == 0) {
+            g_real_sendto(s, buf, len, flags, to, tolen);
+        } else {
+            dup_enqueue(s, reinterpret_cast<const uint8_t *>(buf),
+                        static_cast<uint32_t>(len), to, tolen);
+        }
         WSASetLastError(wsa);
     }
 
@@ -1339,6 +1505,7 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
     // which keeps it safe for overlapped originals too: the caller's buffers
     // are only guaranteed valid for the duration of this call.
     if (g_send_dup && to != nullptr && to->sa_family == AF_INET
+        && !dup_is_loopback(to)
         && buffers != nullptr && buffer_count > 0
         && (rc == 0 || (rc == SOCKET_ERROR && wsa == WSA_IO_PENDING))) {
         uint8_t flat[kReorderMaxPktBytes];
@@ -1356,11 +1523,15 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
             total += buffers[i].len;
         }
         if (fits && total >= kReorderSeqMinPay) {
-            WSABUF dup_buf;
-            dup_buf.buf = reinterpret_cast<char *>(flat);
-            dup_buf.len = static_cast<u_long>(total);
-            DWORD dup_sent = 0;
-            g_real_wsasendto(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+            if (g_dup_delay_ms == 0) {
+                WSABUF dup_buf;
+                dup_buf.buf = reinterpret_cast<char *>(flat);
+                dup_buf.len = static_cast<u_long>(total);
+                DWORD dup_sent = 0;
+                g_real_wsasendto(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+            } else {
+                dup_enqueue(s, flat, total, to, tolen);
+            }
         }
     }
 
@@ -1845,6 +2016,80 @@ DWORD WINAPI hook_worker_thread(LPVOID) {
     return 0;
 }
 
+// Locate a named PE section in the main module.  Returns false if not found.
+// The PE headers and (post-DRM-decryption) section bodies are mapped/readable.
+static bool find_section(const char *want, BYTE **out_start, size_t *out_size) {
+    auto *base = reinterpret_cast<BYTE *>(GetModuleHandleW(nullptr));
+    if (base == nullptr) {
+        return false;
+    }
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return false;
+    }
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS32 *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        return false;
+    }
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        char name[9] = {0};
+        std::memcpy(name, sec->Name, 8);
+        if (std::strncmp(name, want, 8) == 0) {
+            *out_start = base + sec->VirtualAddress;
+            *out_size = sec->Misc.VirtualSize;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Opt-in: scan decrypted .text for the 32-bit governor start constant and log
+// candidates with context.  Read-only.  See g_gov_scan.
+DWORD WINAPI governor_scan_thread(LPVOID) {
+    if (!is_target_main_module()) {
+        return 0;
+    }
+    // Let SteamStub decrypt .text and the game reach the menu first.
+    Sleep(15000);
+
+    BYTE *text = nullptr;
+    size_t text_size = 0;
+    if (!find_section(".text", &text, &text_size)) {
+        log_line("governor_scan: .text section not found");
+        return 0;
+    }
+    log_line("governor_scan: scanning .text base=%p size=%zu for 0x00000FA0 (4000)",
+             reinterpret_cast<void *>(text), text_size);
+
+    const uint8_t pat[4] = {0xA0, 0x0F, 0x00, 0x00};   // 4000, little-endian
+    int hits = 0;
+    const int kMaxHits = 48;
+    // Guard the tail so the 4-byte compare never reads past the section.
+    for (size_t i = 0; i + sizeof(pat) <= text_size && hits < kMaxHits; ++i) {
+        if (std::memcmp(text + i, pat, sizeof(pat)) != 0) {
+            continue;
+        }
+        // Log the opcode byte before the immediate (mov=0xB8-0xBF, push=0x68,
+        // cmp/mov-mem variants) plus 12 bytes of context to identify the site.
+        BYTE *site = text + i;
+        size_t ctx_lo = (i >= 3) ? 3 : i;
+        char ctx[64] = {0};
+        int p = 0;
+        for (size_t k = i - ctx_lo; k < i + 8 && k < text_size && p < 60; ++k) {
+            p += std::snprintf(ctx + p, sizeof(ctx) - p, "%02x ", text[k]);
+        }
+        uintptr_t va = reinterpret_cast<uintptr_t>(site);
+        log_line("governor_scan: hit #%d va=0x%08lx  bytes[ %s]",
+                 hits + 1, static_cast<unsigned long>(va), ctx);
+        hits++;
+    }
+    log_line("governor_scan: done, %d candidate site(s)%s. Report these to build "
+             "the runtime governor patch.", hits,
+             (hits >= kMaxHits) ? " (capped)" : "");
+    return 0;
+}
+
 // Wake thread – prevents held packets from stranding.
 // While the reorder queue holds packets and the game is not actively polling
 // WSARecvFrom, nudge the (drained) socket readable again by sending a small
@@ -1977,6 +2222,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             InitializeCriticalSection(&g_reorder_cs);
             g_reorder_cs_ready = true;
         }
+        if (!g_dup_cs_ready) {
+            InitializeCriticalSection(&g_dup_cs);
+            g_dup_cs_ready = true;
+        }
         init_buffer_log_if_needed();
         {
             // Reorder enabled by default; BZ_REORDER=0 disables.
@@ -1994,11 +2243,21 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             g_reorder_depth = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
             g_reorder_peers = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
             g_reorder_drain = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
-            // Off by default: doubles upstream bandwidth on the P2P socket.
+            // Off by default: adds upstream traffic on the P2P socket.
             g_send_dup = env_truthy(std::getenv("BZ_SEND_DUP"));
+            g_dup_delay_ms = clamp_u32(parse_env_u32("BZ_DUP_DELAY_MS", kDupDelayMsDef), 0, 500);
+            g_dup_max_pps  = clamp_u32(parse_env_u32("BZ_DUP_MAX_PPS", kDupMaxPpsDef), 0, 2000);
+            // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
+            g_dscp = clamp_u32(parse_env_u32("BZ_DSCP", kDscpDefault), 0, 63);
+            g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
-        log_line("send_dup: %s (BZ_SEND_DUP=1 to enable outbound packet duplication)", g_send_dup ? "enabled" : "disabled");
+        log_line("send_dup: %s dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip dscp=%u"
+                 " (BZ_SEND_DUP=1 to enable outbound packet duplication)",
+                 g_send_dup ? "enabled" : "disabled",
+                 static_cast<unsigned>(g_dup_delay_ms),
+                 static_cast<unsigned>(g_dup_max_pps),
+                 static_cast<unsigned>(g_dscp));
         log_line("reorder: %s max_window_ms=%u min_window_ms=%u adapt=%d wake=%d depth=%u peers=%u drain=%u seq_offset=%u",
                  g_reorder_enabled ? "enabled" : "DISABLED",
                  static_cast<unsigned>(g_reorder_ms),
@@ -2026,10 +2285,30 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                 log_line("DllMain: failed to create reorder wake thread gle=%lu", static_cast<unsigned long>(GetLastError()));
             }
         }
+        if (g_gov_scan && is_target_main_module()) {
+            HANDLE gov = CreateThread(nullptr, 0, &governor_scan_thread, nullptr, 0, nullptr);
+            if (gov != nullptr) {
+                CloseHandle(gov);
+            } else {
+                log_line("DllMain: failed to create governor scan thread gle=%lu", static_cast<unsigned long>(GetLastError()));
+            }
+        }
+        if (g_send_dup && g_dup_delay_ms > 0 && is_target_main_module()) {
+            HANDLE pacer = CreateThread(nullptr, 0, &dup_pacer_thread, nullptr, 0, nullptr);
+            if (pacer != nullptr) {
+                CloseHandle(pacer);
+            } else {
+                log_line("DllMain: failed to create dup pacer thread gle=%lu"
+                         " - falling back to back-to-back duplicates",
+                         static_cast<unsigned long>(GetLastError()));
+                g_dup_delay_ms = 0;
+            }
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
         // Signal the wake thread to exit.  Do not wait on it here: this runs
         // under the loader lock and joining a thread would deadlock.
         InterlockedExchange(&g_wake_stop, 1);
+        InterlockedExchange(&g_dup_stop, 1);
         if (g_wake_sender != INVALID_SOCKET && g_real_closesocket != nullptr) {
             g_real_closesocket(g_wake_sender);
             g_wake_sender = INVALID_SOCKET;
@@ -2050,6 +2329,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         if (g_reorder_cs_ready) {
             DeleteCriticalSection(&g_reorder_cs);
             g_reorder_cs_ready = false;
+        }
+        if (g_dup_cs_ready) {
+            DeleteCriticalSection(&g_dup_cs);
+            g_dup_cs_ready = false;
         }
     }
 
