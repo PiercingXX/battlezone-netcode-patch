@@ -12,7 +12,18 @@ nothing from installing it, but it never hurts.
 
 ## Install
 
-Copy `net.ini` into the game folder (next to `battlezone98redux.exe`).
+**The game only loads net.ini through the mod system** — a copy next to
+`battlezone98redux.exe` is silently ignored (verified in live testing: file
+present, no `MOD FOUND net.ini` line, stock governor values). Install it as
+a local packaged mod instead:
+
+```
+<game folder>/packaged_mods/9990001/net.ini
+```
+
+The installers and `deploy_linux.sh` do this automatically. After the next
+launch, `BZLogger.txt` should show
+`MOD FOUND net.ini at ...packaged_mods\9990001`.
 
 ## Precedence Warning
 

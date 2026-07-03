@@ -343,16 +343,15 @@ echo "Installing patch to $dest_path"
 command install -m 0644 "$built_dll" "$dest_path"
 rm -f "$GAME_PATH/dsound_proxy.log"
 
-# Host-side net.ini tuning: only takes effect when this machine hosts, and
-# harmless otherwise.  Back up any pre-existing net.ini once.
+# net.ini send-governor tuning.  The game only loads net.ini through the
+# mod system - a copy in the game folder root is silently ignored - so it
+# is installed as a local packaged mod.
 net_ini_src="$source_root/net-ini/net.ini"
-net_ini_dst="$GAME_PATH/net.ini"
+net_ini_dst="$GAME_PATH/packaged_mods/9990001/net.ini"
 if [[ -f "$net_ini_src" ]]; then
-    if [[ -f "$net_ini_dst" ]] && ! cmp -s "$net_ini_src" "$net_ini_dst"; then
-        [[ -f "$net_ini_dst.bak" ]] || command cp -f "$net_ini_dst" "$net_ini_dst.bak"
-    fi
+    mkdir -p "$(dirname "$net_ini_dst")"
     command install -m 0644 "$net_ini_src" "$net_ini_dst"
-    echo "Installed host-side net.ini tuning to $net_ini_dst"
+    echo "Installed net.ini tuning mod to $net_ini_dst"
 
     # Workshop mods ship their own net.ini and win over the local file, and
     # DISABLING the mod in the in-game manager is not enough - it still loads.
