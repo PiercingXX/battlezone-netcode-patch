@@ -11,7 +11,7 @@
 
 constexpr uint32_t kReorderSeqOffset     = 13;    // byte offset in payload
 constexpr uint32_t kReorderSeqMinPay     = 17;    // minimum payload length with seq field
-constexpr uint32_t kReorderDefaultMs     = 45;    // max hold window (ms), tuned from live captures
+constexpr uint32_t kReorderDefaultMs     = 100;   // max hold window (ms); 45->100 cut drops ~65% in live A/B testing
 constexpr uint32_t kReorderMinMsDef      = 5;     // adaptive window floor (ms)
 constexpr uint32_t kReorderGrowPadMs     = 5;     // safety margin added on window growth
 constexpr uint32_t kReorderDecayMs       = 2000;  // quiet period before the window decays

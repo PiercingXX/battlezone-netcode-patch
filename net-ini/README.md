@@ -41,17 +41,21 @@ mod in the in-game mod manager is NOT enough: its net.ini still loads
 (confirmed in live testing). This file already includes that mod's
 auto-kick relaxations, so you lose nothing.
 
-## Verify (Host)
+## Verify
 
-After hosting a match, check `BZLogger.txt` for:
+Check `BZLogger.txt` after a launch for:
 
 ```
-Net: Bandwidth usage now set to ...
+MOD FOUND net.ini at ...packaged_mods\9990001
 ```
 
-With the stock/workshop config it starts at `4000` (4 KB/s). With this file
-it starts at `16000`. That number is the fastest way to confirm which
-net.ini actually won.
+That line confirms this file loaded. Note: the governor's
+`Net: Bandwidth usage now set to 4000` start value does NOT change with
+net.ini — live testing showed the 4,000 B/s starting rate is hardcoded and
+`MinBandwidth` only acts as the floor for downward adjustments. In short
+matches the send rate never reaches any ceiling, so this file's caps mainly
+matter for long games. The untested lever for the slow start-of-match ramp
+is `UpCount`.
 
 ## Keys Not Set Here
 
