@@ -24,9 +24,23 @@ MOD FOUND net.ini at ...
 ```
 
 If it points at a `workshop\content\301650\...` path, the workshop copy is
-being used — unsubscribe from that mod (commonly `1895622040`, the
-"Auto-Kick Reduction Patch") to let this file load instead. This file
-already includes that mod's auto-kick relaxations, so you lose nothing.
+being used — **unsubscribe** from that mod (commonly `1895622040`, the
+"Auto-Kick Reduction Patch") to let this file load instead. Disabling the
+mod in the in-game mod manager is NOT enough: its net.ini still loads
+(confirmed in live testing). This file already includes that mod's
+auto-kick relaxations, so you lose nothing.
+
+## Verify (Host)
+
+After hosting a match, check `BZLogger.txt` for:
+
+```
+Net: Bandwidth usage now set to ...
+```
+
+With the stock/workshop config it starts at `4000` (4 KB/s). With this file
+it starts at `16000`. That number is the fastest way to confirm which
+net.ini actually won.
 
 ## Keys Not Set Here
 

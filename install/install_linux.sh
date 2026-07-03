@@ -343,6 +343,27 @@ echo "Installing patch to $dest_path"
 command install -m 0644 "$built_dll" "$dest_path"
 rm -f "$GAME_PATH/dsound_proxy.log"
 
+# Host-side net.ini tuning: only takes effect when this machine hosts, and
+# harmless otherwise.  Back up any pre-existing net.ini once.
+net_ini_src="$source_root/net-ini/net.ini"
+net_ini_dst="$GAME_PATH/net.ini"
+if [[ -f "$net_ini_src" ]]; then
+    if [[ -f "$net_ini_dst" ]] && ! cmp -s "$net_ini_src" "$net_ini_dst"; then
+        [[ -f "$net_ini_dst.bak" ]] || command cp -f "$net_ini_dst" "$net_ini_dst.bak"
+    fi
+    command install -m 0644 "$net_ini_src" "$net_ini_dst"
+    echo "Installed host-side net.ini tuning to $net_ini_dst"
+
+    # Workshop mods ship their own net.ini and win over the local file, and
+    # DISABLING the mod in the in-game manager is not enough - it still loads.
+    workshop_net_ini="$(find "$GAME_PATH/../../workshop/content/301650" -mindepth 2 -maxdepth 2 -name net.ini 2>/dev/null | head -n1)"
+    if [[ -n "$workshop_net_ini" ]]; then
+        echo "WARNING: a Workshop mod also provides net.ini and will override the local file:" >&2
+        echo "  $workshop_net_ini" >&2
+        echo "Unsubscribe from that mod (disabling it in-game is NOT enough) if you plan to host." >&2
+    fi
+fi
+
 apply_socket_buffer_sysctls
 
 exu_repair_script="$source_root/Linux/repair_exu_linux.sh"

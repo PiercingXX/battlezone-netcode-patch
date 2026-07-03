@@ -30,6 +30,16 @@ echo "Deploying dsound.dll to: $GAME_ROOT"
 command cp -f "$DLL_SRC" "$DLL_DST"
 rm -f "$GAME_ROOT/dsound_proxy.log"
 
+# Host-side net.ini tuning: only takes effect when this machine hosts.
+NET_INI_SRC="$SCRIPT_DIR/../net-ini/net.ini"
+if [[ -f "$NET_INI_SRC" ]]; then
+  if [[ -f "$GAME_ROOT/net.ini" ]] && ! cmp -s "$NET_INI_SRC" "$GAME_ROOT/net.ini"; then
+    [[ -f "$GAME_ROOT/net.ini.bak" ]] || command cp -f "$GAME_ROOT/net.ini" "$GAME_ROOT/net.ini.bak"
+  fi
+  command cp -f "$NET_INI_SRC" "$GAME_ROOT/net.ini"
+  echo "Installed host-side net.ini tuning."
+fi
+
 # The kernel silently clamps setsockopt to these limits; below the patch
 # targets the enlarged socket buffers are mostly fictional under Proton.
 rmem_max="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)"
