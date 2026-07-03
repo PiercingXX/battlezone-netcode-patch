@@ -17,7 +17,7 @@ echo "Game root: $GAME_ROOT"
 
 echo
 echo "1) Confirm Steam launch options are set to:"
-echo '   WINEDLLOVERRIDES="dsound=n,b" %command% -nointro'
+echo '   WINEDLLOVERRIDES=dsound=n,b %command% -nointro'
 read -r -p "Press Enter when launch options are ready... "
 
 echo

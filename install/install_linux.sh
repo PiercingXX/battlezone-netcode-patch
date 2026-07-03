@@ -378,7 +378,11 @@ cat <<EOF
 Install complete.
 
 Steam launch options still need to be set once on Linux:
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b BZ_SEND_DUP=1 %command% -nointro
+
+(BZ_SEND_DUP=1 enables outbound packet duplication - currently in testing.
+It recovers packets the network genuinely loses and also helps unpatched
+opponents. Omit it if you prefer the base patch only.)
 
 Installed to:
 $dest_path

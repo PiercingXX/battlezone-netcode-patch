@@ -465,7 +465,7 @@ Peer ping target: ${peer_target:-auto-detect}
 
 Next:
 1) Run your test match.
-2) If possible, set Steam launch options to include: PROTON_LOG=1 WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+2) If possible, set Steam launch options to include: PROTON_LOG=1 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 3) Optional marker during lag spike: ./Linux/tester_diag.sh mark "lag spike while joining"
 4) After the game is finished run: ./Linux/tester_diag.sh stop
 EOF

@@ -94,7 +94,7 @@ Inspect the live socket while the game runs with `ss -uampn`.
 ## Steam Launch Options
 
 ```
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
 ## Current Limitations

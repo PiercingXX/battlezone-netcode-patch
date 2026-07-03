@@ -4,7 +4,25 @@ Battlezone's netcode drops any UDP packet that doesn't arrive in *exact* sequent
 
 This patch intercepts wayward packets mid-flight, buffers them briefly, and releases them in order. The game never knows it's there.
 
+
+## *** New Update Needs Testing!!! ***
+
+> ### 🧪 Help us test: `BZ_SEND_DUP`
+> We're currently testing **outbound packet duplication** — every packet is sent twice, so packets the network genuinely *loses* (not just reorders) can still arrive. It's the only part of the patch that also helps unpatched opponents. Costs 2x upstream on game traffic (trivial — the game sends less than 10 KB/s).
+>
+> **Linux:** use the launch options below (they include `BZ_SEND_DUP=1`).
+> **Windows:** run `setx BZ_SEND_DUP 1` in a command prompt, then fully restart Steam. Confirm with `send_dup=enabled` in `winmm_proxy.log`.
+>
+> Report your before/after drop counts (the verify script prints them) in the Discord thread.
+
+
+
+
+
+
 **Measured result (live A/B, same map, same opponent): 121 drops → 40 drops per match. ~65% fewer out-of-order drops.**
+
+
 
 ---
 
@@ -20,7 +38,11 @@ Paste into PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
-Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed.
+Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed — but for the current `BZ_SEND_DUP` test phase, also run `setx BZ_SEND_DUP 1` and restart Steam (see the note at the top).
+
+
+
+
 
 ### Linux / Proton 🐧
 
@@ -44,8 +66,15 @@ Non-interactive? Set `BZNET_ASSUME_YES=1`.
 Step 2 — set Steam launch options:
 
 ```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b BZ_SEND_DUP=1 %command% -nointro
 ```
+
+(`BZ_SEND_DUP=1` is part of the current test phase — see the note at the top. The patch works without it.)
+
+
+
+
+
 
 ### Who Should Install It?
 
@@ -85,7 +114,7 @@ Verified in live testing, because the community wisdom was mostly stale:
 - **V3:** in-proxy out-of-order packet reordering (`WSARecvFrom` hook), per-peer buffering with deterministic sequence release. Sequence field located at `payload[13..16]` (u32le) via binary capture analysis.
 - **V4:** adaptive reorder window (5 ms floor), wake thread for stranded packets, Linux kernel-clamp fix in the installer, Windows/Linux tuning parity, `BZ_SEND_DUP`, drop metrics in the verify script.
 - **V4.1:** **Windows launch-freeze hotfix** — the hook was routing the game's overlapped (IOCP) receives through the synchronous reorder path, hanging the game at the loading screen (Proton was unaffected; the bug existed since V3). Also: ordinal IAT patching, and `BZ_SEND_DUP` moved to the `WSASendTo` hook where it actually works.
-- **V4.2 (current):** reorder ceiling default raised 45 → 100 ms after live A/B testing measured ~65% fewer drops (121 → 40/43 on the same map/opponent); harmless on clean links thanks to the adaptive floor. net.ini now installs as a local packaged mod, since the game-root location turned out to be dead.
+- **V4.2 (current):** reorder ceiling default raised 45 → 100 ms after live A/B testing measured ~65% fewer drops (121 → 40/43 on the same map/opponent); harmless on clean links thanks to the adaptive floor. net.ini now installs as a local packaged mod.
 
 ---
 
@@ -152,7 +181,7 @@ Common game paths: native `~/.local/share/Steam/steamapps/common/...`, Snap `~/s
 4. Steam launch options:
 
 ```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
 ### Windows

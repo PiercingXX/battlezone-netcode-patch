@@ -345,7 +345,7 @@ Of those, the least invasive next research direction is likely:
 
 A `dsound.dll` native override was implemented and tested via Steam launch options:
 
-`WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`
+`WINEDLLOVERRIDES=dsound=n,b %command% -nointro`
 
 ### What was observed
 
@@ -372,7 +372,7 @@ After startup byte patching proved unstable, the DSOUND proxy was refactored to 
 ### Interception strategy implemented
 
 1. Load proxy via Steam launch option override:
-	- `WINEDLLOVERRIDES="dsound=n,b" %command% -nointro`
+	- `WINEDLLOVERRIDES=dsound=n,b %command% -nointro`
 2. Install startup hooks in the game process:
 	- `setsockopt`
 	- `WSASetSocketOption`
