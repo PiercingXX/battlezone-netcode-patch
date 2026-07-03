@@ -30,14 +30,14 @@ echo "Deploying dsound.dll to: $GAME_ROOT"
 command cp -f "$DLL_SRC" "$DLL_DST"
 rm -f "$GAME_ROOT/dsound_proxy.log"
 
-# Host-side net.ini tuning: only takes effect when this machine hosts.
+# net.ini send-governor tuning.  The game only loads net.ini through the
+# mod system - a copy in the game folder root is silently ignored - so it
+# is installed as a local packaged mod.
 NET_INI_SRC="$SCRIPT_DIR/../net-ini/net.ini"
 if [[ -f "$NET_INI_SRC" ]]; then
-  if [[ -f "$GAME_ROOT/net.ini" ]] && ! cmp -s "$NET_INI_SRC" "$GAME_ROOT/net.ini"; then
-    [[ -f "$GAME_ROOT/net.ini.bak" ]] || command cp -f "$GAME_ROOT/net.ini" "$GAME_ROOT/net.ini.bak"
-  fi
-  command cp -f "$NET_INI_SRC" "$GAME_ROOT/net.ini"
-  echo "Installed host-side net.ini tuning."
+  mkdir -p "$GAME_ROOT/packaged_mods/9990001"
+  command cp -f "$NET_INI_SRC" "$GAME_ROOT/packaged_mods/9990001/net.ini"
+  echo "Installed net.ini tuning mod to packaged_mods/9990001/"
 fi
 
 # The kernel silently clamps setsockopt to these limits; below the patch

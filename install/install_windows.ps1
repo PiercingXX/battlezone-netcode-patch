@@ -152,22 +152,20 @@ try {
     Copy-Item -Force $downloadedDll $destPath
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gamePath "winmm_proxy.log")
 
-    # Host-side net.ini tuning: only takes effect when this machine hosts,
-    # and harmless otherwise.  Best effort - never fail the DLL install over it.
+    # net.ini send-governor tuning.  The game only loads net.ini through the
+    # mod system - a copy in the game folder root is silently ignored - so it
+    # is installed as a local packaged mod.  Best effort - never fail the DLL
+    # install over it.
     try {
         $downloadedNetIni = Join-Path $tempRoot "net.ini"
         Invoke-WebRequest -Uri $netIniUrl -OutFile $downloadedNetIni
-        $netIniDest = Join-Path $gamePath "net.ini"
-        $netIniBak = "$netIniDest.bak"
-        if ((Test-Path $netIniDest) -and -not (Test-Path $netIniBak)) {
-            $existing = Get-Content -Raw $netIniDest
-            $incoming = Get-Content -Raw $downloadedNetIni
-            if ($existing -ne $incoming) {
-                Copy-Item $netIniDest $netIniBak
-            }
+        $netIniModDir = Join-Path $gamePath "packaged_mods\9990001"
+        if (-not (Test-Path $netIniModDir)) {
+            New-Item -ItemType Directory -Path $netIniModDir | Out-Null
         }
+        $netIniDest = Join-Path $netIniModDir "net.ini"
         Copy-Item -Force $downloadedNetIni $netIniDest
-        Write-Host "Installed host-side net.ini tuning to $netIniDest"
+        Write-Host "Installed net.ini tuning mod to $netIniDest"
 
         # Workshop mods ship their own net.ini and win over the local file, and
         # DISABLING the mod in the in-game manager is not enough - it still loads.
