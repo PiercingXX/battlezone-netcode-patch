@@ -190,6 +190,11 @@ static SendToFn g_real_sendto = nullptr;
 // sequence numbers).  Costs 2x upstream bandwidth on the P2P socket.
 static bool              g_send_dup         = false;
 bool g_logged_real_sendto = false;
+// The game exe's IAT has no plain sendto import: all P2P sends go through
+// WSASendTo, so that hook is the one that makes BZ_SEND_DUP effective.
+using WSASendToFn = int(WSAAPI *)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD, const sockaddr *, int, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+static WSASendToFn g_real_wsasendto = nullptr;
+bool g_logged_real_wsasendto = false;
 using GetSockNameFn = int(WSAAPI *)(SOCKET, sockaddr *, int *);
 static GetSockNameFn g_real_getsockname = nullptr;
 
@@ -1312,6 +1317,57 @@ int WSAAPI hooked_sendto(SOCKET s, const char *buf, int len, int flags, const so
     return rc;
 }
 
+int WSAAPI hooked_WSASendTo(SOCKET s,
+                            LPWSABUF buffers,
+                            DWORD buffer_count,
+                            LPDWORD bytes_sent,
+                            DWORD flags,
+                            const sockaddr *to,
+                            int tolen,
+                            LPWSAOVERLAPPED overlapped,
+                            LPWSAOVERLAPPED_COMPLETION_ROUTINE completion_routine) {
+    if (g_real_wsasendto == nullptr) {
+        WSASetLastError(WSANOTINITIALISED);
+        return SOCKET_ERROR;
+    }
+
+    int rc = g_real_wsasendto(s, buffers, buffer_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
+    int wsa = static_cast<int>(WSAGetLastError());
+
+    // Duplicate only IPv4 datagrams large enough to carry a BZRNet sequence
+    // field.  The duplicate is a separate synchronous send from a flat copy,
+    // which keeps it safe for overlapped originals too: the caller's buffers
+    // are only guaranteed valid for the duration of this call.
+    if (g_send_dup && to != nullptr && to->sa_family == AF_INET
+        && buffers != nullptr && buffer_count > 0
+        && (rc == 0 || (rc == SOCKET_ERROR && wsa == WSA_IO_PENDING))) {
+        uint8_t flat[kReorderMaxPktBytes];
+        uint32_t total = 0;
+        bool fits = true;
+        for (DWORD i = 0; i < buffer_count; ++i) {
+            if (buffers[i].buf == nullptr || buffers[i].len == 0) {
+                continue;
+            }
+            if (total + buffers[i].len > kReorderMaxPktBytes) {
+                fits = false;
+                break;
+            }
+            std::memcpy(flat + total, buffers[i].buf, buffers[i].len);
+            total += buffers[i].len;
+        }
+        if (fits && total >= kReorderSeqMinPay) {
+            WSABUF dup_buf;
+            dup_buf.buf = reinterpret_cast<char *>(flat);
+            dup_buf.len = static_cast<u_long>(total);
+            DWORD dup_sent = 0;
+            g_real_wsasendto(s, &dup_buf, 1, &dup_sent, 0, to, tolen, nullptr, nullptr);
+        }
+    }
+
+    WSASetLastError(wsa);
+    return rc;
+}
+
 FARPROC WINAPI hooked_GetProcAddress(HMODULE module, LPCSTR proc_name) {
     if (g_real_getprocaddress == nullptr) {
         return nullptr;
@@ -1402,6 +1458,12 @@ FARPROC WINAPI hooked_GetProcAddress(HMODULE module, LPCSTR proc_name) {
         return reinterpret_cast<FARPROC>(&hooked_sendto);
     }
 
+    if (_stricmp(proc_name, "WSASendTo") == 0 || std::strcmp(proc_name, "_WSASendTo@36") == 0) {
+        g_real_wsasendto = reinterpret_cast<WSASendToFn>(real);
+        log_line("hooked_GetProcAddress: redirecting %s real=%p hook=%p", proc_name, reinterpret_cast<void *>(real), reinterpret_cast<void *>(&hooked_WSASendTo));
+        return reinterpret_cast<FARPROC>(&hooked_WSASendTo);
+    }
+
     return real;
 }
 
@@ -1417,7 +1479,7 @@ bool patch_iat_slot(void **slot, void *replacement) {
 }
 
 void patch_module_ws2_iat_by_pointer(BYTE *base) {
-    if (base == nullptr || (g_real_setsockopt == nullptr && g_real_wsasetsocketoption == nullptr && g_real_getsockopt == nullptr && g_real_wsagetsocketoption == nullptr && g_real_socket == nullptr && g_real_wsasocketw == nullptr && g_real_closesocket == nullptr && g_real_recvfrom == nullptr && g_real_wsarecvfrom == nullptr && g_real_ioctlsocket == nullptr && g_real_wsaioclt == nullptr && g_real_sendto == nullptr)) {
+    if (base == nullptr || (g_real_setsockopt == nullptr && g_real_wsasetsocketoption == nullptr && g_real_getsockopt == nullptr && g_real_wsagetsocketoption == nullptr && g_real_socket == nullptr && g_real_wsasocketw == nullptr && g_real_closesocket == nullptr && g_real_recvfrom == nullptr && g_real_wsarecvfrom == nullptr && g_real_ioctlsocket == nullptr && g_real_wsaioclt == nullptr && g_real_sendto == nullptr && g_real_wsasendto == nullptr)) {
         return;
     }
 
@@ -1503,6 +1565,11 @@ void patch_module_ws2_iat_by_pointer(BYTE *base) {
             }
             if (g_real_sendto != nullptr && *slot == reinterpret_cast<void *>(g_real_sendto)) {
                 if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_sendto))) {
+                    ++patched_count;
+                }
+            }
+            if (g_real_wsasendto != nullptr && *slot == reinterpret_cast<void *>(g_real_wsasendto)) {
+                if (patch_iat_slot(slot, reinterpret_cast<void *>(&hooked_WSASendTo))) {
                     ++patched_count;
                 }
             }
@@ -1656,8 +1723,9 @@ bool hook_setsockopt_iat() {
     FARPROC real_wsarecvfrom = getproc(ws2, "WSARecvFrom");
     FARPROC real_ioctlsocket = getproc(ws2, "ioctlsocket");
     FARPROC real_wsaioclt = getproc(ws2, "WSAIoctl");
-    // Not hooked, only used by the reorder wake thread.
+    // sendto is also used by the reorder wake thread.
     FARPROC real_sendto = getproc(ws2, "sendto");
+    FARPROC real_wsasendto = getproc(ws2, "WSASendTo");
     FARPROC real_getsockname = getproc(ws2, "getsockname");
     if (real_setsockopt == nullptr && real_wsaset == nullptr && real_getsockopt == nullptr && real_wsaget == nullptr && real_socket == nullptr && real_wsasocketw == nullptr && real_closesocket == nullptr && real_recvfrom == nullptr && real_wsarecvfrom == nullptr && real_ioctlsocket == nullptr && real_wsaioclt == nullptr) {
         log_line("hook_setsockopt_iat: failed to resolve target ws2_32 APIs");
@@ -1699,6 +1767,9 @@ bool hook_setsockopt_iat() {
     }
     if (real_sendto != nullptr && g_real_sendto == nullptr) {
         g_real_sendto = reinterpret_cast<SendToFn>(real_sendto);
+    }
+    if (real_wsasendto != nullptr && g_real_wsasendto == nullptr) {
+        g_real_wsasendto = reinterpret_cast<WSASendToFn>(real_wsasendto);
     }
     if (real_getsockname != nullptr && g_real_getsockname == nullptr) {
         g_real_getsockname = reinterpret_cast<GetSockNameFn>(real_getsockname);
@@ -1751,6 +1822,10 @@ bool hook_setsockopt_iat() {
     if (!g_logged_real_sendto && g_real_sendto != nullptr) {
         g_logged_real_sendto = true;
         log_line("hook_setsockopt_iat: real sendto=%p", reinterpret_cast<void *>(g_real_sendto));
+    }
+    if (!g_logged_real_wsasendto && g_real_wsasendto != nullptr) {
+        g_logged_real_wsasendto = true;
+        log_line("hook_setsockopt_iat: real WSASendTo=%p", reinterpret_cast<void *>(g_real_wsasendto));
     }
 
     patch_all_loaded_modules_ws2_iat();
