@@ -8,6 +8,7 @@ $defaultInstallDir = "Battlezone 98 Redux"
 $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
+$netIniUrl = if ($env:BZNET_NETINI_URL) { $env:BZNET_NETINI_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/net-ini/net.ini" }
 $expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "c81539edecf108d90b0874d754856466522b98fc855d6b0af57a133108ac0edd" }
 
 function Get-SteamRoots {
@@ -150,6 +151,37 @@ try {
     Write-Host "Installing patch to $destPath"
     Copy-Item -Force $downloadedDll $destPath
     Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $gamePath "winmm_proxy.log")
+
+    # Host-side net.ini tuning: only takes effect when this machine hosts,
+    # and harmless otherwise.  Best effort - never fail the DLL install over it.
+    try {
+        $downloadedNetIni = Join-Path $tempRoot "net.ini"
+        Invoke-WebRequest -Uri $netIniUrl -OutFile $downloadedNetIni
+        $netIniDest = Join-Path $gamePath "net.ini"
+        $netIniBak = "$netIniDest.bak"
+        if ((Test-Path $netIniDest) -and -not (Test-Path $netIniBak)) {
+            $existing = Get-Content -Raw $netIniDest
+            $incoming = Get-Content -Raw $downloadedNetIni
+            if ($existing -ne $incoming) {
+                Copy-Item $netIniDest $netIniBak
+            }
+        }
+        Copy-Item -Force $downloadedNetIni $netIniDest
+        Write-Host "Installed host-side net.ini tuning to $netIniDest"
+
+        # Workshop mods ship their own net.ini and win over the local file, and
+        # DISABLING the mod in the in-game manager is not enough - it still loads.
+        $steamApps = Split-Path (Split-Path $gamePath)
+        $workshopNetIni = Get-ChildItem -Path (Join-Path $steamApps "workshop\content\$steamAppId") -Filter "net.ini" -Recurse -Depth 1 -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($workshopNetIni) {
+            Write-Warning "A Workshop mod also provides net.ini and will override the local file:"
+            Write-Warning "  $($workshopNetIni.FullName)"
+            Write-Warning "Unsubscribe from that mod (disabling it in-game is NOT enough) if you plan to host."
+        }
+    }
+    catch {
+        Write-Warning "Could not install host-side net.ini tuning: $_"
+    }
 
     Write-Host ""
     Write-Host "Install complete." -ForegroundColor Green

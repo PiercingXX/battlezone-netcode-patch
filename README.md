@@ -12,7 +12,7 @@ Step 1: paste this into PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
-The installer auto-detects your Battlezone 98 Redux install (registry + Steam library folders), downloads the known-good prebuilt `winmm.dll`, and verifies its SHA256 hash before deployment.
+The installer auto-detects your Battlezone 98 Redux install (registry + Steam library folders), downloads the known-good prebuilt `winmm.dll` (verifying its SHA256 hash), and installs the tuned host-side `net.ini` (backing up any existing one). It warns if a Workshop mod's net.ini would override it — unsubscribing is required; disabling in-game is not enough.
 
 Windows does not need any Steam launch option changes.
 
@@ -32,6 +32,7 @@ The installer will:
 - ask before installing build dependencies (MinGW cross-compiler, make) via apt, pacman, or dnf
 - build `dsound.dll` locally from source and install it into the game folder
 - offer to raise the kernel UDP buffer limits (`net.core.rmem_max` / `net.core.wmem_max`) — without this, the kernel silently clamps the enlarged socket buffers to ~208 KB and most of the buffer patch does nothing
+- install the tuned host-side `net.ini` (backing up any existing one), warning if a Workshop mod's net.ini would override it
 - run the Linux EXU compatibility repair (best effort)
 
 Running non-interactively? Set `BZNET_ASSUME_YES=1` to skip the confirmation prompts.
