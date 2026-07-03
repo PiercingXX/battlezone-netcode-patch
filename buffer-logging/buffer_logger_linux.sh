@@ -36,7 +36,7 @@ write_launch_options() {
   {
     echo "Linux Steam launch options for buffer logging:"
     echo
-    printf 'WINEDLLOVERRIDES="dsound=n,b" BZ_BUFFER_LOG=1 BZ_BUFFER_LOG_BYTES=%s BZ_BUFFER_LOG_RING=%s' "$payload_bytes" "$ring_records"
+    printf 'WINEDLLOVERRIDES=dsound=n,b BZ_BUFFER_LOG=1 BZ_BUFFER_LOG_BYTES=%s BZ_BUFFER_LOG_RING=%s' "$payload_bytes" "$ring_records"
     if [[ -n "$peer_filter" ]]; then
       printf ' BZ_BUFFER_LOG_PEER="%s"' "$peer_filter"
     fi

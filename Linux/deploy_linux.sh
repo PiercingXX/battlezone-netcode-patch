@@ -65,4 +65,5 @@ fi
 echo
 echo "Deployment complete."
 echo "Steam launch options should be:"
-echo 'WINEDLLOVERRIDES="dsound=n,b" %command% -nointro'
+echo 'WINEDLLOVERRIDES=dsound=n,b BZ_SEND_DUP=1 %command% -nointro'
+echo '(BZ_SEND_DUP=1 = outbound packet duplication, currently in testing; omit if unwanted)'

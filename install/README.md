@@ -23,7 +23,7 @@ After deployment, it also runs a Linux EXU compatibility repair pass (best effor
 After install, set Steam launch options once:
 
 ```text
-WINEDLLOVERRIDES="dsound=n,b" %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
 ## Windows

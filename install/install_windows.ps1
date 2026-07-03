@@ -185,6 +185,12 @@ try {
     Write-Host "Install complete." -ForegroundColor Green
     Write-Host "Installed to: $destPath"
     Write-Host "No Steam launch option changes are needed on Windows."
+    Write-Host ""
+    Write-Host "One more step for the current test phase - enable outbound packet duplication:" -ForegroundColor Yellow
+    Write-Host "  1. Run:  setx BZ_SEND_DUP 1"
+    Write-Host "  2. Fully restart Steam (so the game inherits the variable)"
+    Write-Host "It recovers packets the network genuinely loses and also helps unpatched opponents."
+    Write-Host "Confirm it took: winmm_proxy.log should show 'send_dup=enabled' after the next launch."
 }
 finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempRoot
