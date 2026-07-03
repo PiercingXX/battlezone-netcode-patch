@@ -13,7 +13,7 @@ This patch intercepts wayward packets mid-flight, buffers them briefly, and rele
 > **Linux:** use the launch options below (they include `BZ_SEND_DUP=1`).
 > **Windows:** run `setx BZ_SEND_DUP 1` in a command prompt, then fully restart Steam. Confirm with `send_dup=enabled` in `winmm_proxy.log`.
 >
-> Report your before/after drop counts (the verify script prints them) in the Discord thread.
+> Report your before/after drop counts (the verify script prints them).
 
 
 
