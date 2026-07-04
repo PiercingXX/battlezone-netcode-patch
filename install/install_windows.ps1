@@ -9,7 +9,7 @@ $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
 $netIniUrl = if ($env:BZNET_NETINI_URL) { $env:BZNET_NETINI_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/net-ini/net.ini" }
-$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "e74cd645559b63b132b37fe3ab951165d088e73eea3f6ed566d81bd6ec09d348" }
+$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "7ab2daa6a30acc96b335994a14f8d62d0a98b8ed415b59b2f1104d6fa86e47f7" }
 
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]
@@ -185,12 +185,10 @@ try {
     Write-Host "Install complete." -ForegroundColor Green
     Write-Host "Installed to: $destPath"
     Write-Host "No Steam launch option changes are needed on Windows."
+    Write-Host "Reorder, bigger buffers, and the setsockopt fix are active by default."
     Write-Host ""
-    Write-Host "One more step for the current test phase - enable outbound packet duplication:" -ForegroundColor Yellow
-    Write-Host "  1. Run:  setx BZ_SEND_DUP 1"
-    Write-Host "  2. Fully restart Steam (so the game inherits the variable)"
-    Write-Host "It recovers packets the network genuinely loses and also helps unpatched opponents."
-    Write-Host "Confirm it took: winmm_proxy.log should show 'send_dup=enabled' after the next launch."
+    Write-Host "Note: BZ_SEND_DUP (outbound duplication) exists but is deprecated - live A/B"
+    Write-Host "testing showed it does not help this game and degrades busy uplinks. Leave it off."
 }
 finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempRoot

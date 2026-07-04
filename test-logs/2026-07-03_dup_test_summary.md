@@ -1,5 +1,33 @@
 # BZ_SEND_DUP live test series — 2026-07-03
 
+## VERDICT (V4.4): duplication is deprecated
+
+Across ~10 games (the V4.2 naive-dup series below, plus a clean V4.3 A/B on the
+same map/opponent), outbound duplication **does not help this game and hurts busy
+uplinks.** The decisive V4.3 A/B (PiercingXX vs KFK, both on V4.3, map `ulntrogn`):
+
+| your outbound → KFK | dup OFF | dup ON |
+|---|---|---|
+| real stale drops | **3.6/min** | **47.9/min** (sustained flat all game) |
+
+Why it still hurt even with V4.3's delay + cap: BZ sends ~30 packets/sec and the
+`BZ_DUP_MAX_PPS` cap defaults to 40, so the cap almost never engages — duplication
+still ~doubles the packet rate, which is the exact thing that overloads a filling
+queue. The 25 ms delay spreads copies in time but doesn't reduce their count.
+
+Separately, KFK's uplink blew out catastrophically in *both* dup-off and dup-on
+games (12k–18k drops in 1–2 minute bursts, autokick in one), one-directionally —
+his send died while PiercingXX's send to him stayed clean. That is a saturated /
+unstable uplink on his end (fix: wired ethernet, router QoS/SQM, kill background
+uploads), which no receiver-side patch can address.
+
+**Action taken:** `BZ_SEND_DUP` removed from all recommended launch options and
+installer prompts (still present, opt-in, off). The validated, always-on core is
+reorder + bigger buffers + DSCP marking. See Version History V4.4 in the main
+README.
+
+---
+
 Seven multiplayer games in one afternoon, designed to measure what outbound packet
 duplication (`BZ_SEND_DUP=1`) actually does to delivery quality. Players:
 

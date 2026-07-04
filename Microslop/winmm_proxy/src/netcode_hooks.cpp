@@ -179,6 +179,14 @@ static bool              g_send_dup            = false;
 static uint32_t          g_dup_delay_ms        = kDupDelayMsDef;
 static uint32_t          g_dup_max_pps         = kDupMaxPpsDef;
 static uint32_t          g_dscp                = kDscpDefault;
+// Opt-in diagnostic (BZ_GOV_SCAN=1, default off).  The exe is SteamStub-DRM
+// wrapped so .text is encrypted on disk and cannot be signature-scanned
+// offline; this scans the DECRYPTED .text at runtime for the governor's
+// hardcoded 4000 B/s start constant (0x00000FA0) and logs candidate sites,
+// so the runtime governor patch can be built from a genuine signature.
+// Read-only; never patches.  Parity with the Proton dsound proxy.
+static bool              g_gov_scan            = false;
+static HANDLE            g_gov_thread          = nullptr;
 
 struct DupEntry {
     SOCKET           sock;
@@ -1311,6 +1319,67 @@ static bool PatchIAT(HMODULE module, const char* dllName,
 }
 
 // ---------------------------------------------------------
+// Governor scanner (opt-in BZ_GOV_SCAN) – parity with the Proton proxy.
+// ---------------------------------------------------------
+
+// Locate a named PE section in the main module.  Headers and (post-DRM-
+// decryption) section bodies are mapped/readable.
+static bool FindSection(const char *want, BYTE **out_start, size_t *out_size)
+{
+    auto *base = reinterpret_cast<BYTE *>(GetModuleHandleW(nullptr));
+    if (base == nullptr) return false;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS32 *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        char name[9] = {0};
+        std::memcpy(name, sec->Name, 8);
+        if (std::strncmp(name, want, 8) == 0) {
+            *out_start = base + sec->VirtualAddress;
+            *out_size  = sec->Misc.VirtualSize;
+            return true;
+        }
+    }
+    return false;
+}
+
+static DWORD WINAPI GovernorScanThread(LPVOID)
+{
+    // Let SteamStub decrypt .text and the game reach the menu first.
+    Sleep(15000);
+
+    BYTE *text = nullptr;
+    size_t text_size = 0;
+    if (!FindSection(".text", &text, &text_size)) {
+        ProxyLog("governor_scan: .text section not found");
+        return 0;
+    }
+    ProxyLog("governor_scan: scanning .text base=%p size=%u for 0x00000FA0 (4000)",
+             (void *)text, static_cast<unsigned>(text_size));
+
+    const uint8_t pat[4] = {0xA0, 0x0F, 0x00, 0x00};   // 4000, little-endian
+    int hits = 0;
+    const int kMaxHits = 48;
+    for (size_t i = 0; i + sizeof(pat) <= text_size && hits < kMaxHits; ++i) {
+        if (std::memcmp(text + i, pat, sizeof(pat)) != 0) continue;
+        size_t ctx_lo = (i >= 3) ? 3 : i;
+        char ctx[64] = {0};
+        int p = 0;
+        for (size_t k = i - ctx_lo; k < i + 8 && k < text_size && p < 60; ++k) {
+            p += std::snprintf(ctx + p, sizeof(ctx) - p, "%02x ", text[k]);
+        }
+        ProxyLog("governor_scan: hit #%d va=0x%08lx  bytes[ %s]",
+                 hits + 1, (unsigned long)(text + i), ctx);
+        hits++;
+    }
+    ProxyLog("governor_scan: done, %d candidate site(s)%s. Report these to build "
+             "the runtime governor patch.", hits, (hits >= kMaxHits) ? " (capped)" : "");
+    return 0;
+}
+
+// ---------------------------------------------------------
 // InstallNetcodeHooks – public entry point
 // ---------------------------------------------------------
 void InstallNetcodeHooks()
@@ -1384,6 +1453,7 @@ void InstallNetcodeHooks()
         g_dup_max_pps  = clamp_u32(parse_env_u32("BZ_DUP_MAX_PPS", kDupMaxPpsDef), 0, 2000);
         // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
         g_dscp = clamp_u32(parse_env_u32("BZ_DSCP", kDscpDefault), 0, 63);
+        g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
     }
 
     // IAT-patch WSASocketW and WSARecvFrom in the game EXE.
@@ -1535,6 +1605,16 @@ void InstallNetcodeHooks()
         }
     }
 
+    // Opt-in governor scanner (read-only diagnostic).
+    if (g_gov_scan && g_gov_thread == nullptr)
+    {
+        g_gov_thread = CreateThread(nullptr, 0, GovernorScanThread, nullptr, 0, nullptr);
+        if (g_gov_thread == nullptr)
+        {
+            ProxyLog("InstallNetcodeHooks: governor scan thread creation failed (err=%lu)", GetLastError());
+        }
+    }
+
     // Start the dup pacer only when delayed duplication can actually fire.
     if (g_send_dup && g_dup_delay_ms > 0
         && (patchedWSASendTo || patchedSendto) && g_dup_thread == nullptr)
@@ -1567,6 +1647,10 @@ void ShutdownNetcodeHooks()
     if (g_dup_thread != nullptr) {
         CloseHandle(g_dup_thread);
         g_dup_thread = nullptr;
+    }
+    if (g_gov_thread != nullptr) {
+        CloseHandle(g_gov_thread);
+        g_gov_thread = nullptr;
     }
 
     flush_buffer_log_files();

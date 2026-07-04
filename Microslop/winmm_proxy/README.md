@@ -83,7 +83,8 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | BZ_REORDER_DEPTH | 8 | Max buffered packets per peer (max 8) |
 | BZ_REORDER_PEERS | 32 | Max distinct IPv4 sources (max 32) |
 | BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128) |
-| BZ_SEND_DUP | 0 | Set to `1` to re-send outbound P2P datagrams. Loss redundancy for genuinely lossy links. Receivers dedup whether patched or vanilla. Never duplicates the game's loopback self-connection |
+| BZ_SEND_DUP | 0 | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
+| BZ_GOV_SCAN | 0 | Opt-in diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches |
 | BZ_DUP_DELAY_MS | 25 | Delay before the duplicate is transmitted (max 500). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
 | BZ_DUP_MAX_PPS | 40 | Cap on duplicates per second (max 2000). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
 | BZ_DSCP | 46 | DSCP class marked on the P2P socket (max 63). 46 = EF. Ignored by stock Windows policy (no-op); use qWAVE or a router rule for real effect there. `0` disables |
