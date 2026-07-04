@@ -16,6 +16,10 @@ build/
 test_bundles/
 *.exe
 *.out
+# Raw game logs are huge research data - keep analysis .md summaries, not the logs
+test-logs/*BZLogger*.txt
+test-logs/*.log
+**/BZLogger*.txt
 
 # Generated logs and diagnostics
 *.log
