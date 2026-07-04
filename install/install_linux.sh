@@ -378,11 +378,12 @@ cat <<EOF
 Install complete.
 
 Steam launch options still need to be set once on Linux:
-WINEDLLOVERRIDES=dsound=n,b BZ_SEND_DUP=1 %command% -nointro
+WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 
-(BZ_SEND_DUP=1 enables outbound packet duplication - currently in testing.
-It recovers packets the network genuinely loses and also helps unpatched
-opponents. Omit it if you prefer the base patch only.)
+(That's all you need: reorder, bigger buffers, and DSCP priority marking are
+on by default. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
+showed outbound duplication does not help this game and degrades busy
+uplinks by doubling packet rate. Leave it off.)
 
 Installed to:
 $dest_path

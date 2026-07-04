@@ -65,5 +65,7 @@ fi
 echo
 echo "Deployment complete."
 echo "Steam launch options should be:"
-echo 'WINEDLLOVERRIDES=dsound=n,b BZ_SEND_DUP=1 %command% -nointro'
-echo '(BZ_SEND_DUP=1 = outbound packet duplication, currently in testing; omit if unwanted)'
+echo 'WINEDLLOVERRIDES=dsound=n,b %command% -nointro'
+echo '(Reorder, bigger buffers, and DSCP priority are on by default - nothing else to set.)'
+echo '(BZ_SEND_DUP=1 exists but is deprecated: live testing showed duplication does not'
+echo ' help this game and degrades busy uplinks. Leave it off.)'

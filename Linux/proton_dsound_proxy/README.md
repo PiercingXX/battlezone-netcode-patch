@@ -72,7 +72,7 @@ socket readable with a tiny internal datagram that the hook discards.
 | `BZ_REORDER_DEPTH` | `8` | Active per-peer reorder queue depth (max `8`) |
 | `BZ_REORDER_PEERS` | `32` | Active peer table size (max `32`) |
 | `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`) |
-| `BZ_SEND_DUP` | `0` | Set to `1` to re-send outbound P2P datagrams — loss redundancy for genuinely lossy links. Receivers dedup whether patched or vanilla. Never duplicates the game's loopback self-connection |
+| `BZ_SEND_DUP` | `0` | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
 | `BZ_DUP_DELAY_MS` | `25` | Delay before the duplicate is transmitted (max `500`). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
 | `BZ_DUP_MAX_PPS` | `40` | Cap on duplicates per second (max `2000`). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
 | `BZ_DSCP` | `46` | DSCP class marked on the P2P socket via IP_TOS (max `63`). 46 = EF; WMM/SQM routers prioritize it over bulk traffic. Effective under Proton. `0` disables |

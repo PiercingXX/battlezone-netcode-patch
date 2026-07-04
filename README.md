@@ -1,16 +1,10 @@
 # Battlezone 98 Redux Netcode Patch
 
-## *** V4.3 Needs Testing!!! ***
+## What's New in V4.4
 
-> ### 🧪 Help us test the reworked redundancy + QoS
-> The core reorder patch is stable and on by default — **you don't need to change anything to benefit.** What we're testing in V4.3:
+> The reorder fix, bigger buffers, and **DSCP priority marking** are on by default — **install and play, nothing to configure.** DSCP tags your game packets so a WMM/SQM router serves them ahead of bulk downloads (real effect under Proton; harmless no-op on stock Windows).
 >
-> - **Smarter packet duplication (`BZ_SEND_DUP`, opt-in, off by default).** A seven-game series showed the old "send every packet twice" was a *net loss* on busy/WiFi links — it doubles packets-per-second right when the queue is filling. V4.3 makes it delayed + rate-capped + loopback-skipping instead. We need data on whether the new version actually helps.
-> - **DSCP priority marking (`BZ_DSCP`, on by default at EF/46).** Marks game packets so a WMM/SQM router serves them ahead of bulk downloads. Real effect under Proton; harmless no-op on stock Windows.
->
-> To try duplication: **Linux** add `BZ_SEND_DUP=1` to the launch options; **Windows** run `setx BZ_SEND_DUP 1` and fully restart Steam. Confirm `send_dup=enabled` in the proxy log.
->
-> After games, send logs (`BZLogger.txt` + `dsound_proxy.log`/`winmm_proxy.log`) as **file attachments** — chat pastes truncate.
+> **Packet duplication (`BZ_SEND_DUP`) is deprecated.** A ~10-game A/B series settled it: outbound duplication doesn't help this game and *degrades* busy uplinks — it roughly doubles packets-per-second right when the queue is filling, and on one link pushed drops from 3.6/min to 47.9/min. It's still present (opt-in, off) but not recommended. If a peer's connection is the problem, the fix is on *their* end — wired ethernet, router QoS/SQM, killing background uploads — not more packets. Details: [`test-logs/2026-07-03_dup_test_summary.md`](test-logs/2026-07-03_dup_test_summary.md).
 
 ---
 
@@ -34,7 +28,7 @@ Paste into PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
-Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed. To help test opt-in duplication, additionally run `setx BZ_SEND_DUP 1` and restart Steam (see the note at the top).
+Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed — reorder, bigger buffers, the setsockopt fix, and DSCP marking are active by default.
 
 ### Linux / Proton 🐧
 
@@ -72,10 +66,9 @@ Everyone playing, ideally. Battlezone drops out-of-order packets **at the receiv
 | Reorder buffer | Only you (your inbound from every peer) |
 | Bigger socket buffers | Only you (your burst tolerance) |
 | DSCP marking | Only you (your outbound gets router priority, if your router honours it) |
-| `BZ_SEND_DUP=1` (opt-in) | The **other** players — adds loss redundancy to your outbound, works even if they're unpatched |
 | Tuned net.ini | Your own send governor (it runs on every machine, not just the host's) |
 
-Playing with someone who can't or won't install? `BZ_SEND_DUP=1` on your side is the only piece that helps an unpatched peer — but it's opt-in and best on links with spare upload headroom (see the testing note above).
+Playing with someone who can't or won't install? There's no client-side setting that fixes *their* end — if their connection is the bottleneck, they need wired ethernet, router QoS, or to stop background uploads. (`BZ_SEND_DUP` was the old answer here; testing showed it doesn't help — see the note at the top.)
 
 ---
 
@@ -85,7 +78,7 @@ Playing with someone who can't or won't install? `BZ_SEND_DUP=1` on your side is
 - **Wake thread:** the reorder hook drains the kernel socket, so a game sleeping in `select()` could leave held packets stranded. A background thread nudges the socket readable so held packets release on time.
 - **4 MB receive / 512 KB send socket buffers**, forced at socket creation for burst tolerance — and re-forced through a `setsockopt` hook on both platforms, so the game can't shrink the send buffer back to 32 KB (it tries to, on real Windows).
 - **DSCP priority marking (`BZ_DSCP`, default 46 = EF):** tags the P2P socket so routers running WMM (WiFi voice queue) or SQM/fq_codel serve game packets ahead of bulk traffic — targeting queueing delay, which live testing showed is the real lag source under load. Effective under Proton; a no-op on stock Windows (which needs qWAVE or a router rule). `BZ_DSCP=0` disables.
-- **Opt-in loss redundancy (`BZ_SEND_DUP=1`):** re-sends outbound P2P datagrams via the `WSASendTo` hook so a genuinely *lost* packet (not just reordered) can still arrive. V4.3 sends the copy **time-shifted** (`BZ_DUP_DELAY_MS`, default 25 ms) and **rate-capped** (`BZ_DUP_MAX_PPS`, default 40), and never duplicates the game's loopback self-connection — because naive back-to-back duplication was measured to *hurt* busy links by doubling packet rate mid-congestion. Receivers dedup it whether patched or vanilla. Best on links with spare upload headroom.
+- **Loss redundancy (`BZ_SEND_DUP=1`) — deprecated, off by default.** Re-sends outbound P2P datagrams via the `WSASendTo` hook so a genuinely *lost* packet could still arrive, with a time-shifted copy (`BZ_DUP_DELAY_MS`) and rate cap (`BZ_DUP_MAX_PPS`). Live A/B testing showed it doesn't help this game and hurts busy uplinks (a peer's link went 3.6 → 47.9 drops/min with it on), because at BZ's ~30 packets/sec the rate cap rarely engages and duplication still ~doubles the packet load. Kept for completeness; leave it off.
 - Everything runs in userspace via DLL proxy injection (`dsound.dll` on Proton, `winmm.dll` on Windows). Same code, same tuning env vars (`BZ_REORDER_*`, `BZ_SEND_DUP`, `BZ_DUP_*`, `BZ_DSCP`) on both platforms — see the proxy READMEs.
 
 ## What We Learned About the Game (the hard way)
@@ -104,7 +97,8 @@ Verified in live testing, because the community wisdom was mostly stale:
 - **V4:** adaptive reorder window (5 ms floor), wake thread for stranded packets, Linux kernel-clamp fix in the installer, Windows/Linux tuning parity, `BZ_SEND_DUP`, drop metrics in the verify script.
 - **V4.1:** **Windows launch-freeze hotfix** — the hook was routing the game's overlapped (IOCP) receives through the synchronous reorder path, hanging the game at the loading screen (Proton was unaffected; the bug existed since V3). Also: ordinal IAT patching, and `BZ_SEND_DUP` moved to the `WSASendTo` hook where it actually works.
 - **V4.2:** reorder ceiling default raised 45 → 100 ms after live A/B testing measured ~65% fewer drops (121 → 40/43 on the same map/opponent); harmless on clean links thanks to the adaptive floor. net.ini now installs as a local packaged mod.
-- **V4.3 (current):** overhauled `BZ_SEND_DUP` after a seven-game test series showed naive back-to-back duplication *degrades* constrained uplinks (it doubles packets-per-second exactly when queues are forming). Duplication now skips the game's loopback self-connection, time-shifts the copy (`BZ_DUP_DELAY_MS`, default 25 ms — one queue spike can't kill both copies), and rate-caps duplicates (`BZ_DUP_MAX_PPS`, default 40). New `BZ_DSCP` marks P2P packets EF/DSCP-46 so WMM/SQM routers prioritize them over bulk traffic (effective on Proton; no-op on stock Windows). The Windows proxy now hooks `setsockopt` too, so the game can no longer shrink our enlarged send buffer back to 32 KB. Opt-in `BZ_GOV_SCAN` diagnostic locates the hardcoded 4000 B/s send-governor start constant in the DRM-decrypted image at runtime. Full analysis: [`test-logs/2026-07-03_dup_test_summary.md`](test-logs/2026-07-03_dup_test_summary.md); options survey: [`resources/PATCH_OPTIONS_RESEARCH.md`](resources/PATCH_OPTIONS_RESEARCH.md).
+- **V4.3:** reworked `BZ_SEND_DUP` (loopback-skip + time-shifted + rate-capped copies), added `BZ_DSCP` priority marking, ported the `setsockopt` re-force hook to Windows, and added the opt-in `BZ_GOV_SCAN` diagnostic that locates the hardcoded 4000 B/s governor start constant in the DRM-decrypted image at runtime.
+- **V4.4 (current):** **`BZ_SEND_DUP` deprecated.** A ~10-game A/B series (1v1s + 2v2s, logs from all peers) settled it: outbound duplication doesn't help this game and degrades busy uplinks — one link went 3.6 → 47.9 drops/min with it on, because at BZ's ~30 pkt/s the rate cap rarely engages so it still ~doubles packet load. It's removed from all recommended launch options and installer prompts (still present, opt-in, off). The validated core is the always-on reorder + bigger buffers + DSCP marking. The governor scanner is now on both proxies. Full verdict + method: [`test-logs/2026-07-03_dup_test_summary.md`](test-logs/2026-07-03_dup_test_summary.md); analysis tool at [`tools/analyze_drops.py`](tools/analyze_drops.py); options survey: [`resources/PATCH_OPTIONS_RESEARCH.md`](resources/PATCH_OPTIONS_RESEARCH.md).
 
 ---
 
@@ -215,7 +209,7 @@ Details: [logging_readme.md](logging_readme.md)
 
 ## Known Limits
 
-- Fixes out-of-order handling; true packet loss is only mitigated by the opt-in `BZ_SEND_DUP` redundancy, and reordering can't recover packets delayed *beyond* the 100 ms window (heavy congestion produces exactly this — see the test writeup).
+- Fixes out-of-order handling, not raw packet loss or congestion. Reordering can't recover packets delayed *beyond* the 100 ms window — heavy congestion produces exactly this, and no receiver-side patch can fix a saturated uplink (that's a wired-ethernet / router-QoS problem on the sending peer's end). Outbound duplication was tested as a loss mitigation and deprecated (see the top note).
 - The game's send governor always ramps from a hardcoded 4 KB/s at match start — net.ini can't change the starting rate, and short matches never reach any bandwidth ceiling. Start-of-match traffic bursts remain the main unsolved drop source. The exe is DRM-encrypted so this can't be patched statically; the `BZ_GOV_SCAN` diagnostic locates the constant at runtime as the first step toward an in-memory fix.
 - If you're subscribed to a workshop mod that ships net.ini, it overrides the patch's tuned copy — unsubscribe (disabling in-game is not enough).
 - On real Windows the game receives via overlapped/IOCP, which the reorder hook deliberately bypasses — so Windows players currently get bigger buffers, DSCP, and dup, but **not** inbound reordering. Reorder is fully active under Proton. (An IOCP-aware reorder path is on the roadmap.)

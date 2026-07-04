@@ -32,7 +32,7 @@ DROP_RE = re.compile(
     r'^([\d\-]+ [\d:.]+) BZRNet P2P Dropping Packet Type 0 For Client '
     r'(S\d+) \(Packet #(\d+) received, #(\d+) expected\)'
 )
-LAUNCH_RE = re.compile(r'Launching Network Game (\S+), Map (\S+)')
+LAUNCH_RE = re.compile(r'Launching Network Game (.+?), Map (\S+)')
 START_RE = re.compile(r'Starting BattleZone 98 Redux')
 
 DEFAULT_NAMES = {
