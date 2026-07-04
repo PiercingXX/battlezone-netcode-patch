@@ -18,7 +18,7 @@ This patch intercepts wayward packets mid-flight, buffers them briefly, and rele
 
 ## Quick Start
 
-**Everyone in the lobby should install this** — the fix is receive-side, so each install only protects that player's own inbound packets. See [Who Should Install It?](#who-should-install-it) below.
+**Everyone in the lobby should install this** — the fix is receive-side, so each install only protects that player's own inbound packets.
 
 ### Windows 🪟
 
