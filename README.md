@@ -5,8 +5,6 @@
 > The reorder fix, bigger buffers, and **DSCP priority marking** are on by default — **install and play, nothing to configure.** DSCP tags your game packets so a WMM/SQM router serves them ahead of bulk downloads (real effect under Proton; harmless no-op on stock Windows).
 >
 > **New: send-governor cold-start fix (`BZ_GOV_START`, opt-in).** The game hardcodes a 4000 B/s send rate at the *start of every match* and ramps up slowly — which is exactly why packet drops cluster in the first ~60 seconds. We dumped the DRM-decrypted game code at runtime, found the constant, and confirmed that rewriting it in-place works but trips SteamStub's anti-tamper — so the fix is a **data-only** patch that lifts the live send-rate off 4000 without touching game code. Set `BZ_GOV_START=16000` to try it. It's sender-side, so it also improves how your traffic reaches *unpatched* peers. Off by default while it's validated in live matches — see the note below.
->
-> **Packet duplication (`BZ_SEND_DUP`) is deprecated.** A ~10-game A/B series settled it: outbound duplication doesn't help this game and *degrades* busy uplinks — it roughly doubles packets-per-second right when the queue is filling, and on one link pushed drops from 3.6/min to 47.9/min. It's still present (opt-in, off) but not recommended. If a peer's connection is the problem, the fix is on *their* end — wired ethernet, router QoS/SQM, killing background uploads — not more packets. Details: [`test-logs/2026-07-03_dup_test_summary.md`](test-logs/2026-07-03_dup_test_summary.md).
 
 ---
 
