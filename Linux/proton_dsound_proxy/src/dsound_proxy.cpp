@@ -224,6 +224,28 @@ static uint32_t          g_dscp             = kDscpDefault;
 // built from a genuine signature next iteration.  Read-only; never patches.
 static bool              g_gov_scan         = false;
 
+// Governor cold-start patch (BZ_GOV_START=<bytes/sec>, default 0 = disabled).
+// The send governor hardcodes a 4000 B/s start for every match (immune to
+// net.ini MinBandwidth, which is copied to the live rate BEFORE net.ini is
+// read), which starves the opening world-state burst and produces the
+// first-60-seconds drop clusters.  Captured 2026-07-03 from decrypted .text:
+// a single unique site `push 4000; push 1000; push -3000` feeds the
+// session-start governor setup.  We rewrite the 4000 immediate to
+// g_gov_start.  Signature-scanned (not a fixed address) so it survives game
+// updates; patched only on an exactly-one match whose immediate is still
+// 4000.  Sender-side: improves how our packets arrive at every peer, patched
+// or not.
+static uint32_t          g_gov_start        = 0;
+static volatile LONG     g_gov_stop         = 0;
+constexpr DWORD          kGovPollMs         = 100;   // send-rate watch interval
+// Unique version fingerprint: push 0xFA0(4000); push 0x3E8(1000); push -3000.
+// Used read-only to confirm the game build before trusting the data address.
+static const uint8_t     kGovSig[15] = {
+    0x68, 0xA0, 0x0F, 0x00, 0x00,
+    0x68, 0xE8, 0x03, 0x00, 0x00,
+    0x68, 0x48, 0xF4, 0xFF, 0xFF
+};
+
 struct DupEntry {
     SOCKET           sock;
     uint64_t         due_ms;
@@ -2090,6 +2112,77 @@ DWORD WINAPI governor_scan_thread(LPVOID) {
     return 0;
 }
 
+// Raise the governor's 4000 B/s cold start to g_gov_start.
+//
+// The obvious approach — rewriting the 4000 immediate in .text — was verified
+// to apply cleanly (4000 -> 16000, correct unique site) but SteamStub's
+// runtime code-integrity check then kills the process.  So we do NOT touch
+// .text.  Instead we watch the governor's live send-rate DATA global
+// (kGovRateAddr) and, whenever it reads the hardcoded cold-start sentinel
+// 4000 (which only occurs at the instant a match's governor is set up — the
+// ramp and the MinBandwidth floor move it off 4000 immediately and never
+// return to exactly 4000), overwrite it with g_gov_start.  A 32-bit aligned
+// store is atomic on x86, and .data carries no integrity check, so the DRM is
+// untouched.  We still signature-scan .text once (read-only) to confirm the
+// game version, which is what ties the fixed data address and the 4000
+// sentinel to code we recognise; if the signature doesn't match uniquely we
+// do nothing.
+//
+// Address of the live send-rate global, captured from the decrypted image
+// (fixed base 0x400000, no ASLR).  Logged by the game as
+// "Net: Bandwidth usage now set to %d".
+static uint32_t *const kGovRateAddr = reinterpret_cast<uint32_t *>(0x008e8d14);
+constexpr uint32_t      kGovColdStart = 4000;
+
+DWORD WINAPI governor_patch_thread(LPVOID) {
+    if (!is_target_main_module() || g_gov_start == 0) {
+        return 0;
+    }
+    // Let SteamStub decrypt .text first (well before any match starts).
+    Sleep(15000);
+
+    BYTE *text = nullptr;
+    size_t text_size = 0;
+    if (!find_section(".text", &text, &text_size)) {
+        log_line("governor_patch: .text section not found");
+        return 0;
+    }
+
+    int matches = 0;
+    for (size_t i = 0; i + sizeof(kGovSig) <= text_size; ++i) {
+        if (std::memcmp(text + i, kGovSig, sizeof(kGovSig)) == 0) {
+            if (++matches > 1) break;
+        }
+    }
+    if (matches != 1) {
+        log_line("governor_patch: %d governor signature matches (need exactly 1) - "
+                 "disabled. Game version may have changed; re-run BZ_GOV_SCAN.", matches);
+        return 0;
+    }
+
+    log_line("governor_patch: version confirmed; watching send-rate 0x%08lx, "
+             "cold-start %u -> %u (data-only, no .text write)",
+             static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kGovRateAddr)),
+             static_cast<unsigned>(kGovColdStart), static_cast<unsigned>(g_gov_start));
+
+    unsigned long bumps = 0;
+    while (InterlockedCompareExchange(&g_gov_stop, 0, 0) == 0) {
+        // Aligned 32-bit read/write: torn access is impossible on x86.
+        if (*kGovRateAddr == kGovColdStart) {
+            *kGovRateAddr = g_gov_start;
+            if (bumps == 0) {
+                log_line("governor_patch: cold-start caught, send-rate %u -> %u "
+                         "(match started)", static_cast<unsigned>(kGovColdStart),
+                         static_cast<unsigned>(g_gov_start));
+            }
+            ++bumps;
+        }
+        Sleep(kGovPollMs);
+    }
+    log_line("governor_patch: stopping after %lu cold-start bump(s)", bumps);
+    return 0;
+}
+
 // Wake thread – prevents held packets from stranding.
 // While the reorder queue holds packets and the game is not actively polling
 // WSARecvFrom, nudge the (drained) socket readable again by sending a small
@@ -2250,8 +2343,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
             g_dscp = clamp_u32(parse_env_u32("BZ_DSCP", kDscpDefault), 0, 63);
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
+            // Governor cold-start rate (0 = disabled). Clamp to a sane band.
+            g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 0), 0, 200000);
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
+        log_line("governor_patch: %s (BZ_GOV_START=%u; 0=disabled)",
+                 g_gov_start ? "enabled" : "disabled", static_cast<unsigned>(g_gov_start));
         log_line("send_dup: %s dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip dscp=%u"
                  " (BZ_SEND_DUP=1 to enable outbound packet duplication)",
                  g_send_dup ? "enabled" : "disabled",
@@ -2285,6 +2382,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                 log_line("DllMain: failed to create reorder wake thread gle=%lu", static_cast<unsigned long>(GetLastError()));
             }
         }
+        if (g_gov_start != 0 && is_target_main_module()) {
+            HANDLE govp = CreateThread(nullptr, 0, &governor_patch_thread, nullptr, 0, nullptr);
+            if (govp != nullptr) {
+                CloseHandle(govp);
+            } else {
+                log_line("DllMain: failed to create governor patch thread gle=%lu", static_cast<unsigned long>(GetLastError()));
+            }
+        }
         if (g_gov_scan && is_target_main_module()) {
             HANDLE gov = CreateThread(nullptr, 0, &governor_scan_thread, nullptr, 0, nullptr);
             if (gov != nullptr) {
@@ -2309,6 +2414,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         // under the loader lock and joining a thread would deadlock.
         InterlockedExchange(&g_wake_stop, 1);
         InterlockedExchange(&g_dup_stop, 1);
+        InterlockedExchange(&g_gov_stop, 1);
         if (g_wake_sender != INVALID_SOCKET && g_real_closesocket != nullptr) {
             g_real_closesocket(g_wake_sender);
             g_wake_sender = INVALID_SOCKET;
