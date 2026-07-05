@@ -380,8 +380,9 @@ Install complete.
 Steam launch options still need to be set once on Linux:
 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 
-(That's all you need: reorder, bigger buffers, and DSCP priority marking are
-on by default. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
+(That's all you need: reorder, bigger buffers, DSCP priority marking, and the
+host auto-kick relax are on by default; BZ_AUTOKICK_RELAX=0 restores stock
+kicking. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
 showed outbound duplication does not help this game and degrades busy
 uplinks by doubling packet rate. Leave it off.)
 

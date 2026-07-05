@@ -213,6 +213,31 @@ static const uint8_t     kGovSig[15] = {
     0x68, 0x48, 0xF4, 0xFF, 0xFF
 };
 
+// AutoKick threshold overrides (BZ_AUTOKICK_*, each 0 = leave the game's value).
+// The kick that ejects a "lagging" player is governed by four .data globals the
+// session parser reads from net.ini's [Net] section at match start (captured
+// 2026-07-04 from the decrypted image; monitor at 0x576c40):
+//   AutoKickStart 0x8e8d0c  grace period (ms) after a join before monitoring  (default 10000)
+//   AutoKickPing  0x8e8cf8  ping ceiling (ms); a tick above this is "bad"      (default 750)
+//   AutoKickLoss  0x8e8bfc  loss-count ceiling; a tick above this is "bad"     (default 25)
+//   AutoKickTime  0x8e8ce4  ms the connection must stay continuously bad       (default 15000)
+// A tick is bad when ping > AutoKickPing OR loss > AutoKickLoss; once bad for
+// AutoKickTime the host kicks the player.  Auto-kick is HOST-ENFORCED, so these
+// only bite when THIS machine hosts the session.  Same DRM-safe data-poke as the
+// governor (no .text write); re-asserted every poll so our value wins over both
+// the stock default and any net.ini value.  Version-gated on kGovSig.  Fixed
+// addresses identical on Proton and real Windows (base 0x400000, no ASLR).
+static uint32_t          g_ak_time             = 0;
+static uint32_t          g_ak_ping             = 0;
+static uint32_t          g_ak_loss             = 0;
+static uint32_t          g_ak_start            = 0;
+static volatile LONG     g_ak_stop             = 0;
+static HANDLE            g_ak_patch_thread     = nullptr;
+static uint32_t *const   kAkStartAddr          = reinterpret_cast<uint32_t *>(0x008e8d0c);
+static uint32_t *const   kAkPingAddr           = reinterpret_cast<uint32_t *>(0x008e8cf8);
+static uint32_t *const   kAkLossAddr           = reinterpret_cast<uint32_t *>(0x008e8bfc);
+static uint32_t *const   kAkTimeAddr           = reinterpret_cast<uint32_t *>(0x008e8ce4);
+
 struct DupEntry {
     SOCKET           sock;
     uint64_t         due_ms;
@@ -1417,6 +1442,70 @@ static DWORD WINAPI GovernorPatchThread(LPVOID)
     return 0;
 }
 
+// Relax the host's auto-kick thresholds to the BZ_AUTOKICK_* values.  Same
+// DRM-safe strategy as GovernorPatchThread: never touch .text (SteamStub's
+// integrity check would kill the process), only the .data threshold globals via
+// aligned 32-bit stores.  The session parser rewrites them at each match start
+// (from net.ini or the stock default), so we re-assert on a poll loop — within
+// one tick of any match starting, our value wins.  Version-gated on kGovSig so
+// the fixed addresses are only trusted on the build they were captured from.
+// Host-enforced: only affects kicks when this machine is the session host.
+static DWORD WINAPI AutoKickPatchThread(LPVOID)
+{
+    if (g_ak_time == 0 && g_ak_ping == 0 && g_ak_loss == 0 && g_ak_start == 0) {
+        return 0;
+    }
+    Sleep(15000);   // let SteamStub decrypt .text first
+
+    BYTE *text = nullptr;
+    size_t text_size = 0;
+    if (!FindSection(".text", &text, &text_size)) {
+        ProxyLog("autokick_patch: .text section not found");
+        return 0;
+    }
+    int matches = 0;
+    for (size_t i = 0; i + sizeof(kGovSig) <= text_size; ++i) {
+        if (std::memcmp(text + i, kGovSig, sizeof(kGovSig)) == 0) {
+            if (++matches > 1) break;
+        }
+    }
+    if (matches != 1) {
+        ProxyLog("autokick_patch: %d version signature matches (need exactly 1) - "
+                 "disabled. Game version may have changed; re-run BZ_GOV_SCAN.", matches);
+        return 0;
+    }
+
+    struct AkSlot { uint32_t *addr; uint32_t val; const char *name; bool logged; };
+    AkSlot slots[4] = {
+        { kAkStartAddr, g_ak_start, "AutoKickStart", false },
+        { kAkPingAddr,  g_ak_ping,  "AutoKickPing",  false },
+        { kAkLossAddr,  g_ak_loss,  "AutoKickLoss",  false },
+        { kAkTimeAddr,  g_ak_time,  "AutoKickTime",  false },
+    };
+    ProxyLog("autokick_patch: version confirmed; overriding start=%u ping=%u loss=%u "
+             "time=%u (0=leave; re-asserted every %ums, host-enforced)",
+             (unsigned)g_ak_start, (unsigned)g_ak_ping, (unsigned)g_ak_loss,
+             (unsigned)g_ak_time, (unsigned)kGovPollMs);
+
+    while (InterlockedCompareExchange(&g_ak_stop, 0, 0) == 0) {
+        for (AkSlot &s : slots) {
+            if (s.val == 0 || *s.addr == s.val) {
+                continue;
+            }
+            uint32_t prev = *s.addr;
+            *s.addr = s.val;
+            if (!s.logged) {
+                ProxyLog("autokick_patch: %s %u -> %u (match started)",
+                         s.name, (unsigned)prev, (unsigned)s.val);
+                s.logged = true;
+            }
+        }
+        Sleep(kGovPollMs);
+    }
+    ProxyLog("autokick_patch: stopping");
+    return 0;
+}
+
 static DWORD WINAPI GovernorScanThread(LPVOID)
 {
     // Let SteamStub decrypt .text and the game reach the menu first.
@@ -1528,9 +1617,27 @@ void InstallNetcodeHooks()
         g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
         // Governor cold-start rate (0 = disabled). Clamp to a sane band.
         g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 0), 0, 200000);
+        // AutoKick threshold overrides (each 0 = leave the game's value).
+        // The relax preset is ON by default (BZ_AUTOKICK_RELAX=0 restores
+        // stock kicking) and fills only the knobs not set individually.
+        // Takes precedence over net.ini, which the game ignores unless it
+        // ships inside the session's active mod (2026-07-05: 15s stock
+        // kick fired with the 9990001 net.ini found-but-unapplied).
+        {
+            const char *ak_env = std::getenv("BZ_AUTOKICK_RELAX");
+            bool ak_relax = (ak_env == nullptr || *ak_env == '\0')
+                            ? true : env_truthy(ak_env);
+            g_ak_start = clamp_u32(parse_env_u32("BZ_AUTOKICK_START", ak_relax ? 60000 : 0), 0, 600000);
+            g_ak_ping  = clamp_u32(parse_env_u32("BZ_AUTOKICK_PING",  ak_relax ? 2000  : 0), 0, 60000);
+            g_ak_loss  = clamp_u32(parse_env_u32("BZ_AUTOKICK_LOSS",  ak_relax ? 200   : 0), 0, 100000);
+            g_ak_time  = clamp_u32(parse_env_u32("BZ_AUTOKICK_TIME",  ak_relax ? 60000 : 0), 0, 600000);
+        }
     }
     ProxyLog("governor_patch: %s (BZ_GOV_START=%u; 0=disabled)",
              g_gov_start ? "enabled" : "disabled", g_gov_start);
+    ProxyLog("autokick_patch: %s (start=%u ping=%u loss=%u time=%u; 0=leave, host-enforced)",
+             (g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) ? "enabled" : "disabled",
+             g_ak_start, g_ak_ping, g_ak_loss, g_ak_time);
 
     // IAT-patch WSASocketW and WSARecvFrom in the game EXE.
     HMODULE exe = GetModuleHandleA(nullptr);
@@ -1701,6 +1808,16 @@ void InstallNetcodeHooks()
         }
     }
 
+    // Opt-in AutoKick threshold override (data-only; DRM-safe).
+    if ((g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) && g_ak_patch_thread == nullptr)
+    {
+        g_ak_patch_thread = CreateThread(nullptr, 0, AutoKickPatchThread, nullptr, 0, nullptr);
+        if (g_ak_patch_thread == nullptr)
+        {
+            ProxyLog("InstallNetcodeHooks: autokick patch thread creation failed (err=%lu)", GetLastError());
+        }
+    }
+
     // Start the dup pacer only when delayed duplication can actually fire.
     if (g_send_dup && g_dup_delay_ms > 0
         && (patchedWSASendTo || patchedSendto) && g_dup_thread == nullptr)
@@ -1723,6 +1840,7 @@ void ShutdownNetcodeHooks()
     InterlockedExchange(&g_wake_stop, 1);
     InterlockedExchange(&g_dup_stop, 1);
     InterlockedExchange(&g_gov_stop, 1);
+    InterlockedExchange(&g_ak_stop, 1);
     if (g_wake_sender != INVALID_SOCKET && g_realClosesocket != nullptr) {
         g_realClosesocket(g_wake_sender);
         g_wake_sender = INVALID_SOCKET;
@@ -1742,6 +1860,10 @@ void ShutdownNetcodeHooks()
     if (g_gov_patch_thread != nullptr) {
         CloseHandle(g_gov_patch_thread);
         g_gov_patch_thread = nullptr;
+    }
+    if (g_ak_patch_thread != nullptr) {
+        CloseHandle(g_ak_patch_thread);
+        g_ak_patch_thread = nullptr;
     }
 
     flush_buffer_log_files();

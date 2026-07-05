@@ -246,6 +246,29 @@ static const uint8_t     kGovSig[15] = {
     0x68, 0x48, 0xF4, 0xFF, 0xFF
 };
 
+// AutoKick threshold overrides (BZ_AUTOKICK_*, each 0 = leave the game's value).
+// The kick that ejects a "lagging" player is governed by four .data globals the
+// session parser reads from net.ini's [Net] section at match start (captured
+// 2026-07-04 from the decrypted image; monitor at 0x576c40):
+//   AutoKickStart 0x8e8d0c  grace period (ms) after a join before monitoring  (default 10000)
+//   AutoKickPing  0x8e8cf8  ping ceiling (ms); a tick above this is "bad"      (default 750)
+//   AutoKickLoss  0x8e8bfc  loss-count ceiling; a tick above this is "bad"     (default 25)
+//   AutoKickTime  0x8e8ce4  ms the connection must stay continuously bad       (default 15000)
+// A tick is bad when ping > AutoKickPing OR loss > AutoKickLoss; once bad for
+// AutoKickTime the host kicks the player.  Auto-kick is HOST-ENFORCED, so these
+// only bite when THIS machine hosts the session.  We data-poke the globals
+// (DRM-safe, no .text write) and re-assert every poll, so our value wins over
+// both the stock default and any net.ini value.  Version-gated on kGovSig.
+static uint32_t          g_ak_time          = 0;
+static uint32_t          g_ak_ping          = 0;
+static uint32_t          g_ak_loss          = 0;
+static uint32_t          g_ak_start         = 0;
+static volatile LONG     g_ak_stop          = 0;
+static uint32_t *const   kAkStartAddr       = reinterpret_cast<uint32_t *>(0x008e8d0c);
+static uint32_t *const   kAkPingAddr        = reinterpret_cast<uint32_t *>(0x008e8cf8);
+static uint32_t *const   kAkLossAddr        = reinterpret_cast<uint32_t *>(0x008e8bfc);
+static uint32_t *const   kAkTimeAddr        = reinterpret_cast<uint32_t *>(0x008e8ce4);
+
 struct DupEntry {
     SOCKET           sock;
     uint64_t         due_ms;
@@ -2183,6 +2206,78 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
     return 0;
 }
 
+// Relax the host's auto-kick thresholds to the BZ_AUTOKICK_* values.
+//
+// Same DRM-safe strategy as governor_patch_thread: we never touch .text (that
+// trips SteamStub's code-integrity check).  The four thresholds live in .data
+// globals which carry no integrity check, so we overwrite them with aligned
+// 32-bit stores (atomic on x86).  The session parser rewrites them at every
+// match start (from net.ini or the stock default), so we re-assert on a poll
+// loop — within one tick of any match starting, our value wins.  We confirm the
+// game build via the unique kGovSig scan before trusting the fixed addresses;
+// if the signature is absent or ambiguous we do nothing.  Host-enforced: this
+// only affects kicks when the local machine is the session host.
+DWORD WINAPI autokick_patch_thread(LPVOID) {
+    if (!is_target_main_module()) {
+        return 0;
+    }
+    if (g_ak_time == 0 && g_ak_ping == 0 && g_ak_loss == 0 && g_ak_start == 0) {
+        return 0;
+    }
+    // Let SteamStub decrypt .text first (well before any match starts).
+    Sleep(15000);
+
+    BYTE *text = nullptr;
+    size_t text_size = 0;
+    if (!find_section(".text", &text, &text_size)) {
+        log_line("autokick_patch: .text section not found");
+        return 0;
+    }
+
+    int matches = 0;
+    for (size_t i = 0; i + sizeof(kGovSig) <= text_size; ++i) {
+        if (std::memcmp(text + i, kGovSig, sizeof(kGovSig)) == 0) {
+            if (++matches > 1) break;
+        }
+    }
+    if (matches != 1) {
+        log_line("autokick_patch: %d version signature matches (need exactly 1) - "
+                 "disabled. Game version may have changed; re-run BZ_GOV_SCAN.", matches);
+        return 0;
+    }
+
+    struct AkSlot { uint32_t *addr; uint32_t val; const char *name; bool logged; };
+    AkSlot slots[4] = {
+        { kAkStartAddr, g_ak_start, "AutoKickStart", false },
+        { kAkPingAddr,  g_ak_ping,  "AutoKickPing",  false },
+        { kAkLossAddr,  g_ak_loss,  "AutoKickLoss",  false },
+        { kAkTimeAddr,  g_ak_time,  "AutoKickTime",  false },
+    };
+    log_line("autokick_patch: version confirmed; overriding start=%u ping=%u loss=%u "
+             "time=%u (0=leave; re-asserted every %ums, host-enforced)",
+             static_cast<unsigned>(g_ak_start), static_cast<unsigned>(g_ak_ping),
+             static_cast<unsigned>(g_ak_loss), static_cast<unsigned>(g_ak_time),
+             static_cast<unsigned>(kGovPollMs));
+
+    while (InterlockedCompareExchange(&g_ak_stop, 0, 0) == 0) {
+        for (AkSlot &s : slots) {
+            if (s.val == 0 || *s.addr == s.val) {
+                continue;
+            }
+            uint32_t prev = *s.addr;
+            *s.addr = s.val;
+            if (!s.logged) {
+                log_line("autokick_patch: %s %u -> %u (match started)",
+                         s.name, static_cast<unsigned>(prev), static_cast<unsigned>(s.val));
+                s.logged = true;
+            }
+        }
+        Sleep(kGovPollMs);
+    }
+    log_line("autokick_patch: stopping");
+    return 0;
+}
+
 // Wake thread – prevents held packets from stranding.
 // While the reorder queue holds packets and the game is not actively polling
 // WSARecvFrom, nudge the (drained) socket readable again by sending a small
@@ -2345,10 +2440,29 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
             // Governor cold-start rate (0 = disabled). Clamp to a sane band.
             g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 0), 0, 200000);
+            // AutoKick threshold overrides (each 0 = leave the game's value).
+            // The relax preset is ON by default (BZ_AUTOKICK_RELAX=0 restores
+            // stock kicking) and fills only the knobs not set individually.
+            // Takes precedence over net.ini, which the game ignores unless it
+            // ships inside the session's active mod (2026-07-05: 15s stock
+            // kick fired with the 9990001 net.ini found-but-unapplied).
+            {
+                const char *ak_env = std::getenv("BZ_AUTOKICK_RELAX");
+                bool ak_relax = (ak_env == nullptr || *ak_env == '\0')
+                                ? true : env_truthy(ak_env);
+                g_ak_start = clamp_u32(parse_env_u32("BZ_AUTOKICK_START", ak_relax ? 60000 : 0), 0, 600000);
+                g_ak_ping  = clamp_u32(parse_env_u32("BZ_AUTOKICK_PING",  ak_relax ? 2000  : 0), 0, 60000);
+                g_ak_loss  = clamp_u32(parse_env_u32("BZ_AUTOKICK_LOSS",  ak_relax ? 200   : 0), 0, 100000);
+                g_ak_time  = clamp_u32(parse_env_u32("BZ_AUTOKICK_TIME",  ak_relax ? 60000 : 0), 0, 600000);
+            }
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
         log_line("governor_patch: %s (BZ_GOV_START=%u; 0=disabled)",
                  g_gov_start ? "enabled" : "disabled", static_cast<unsigned>(g_gov_start));
+        log_line("autokick_patch: %s (start=%u ping=%u loss=%u time=%u; 0=leave, host-enforced)",
+                 (g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) ? "enabled" : "disabled",
+                 static_cast<unsigned>(g_ak_start), static_cast<unsigned>(g_ak_ping),
+                 static_cast<unsigned>(g_ak_loss), static_cast<unsigned>(g_ak_time));
         log_line("send_dup: %s dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip dscp=%u"
                  " (BZ_SEND_DUP=1 to enable outbound packet duplication)",
                  g_send_dup ? "enabled" : "disabled",
@@ -2398,6 +2512,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                 log_line("DllMain: failed to create governor scan thread gle=%lu", static_cast<unsigned long>(GetLastError()));
             }
         }
+        if ((g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) && is_target_main_module()) {
+            HANDLE akp = CreateThread(nullptr, 0, &autokick_patch_thread, nullptr, 0, nullptr);
+            if (akp != nullptr) {
+                CloseHandle(akp);
+            } else {
+                log_line("DllMain: failed to create autokick patch thread gle=%lu", static_cast<unsigned long>(GetLastError()));
+            }
+        }
         if (g_send_dup && g_dup_delay_ms > 0 && is_target_main_module()) {
             HANDLE pacer = CreateThread(nullptr, 0, &dup_pacer_thread, nullptr, 0, nullptr);
             if (pacer != nullptr) {
@@ -2415,6 +2537,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         InterlockedExchange(&g_wake_stop, 1);
         InterlockedExchange(&g_dup_stop, 1);
         InterlockedExchange(&g_gov_stop, 1);
+        InterlockedExchange(&g_ak_stop, 1);
         if (g_wake_sender != INVALID_SOCKET && g_real_closesocket != nullptr) {
             g_real_closesocket(g_wake_sender);
             g_wake_sender = INVALID_SOCKET;

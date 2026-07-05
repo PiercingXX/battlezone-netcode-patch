@@ -89,6 +89,21 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | BZ_DUP_DELAY_MS | 25 | Delay before the duplicate is transmitted (max 500). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
 | BZ_DUP_MAX_PPS | 40 | Cap on duplicates per second (max 2000). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
 | BZ_DSCP | 46 | DSCP class marked on the P2P socket (max 63). 46 = EF. Ignored by stock Windows policy (no-op); use qWAVE or a router rule for real effect there. `0` disables |
+| BZ_AUTOKICK_RELAX | 1 | **On by default, host-only.** One-switch preset relaxing all four auto-kick thresholds below (start=60000, ping=2000, loss=200, time=60000) so a transient lag spike no longer ejects a player. Individual `BZ_AUTOKICK_*` vars override it; `0` restores stock kicking. Only affects kicks when **this machine hosts** the session |
+| BZ_AUTOKICK_TIME | 0 | Override `AutoKickTime` — ms a player's connection must stay continuously bad before the host kicks them (game default `15000`). `0` = leave the game's value |
+| BZ_AUTOKICK_PING | 0 | Override `AutoKickPing` — ping ceiling in ms; a tick above it is "bad" (game default `750`). `0` = leave the game's value |
+| BZ_AUTOKICK_LOSS | 0 | Override `AutoKickLoss` — per-tick loss-count ceiling (game default `25`). `0` = leave the game's value |
+| BZ_AUTOKICK_START | 0 | Override `AutoKickStart` — ms of grace after a join before monitoring begins (game default `10000`). `0` = leave the game's value |
+
+Auto-kick is enforced by the session **host** (data-only poke of the four
+`[Net]` threshold globals, re-asserted every 100 ms, version-gated on the
+governor signature; never touches `.text`), so these only change whether *this*
+machine kicks a lagging peer. The relax preset defaults on because the
+`net.ini` route proved unreliable in live play: a host whose
+`packaged_mods/9990001/net.ini` set `AutoKickTime = 45000` still fired a stock
+15 s kick (2026-07-05) — the game logs `MOD FOUND net.ini` but does not
+reliably apply its values unless the file ships inside the session's *active*
+mod. Confirm with `autokick_patch: enabled` in `winmm_proxy.log`.
 
 Optional logging controls:
 
