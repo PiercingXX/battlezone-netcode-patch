@@ -66,6 +66,7 @@ echo
 echo "Deployment complete."
 echo "Steam launch options should be:"
 echo 'WINEDLLOVERRIDES=dsound=n,b %command% -nointro'
-echo '(Reorder, bigger buffers, and DSCP priority are on by default - nothing else to set.)'
+echo '(Reorder, bigger buffers, DSCP priority, and the host auto-kick relax are on'
+echo ' by default - nothing else to set. BZ_AUTOKICK_RELAX=0 restores stock kicking.)'
 echo '(BZ_SEND_DUP=1 exists but is deprecated: live testing showed duplication does not'
 echo ' help this game and degrades busy uplinks. Leave it off.)'
