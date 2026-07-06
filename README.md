@@ -213,8 +213,11 @@ Details: [logging_readme.md](logging_readme.md)
 ## Known Limits
 
 - Fixes out-of-order handling, not raw packet loss or congestion. Reordering can't recover packets delayed *beyond* the 100 ms window — heavy congestion produces exactly this, and no receiver-side patch can fix a saturated uplink (that's a wired-ethernet / router-QoS problem on the sending peer's end). Outbound duplication was tested as a loss mitigation and deprecated (see the top note).
+  
 - The game's send governor hardcodes a 4 KB/s start at match start (net.ini can't change it), which drives the start-of-match drop bursts. This is now addressed by the opt-in `BZ_GOV_START` data patch (see How It Works) — off by default while it's validated in live matches. The exe is DRM-encrypted, so this is a runtime in-memory fix, not a static one.
+  
 - If you're subscribed to a workshop mod that ships net.ini, it overrides the patch's tuned copy — unsubscribe (disabling in-game is not enough).
+  
 - On real Windows the game receives via overlapped/IOCP, which the reorder hook deliberately bypasses — so Windows players currently get bigger buffers, DSCP, and dup, but **not** inbound reordering. Reorder is fully active under Proton. (An IOCP-aware reorder path is on the roadmap.)
 
 ---
