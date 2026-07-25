@@ -14,6 +14,8 @@ WINDRES := i686-w64-mingw32-windres
 
 SRC_DIR := src
 OUT_DIR := build
+# ../../shared holds reorder_core.h, shared verbatim with the Linux proxy.
+SHARED_DIR := ../../shared
 
 TARGET  := $(OUT_DIR)/winmm.dll
 
@@ -36,7 +38,8 @@ CXXFLAGS := \
     -DWIN32_LEAN_AND_MEAN \
     -DUNICODE \
     -D_UNICODE \
-    -I$(SRC_DIR)
+    -I$(SRC_DIR) \
+    -I$(SHARED_DIR)
 
 LDFLAGS := \
     -m32 \
@@ -63,7 +66,7 @@ $(TARGET): $(OBJS)
 	@echo "Copy build/winmm.dll to the game folder:"
 	@echo "  steamapps/common/Battlezone 98 Redux/"
 
-$(OUT_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OUT_DIR)
+$(OUT_DIR)/%.o: $(SRC_DIR)/%.cpp $(SHARED_DIR)/reorder_core.h | $(OUT_DIR)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:

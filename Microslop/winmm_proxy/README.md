@@ -65,11 +65,106 @@ The reorder hold window is **adaptive per peer**: it starts at a small floor
 (`BZ_REORDER_MIN_MS`, default 5 ms) so clean connections get near-zero added
 latency, grows toward the ceiling (`BZ_REORDER_WINDOW_MS`, default 100 ms)
 only when reordering is actually observed on that link, and decays back down
-after ~2 s without reorder evidence.
+proportionally once the link goes quiet (a clean link returns to the floor in
+seconds).  Growth is sized by the lateness actually measured, so pure packet
+loss — which is not reorder evidence — no longer pins the window at the
+ceiling.  `BZ_REORDER_MAX_HOLD_MS` caps the hold regardless.
 
 A background **wake thread** prevents held packets from stranding when the
 game sleeps in `select()` on the (already drained) socket: it nudges the
 socket readable with a tiny internal datagram that the hook discards.
+
+The state machine lives in [`shared/reorder_core.h`](../../shared/reorder_core.h),
+shared verbatim with the other proxy and covered by `make -C tests run`.
+
+Since V4.7 the buffer also reports what it is doing, every 10 seconds and once
+at session end:
+
+```
+reorder_stats: delivered=9127 (in_order=9000 forced=120 evicted=3 first=4)
+  dropped(stale=57 dup=12 reclaim=0) bypass(short=88 tblfull=0) emsgsize=0
+  peers_reclaimed=1 drain_max=14 hold_ms(avg=4 max=97)
+  hist[0,1-5,6-15,16-30,31-60,61+]=[8000,900,150,60,12,5] win_ms=[35,5]
+```
+
+`hold_ms` is the one to watch: it is the latency **this patch** added to the
+game's streams, which the game's own drop counter cannot show. `evicted` and
+`emsgsize` should both be zero; if they aren't, the buffer is under pressure
+and needs a deeper `BZ_REORDER_DEPTH` or a larger packet buffer respectively.
+Run `tools/analyze_drops.py <proxy log>` to have these read out for you.
+
+### `[Net]` tuning poke (`BZ_NET_*`, on by default)
+
+The game reads its whole `[Net]` configuration into fixed globals at match
+start.  `net.ini` is supposed to supply them, but the game has twice been caught
+logging `MOD FOUND net.ini` while running stock values anyway, so the proxy
+writes them directly instead — data-only, DRM-safe, re-asserted every 100 ms,
+and version-gated on the same signature the governor patch uses.  Each address
+is additionally sanity-checked: a value outside a plausible range means the
+address is wrong for this build, and the entry is logged and skipped rather than
+written.
+
+| Variable | Default | net.ini key | Stock | Notes |
+|---|---|---|---|---|
+| `BZ_NET_TUNE` | `1` | — | — | `0` restores the game's stock governor behaviour |
+| `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | also the value copied into the live send rate at session setup |
+| `BZ_NET_MAXBANDWIDTH` | `320000` | MaxBandwidth | 16000 | the governor is closed-loop, so a high ceiling is not itself a risk |
+| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | stock ramps +10 bytes per ~3 s: a short match never escapes the opening trickle |
+| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | |
+| `BZ_NET_MAXPING` | `450` | MaxPing | 300 | stock turns a jitter spike into a rate cut into more warping into more spike |
+| `BZ_NET_MAXPINGSLOST` | leave | MaxPingsLost | 20 | no evidence a change helps |
+| `BZ_AUTOKICK_RELAX` | `1` | — | — | `0` restores stock kicking |
+| `BZ_AUTOKICK_START` | `60000` | AutoKickStart | 10000 | host-enforced |
+| `BZ_AUTOKICK_PING` | `2000` | AutoKickPing | 750 | host-enforced |
+| `BZ_AUTOKICK_LOSS` | `200` | AutoKickLoss | 25 | host-enforced |
+| `BZ_AUTOKICK_TIME` | `60000` | AutoKickTime | 15000 | host-enforced |
+
+Any variable set to `0` leaves the game's own value alone.
+
+### Outbound pacing (`BZ_SEND_PACE`, off by default)
+
+Burst measurement is unconditional and appears as `send_stats` alongside the
+reorder counters: peak packets/sec, peak bytes/sec, and how many seconds ran
+above a burst threshold.  This exists because the failure that has actually
+ended matches is a peer's reliable-send queue burst-retransmitting — 1,179
+packets in 13.4 s in the measured case — and nothing here had ever looked at
+what the local machine puts on the wire.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BZ_SEND_PACE` | `0` | bytes/sec token bucket; `0` measures without ever delaying |
+| `BZ_SEND_PACE_MAX_MS` | `20` | hard cap on added send latency |
+
+The pacer never drops a packet, never reorders one, and never delays traffic too
+small to carry a sequence number (the ping exchange the auto-kick measures).  It
+can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates the
+default shapes well under one packet and traffic passes straight through — read
+`send_stats` before raising either knob.
+
+### Windows overlapped/IOCP receives (`BZ_IOCP_*`, off by default)
+
+On real Windows the game receives through overlapped/IOCP calls, which the
+synchronous reorder path deliberately bypasses — so inbound reordering does
+nothing for most installs.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BZ_IOCP_SCAN` | `0` | read-only: logs which completion API the game uses, and how many overlapped receives it posts |
+| `BZ_IOCP_REORDER` | `0` | **unvalidated**: defers completions to restore order |
+
+**Run the scan first.**  Which completion API this game actually calls has never
+been observed, and the reorder path cannot apply if it is not
+`GetQueuedCompletionStatus`.
+
+Reordering here fundamentally requires holding a completion back.  Swapping
+buffers cannot work: whatever we hand the game, its own sequencing advances
+immediately and cannot be un-advanced, so by the time a late packet arrives the
+cursor has already passed it.  Holding completions is also exactly what froze the
+game at the loading screen in V4.1, so this implementation holds at most four,
+never past the reorder window, never past the caller's own timeout, and latches
+itself off permanently if a hold overruns.  That is careful, not proven — it has
+never run on real Windows.  Do not enable it on a machine you are not willing to
+have fail to launch.
 
 Runtime tuning (same env vars as the Linux dsound proxy):
 
@@ -79,10 +174,12 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | BZ_REORDER_WINDOW_MS | 100 | Max (ceiling) hold time before forced delivery (clamp 5–200) |
 | BZ_REORDER_MIN_MS | 5 | Adaptive window floor; `0` = deliver immediately unless reordering seen |
 | BZ_REORDER_ADAPT | 1 | Set to `0` for a fixed window equal to BZ_REORDER_WINDOW_MS |
+| BZ_REORDER_MAX_HOLD_MS | = window | Hard ceiling on how long any packet may be held, independent of the adaptive window. Bounds the latency the patch can add to your ping (clamp 0–500) |
 | BZ_REORDER_WAKE | 1 | Set to `0` to disable the wake thread |
-| BZ_REORDER_DEPTH | 8 | Max buffered packets per peer (max 8) |
-| BZ_REORDER_PEERS | 32 | Max distinct IPv4 sources (max 32) |
-| BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128) |
+| BZ_REORDER_STATS | 1 | Set to `0` to silence the 10-second `reorder_stats:` counter lines |
+| BZ_REORDER_DEPTH | 32 | Max buffered packets per peer (max 32) |
+| BZ_REORDER_PEERS | 16 | Max distinct IPv4 sources (max 16) |
+| BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128). The drain also stops early whenever a peer queue is full, so this is an upper bound, not a target |
 | BZ_SEND_DUP | 0 | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
 | BZ_GOV_START | 0 | **Opt-in.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched). `0` = disabled. Targets the first-60-seconds drop clusters; sender-side |
 | BZ_GOV_SCAN | 0 | Diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches |

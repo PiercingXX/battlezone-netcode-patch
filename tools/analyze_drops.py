@@ -12,17 +12,35 @@ drop per sender:
 When the sender was duplicating, each real stale packet is logged twice (original
 + copy), so real counts are also reported halved ("uniq").
 
+Drop counts alone are a misleading score, though: a packet the proxy holds and
+later releases in order stops being counted as a drop whether or not the player
+is better off.  So this also reads the proxy's own V4.7 `reorder_stats:` lines
+out of dsound_proxy.log / winmm_proxy.log and reports what the buffer did —
+above all hold_ms(max), the latency the patch itself added, and
+delivered_evicted, packets it had to release out of order under storage
+pressure.  Judge an A/B on all three numbers, not on the drop count alone.
+
 Usage:
   analyze_drops.py LOG [LOG ...] [--launch SUBSTR] [--names steamid=Name,...]
 
+  LOG              BZLogger.txt files, and/or dsound_proxy.log / winmm_proxy.log
+                   (the proxy logs are detected by content, not by name).
   --launch SUBSTR  Restrict to the session whose "Launching Network Game" line
                    contains SUBSTR (default: the last launch in each file).
   --names          Comma-separated steamid=Name map for readable output.
                    A built-in map covers the 2026-07 test crew.
 
-Exit status is 0 on success, 1 if no drop lines were found in any file.
+And drops are not the symptom either.  Warping is.  BZLogger records every
+suspicious position update as "Possible Large Warp", but on a real session log
+91% of those lines are sub-metre corrections that no player could see, so the
+raw count (10,227 in one session) is meaningless.  This buckets them by actual
+distance and reports the visible ones per minute, alongside the governor's
+bandwidth range and any auto-kick / lag events.
+
+Exit status is 0 on success, 1 if nothing analysable was found in any file.
 """
 import argparse
+import math
 import re
 import sys
 from collections import defaultdict
@@ -34,6 +52,43 @@ DROP_RE = re.compile(
 )
 LAUNCH_RE = re.compile(r'Launching Network Game (.+?), Map (\S+)')
 START_RE = re.compile(r'Starting BattleZone 98 Redux')
+
+# V4.7 proxy counters, emitted every 10 s and once more at session end.
+REORDER_RE = re.compile(r'(session end: )?reorder_stats: (.+)$')
+# Fields inside that line are all "name=number" or "name(a=1 b=2)" groups.
+FIELD_RE = re.compile(r'([a-z_]+)=(\d+)')
+# max_hold_ms only exists from V4.7 on; matching it optionally means a
+# pre-V4.7 proxy log is still recognised as a proxy log and reported as such
+# rather than being mistaken for a BZLogger with no drops in it.
+CONFIG_RE = re.compile(
+    r'reorder: (enabled|DISABLED) max_window_ms=(\d+) min_window_ms=(\d+)'
+    r'(?: max_hold_ms=(\d+))?')
+
+# BZLogger position-correction records.  The vector is the distance the object
+# was moved by; most are noise, so callers filter by magnitude.
+WARP_RE = re.compile(
+    r'^([\d\-]+ [\d:.]+) Possible Large Warp: Distributed Object Updated Position By '
+    r'\(([-\d.eE+]+),([-\d.eE+]+),([-\d.eE+]+)\)'
+)
+# The governor announcing its current send budget.
+BANDWIDTH_RE = re.compile(r'Net: Bandwidth usage now set to (\d+), Interval (\d+) ms')
+# Host-side auto-kick machinery (see the AutoKick* entries in shared/net_globals.h).
+LAG_RE  = re.compile(r'Chat Message: (.+?) is lagging')
+UNLAG_RE = re.compile(r'Chat Message: (.+?) stopped lagging')
+KICK_RE = re.compile(r'Auto kicking player (.+?) due to (.+)')
+# A second drop class, distinct from the Type 0 stale discards.
+UNKNOWN_SRC_RE = re.compile(r"Dropping Packet \(Source IP doesn't match any known player\)")
+
+# Distance buckets in metres.  "visible" starts at 50 m: below that a correction
+# is inside the noise a player reads as ordinary movement.
+WARP_BUCKETS = (1.0, 10.0, 50.0, 200.0, 1000.0)
+WARP_VISIBLE_M = 50.0
+
+# Echo-rate thresholds for inferring outbound duplication, per minute per link.
+# Measured: ~8/min is ordinary engine resend noise, ~40/min is reachable under
+# heavy congestion with dup off, ~300/min is dup actually running.
+DUP_ECHO_RATE_PER_MIN = 150.0
+DUP_ECHO_RATE_SUSPECT = 60.0
 
 DEFAULT_NAMES = {
     'S76561198884003346': 'PiercingXX',
@@ -73,6 +128,145 @@ def session_slice(lines, launch_substr):
     return start_idx, end_idx, chosen[1], chosen[2]
 
 
+def parse_session_events(lines):
+    """Warp, governor, lag and kick events from a BZLogger slice."""
+    warps = []          # (timestamp, magnitude in metres)
+    bandwidth = []      # (timestamp, bytes/sec, interval ms)
+    lag = []            # (timestamp, kind, who)
+    unknown_src = 0
+
+    for ln in lines:
+        m = WARP_RE.match(ln)
+        if m:
+            x, y, z = float(m.group(2)), float(m.group(3)), float(m.group(4))
+            warps.append((parse_ts(m.group(1)), math.sqrt(x * x + y * y + z * z)))
+            continue
+        m = BANDWIDTH_RE.search(ln)
+        if m:
+            ts = ln.split(' ', 2)[:2]
+            bandwidth.append((' '.join(ts), int(m.group(1)), int(m.group(2))))
+            continue
+        for rx, kind in ((LAG_RE, 'lagging'), (UNLAG_RE, 'recovered'), (KICK_RE, 'KICKED')):
+            m = rx.search(ln)
+            if m:
+                lag.append((ln.split(' ', 1)[0], kind, m.group(1)))
+                break
+        if UNKNOWN_SRC_RE.search(ln):
+            unknown_src += 1
+
+    return {'warps': warps, 'bandwidth': bandwidth, 'lag': lag,
+            'unknown_src': unknown_src}
+
+
+def print_session_events(ev, dur_min):
+    warps = ev['warps']
+    if warps:
+        mags = sorted(m for _, m in warps)
+        n = len(mags)
+        visible = sum(1 for m in mags if m >= WARP_VISIBLE_M)
+        rate = (visible / dur_min) if dur_min else 0.0
+        print(f"   warps: {n} logged, {visible} visible (>={WARP_VISIBLE_M:.0f}m) "
+              f"= {rate:.1f}/min   median={mags[n // 2]:.1f}m "
+              f"p99={mags[min(n - 1, int(n * 0.99))]:.0f}m max={mags[-1]:.0f}m")
+        parts = []
+        prev = 0.0
+        for b in WARP_BUCKETS:
+            c = sum(1 for m in mags if prev <= m < b)
+            parts.append(f"<{b:g}m:{c}")
+            prev = b
+        parts.append(f">={WARP_BUCKETS[-1]:g}m:{sum(1 for m in mags if m >= WARP_BUCKETS[-1])}")
+        print("          " + "  ".join(parts))
+
+    bw = ev['bandwidth']
+    if bw:
+        rates = [r for _, r, _ in bw]
+        cold = sum(1 for r in rates if r == 4000)
+        note = ""
+        if cold:
+            note = (f"   <-- {cold} match start(s) still at the hardcoded 4000 cold start"
+                    " (BZ_GOV_START / MinBandwidth poke not in effect)")
+        print(f"   governor: {len(rates)} adjustments, {min(rates)} -> {max(rates)} B/s{note}")
+
+    for ts, kind, who in ev['lag']:
+        mark = "!!" if kind == 'KICKED' else " -"
+        print(f"   {mark} {ts} {who}: {kind}")
+
+    if ev['unknown_src']:
+        print(f"   dropped {ev['unknown_src']} packets from unrecognised source IPs")
+
+
+def parse_reorder_stats(lines):
+    """Return (config, last_periodic, session_end) from a proxy log.
+
+    Counters are cumulative, so the last line seen is the session total.  A
+    "session end:" line is the authoritative one when present (it is emitted
+    from closesocket, before the per-peer state is reset).
+    """
+    config = None
+    last = None
+    at_end = None
+    for ln in lines:
+        cm = CONFIG_RE.search(ln)
+        if cm:
+            config = {
+                'enabled': cm.group(1) == 'enabled',
+                'window_ms': int(cm.group(2)),
+                'min_ms': int(cm.group(3)),
+                'max_hold_ms': int(cm.group(4)) if cm.group(4) else None,
+            }
+            continue
+        m = REORDER_RE.search(ln)
+        if not m:
+            continue
+        fields = {k: int(v) for k, v in FIELD_RE.findall(m.group(2))}
+        last = fields
+        if m.group(1):
+            at_end = fields
+    return config, last, at_end
+
+
+def print_reorder_report(path, config, stats):
+    print(f"{path}   [proxy reorder counters]")
+    if config:
+        state = 'enabled' if config['enabled'] else 'DISABLED'
+        hold = (f"max_hold={config['max_hold_ms']}ms" if config['max_hold_ms'] is not None
+                else "max_hold=n/a (pre-V4.7)")
+        print(f"   config: {state}  window={config['window_ms']}ms "
+              f"floor={config['min_ms']}ms {hold}")
+    if not stats:
+        print("   (no reorder_stats lines — pre-V4.7 proxy, or reorder never ran)\n")
+        return
+
+    delivered = stats.get('delivered', 0)
+    in_order = stats.get('in_order', 0)
+    ordered_pct = (100.0 * in_order / delivered) if delivered else 0.0
+    print(f"   delivered={delivered}  in_order={in_order} ({ordered_pct:.1f}%)  "
+          f"forced={stats.get('forced', 0)}  evicted={stats.get('evicted', 0)}")
+    print(f"   dropped: stale={stats.get('stale', 0)} dup={stats.get('dup', 0)} "
+          f"reclaim={stats.get('reclaim', 0)}   "
+          f"bypass: short={stats.get('short', 0)} tblfull={stats.get('tblfull', 0)}")
+
+    # The numbers that say what the patch cost, not just what it caught.
+    hold_avg = stats.get('avg', 0)
+    hold_max = stats.get('max', 0)
+    print(f"   ADDED LATENCY: hold_ms avg={hold_avg} max={hold_max}")
+    notes = []
+    if stats.get('evicted', 0):
+        notes.append(f"{stats['evicted']} packets released out of order under "
+                     "storage pressure (raise BZ_REORDER_DEPTH)")
+    if stats.get('emsgsize', 0):
+        notes.append(f"{stats['emsgsize']} datagrams exceeded the drain buffer "
+                     "(raise kReorderMaxPktBytes)")
+    if stats.get('tblfull', 0):
+        notes.append(f"{stats['tblfull']} packets bypassed a full peer table")
+    if config and config['max_hold_ms'] is not None and hold_max > config['max_hold_ms'] + 20:
+        notes.append(f"hold_ms max={hold_max} exceeds the {config['max_hold_ms']}ms "
+                     "ceiling by more than scheduling jitter explains")
+    for n in notes:
+        print(f"   ! {n}")
+    print()
+
+
 def analyze_file(path, launch_substr, names):
     with open(path, errors='replace') as fh:
         lines = fh.read().splitlines()
@@ -90,10 +284,19 @@ def analyze_file(path, launch_substr, names):
         t = parse_ts(m.group(1))
         tmin = t if tmin is None else tmin
         tmax = t
+    events = parse_session_events(lines[start_idx:end_idx])
+
+    # Drops can be sparse; warps usually bracket the session better.
+    if events['warps']:
+        wt = [t for t, _ in events['warps']]
+        tmin = min(wt) if tmin is None else min(tmin, min(wt))
+        tmax = max(wt) if tmax is None else max(tmax, max(wt))
+
     dur_min = ((tmax - tmin).total_seconds() / 60.0) if tmin and tmax else 0.0
     return {
         'path': path, 'lobby': lobby, 'map': mapname,
         'dur_min': dur_min, 'stats': stats, 'names': names,
+        'events': events,
     }
 
 
@@ -104,18 +307,34 @@ def print_report(rep):
         hdr += f"   lobby={rep['lobby']} map={rep['map']} dur={rep['dur_min']:.1f}min"
     print(hdr)
     if not rep['stats']:
-        print("   (no drop lines in this session)\n")
+        print("   (no Type 0 drop lines in this session)")
+        print_session_events(rep['events'], rep['dur_min'])
+        print()
         return
     rows = sorted(rep['stats'].items(), key=lambda kv: -kv[1]['real'])
     dur = rep['dur_min'] or 0
     for cid, d in rows:
         name = names.get(cid, cid)
-        uniq = d['real'] // 2 if d['echo'] > 50 else d['real']
+        echo_rate = (d['echo'] / dur) if dur else 0.0
+        # Duplication is inferred from the echo rate, not a raw count: an 8
+        # minute game accumulates ~60 echoes from ordinary engine resends
+        # alone, so the old absolute >50 test flagged healthy sessions as
+        # duplicating and then halved their real counts on that basis.
+        # Measured baselines: ~8/min idle, up to ~40/min under heavy
+        # congestion without dup, ~300/min with dup actually on.
+        dup_on = echo_rate >= DUP_ECHO_RATE_PER_MIN
+        uniq = d['real'] // 2 if dup_on else d['real']
         rate = (uniq / dur) if dur else 0
-        dupflag = '  [sender dup ON]' if d['echo'] > 50 else ''
+        if dup_on:
+            flag = '  [sender dup ON: real counts halved]'
+        elif echo_rate >= DUP_ECHO_RATE_SUSPECT:
+            flag = '  [echo rate high - congestion or dup; check the sender]'
+        else:
+            flag = ''
         selfflag = '  [loopback self-echo]' if name and d['real'] == 0 and d['echo'] else ''
-        print(f"   from {name:<12} echo={d['echo']:<6} real={d['real']:<6} "
-              f"uniq~{uniq:<5} {rate:5.1f}/min{dupflag}{selfflag}")
+        print(f"   from {name:<12} echo={d['echo']:<6} ({echo_rate:5.1f}/min) "
+              f"real={d['real']:<6} uniq~{uniq:<5} {rate:6.1f}/min{flag}{selfflag}")
+    print_session_events(rep['events'], rep['dur_min'])
     print()
 
 
@@ -139,11 +358,21 @@ def main():
     found_any = False
     for path in args.logs:
         try:
-            rep = analyze_file(path, args.launch, names)
+            with open(path, errors='replace') as fh:
+                lines = fh.read().splitlines()
         except OSError as e:
             print(f"{path}: {e}", file=sys.stderr)
             continue
-        if rep['stats']:
+
+        # Proxy logs and BZLogger are told apart by content, not filename.
+        config, last, at_end = parse_reorder_stats(lines)
+        if config or last:
+            print_reorder_report(path, config, at_end or last)
+            found_any = found_any or bool(last)
+            continue
+
+        rep = analyze_file(path, args.launch, names)
+        if rep['stats'] or rep['events']['warps']:
             found_any = True
         print_report(rep)
 

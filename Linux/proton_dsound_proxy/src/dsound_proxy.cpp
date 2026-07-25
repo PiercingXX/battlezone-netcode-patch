@@ -10,7 +10,13 @@
 #include <cstdlib>
 #include <cctype>
 
+#include "reorder_core.h"
+#include "net_globals.h"
+#include "send_pace.h"
+
 namespace {
+
+using namespace bznet;
 
 constexpr wchar_t kLogFileName[] = L"dsound_proxy.log";
 wchar_t g_log_path[MAX_PATH] = L"dsound_proxy.log";
@@ -121,59 +127,26 @@ uint8_t *g_buffer_ring = nullptr;
 
 // ── Per-peer reorder buffer ──────────────────────────────────────────────────
 // Enabled by default.  Set BZ_REORDER=0 to disable.  WSARecvFrom packets are
-// held in a per-source priority queue ordered by sequence number and delivered
-// to the game in order.  BZ_REORDER_WINDOW_MS (default 45 ms) is the max time
-// a packet may be held before being forced out regardless of whether its
-// predecessor arrived.
+// held in a per-source queue ordered by sequence number and delivered to the
+// game in order.
 //
-// Sequence field location: u32le at payload byte offset 13, confirmed via
-// live binary capture analysis (resources/valid_capture_reorder_signal_only.csv).
-constexpr uint32_t kReorderSeqOffset   = 13;    // byte offset in payload
-constexpr uint32_t kReorderSeqMinPay   = 17;    // minimum payload length with seq field
-constexpr uint32_t kReorderDefaultMs   = 100;   // max hold window (ms); 45->100 cut drops ~65% in live A/B testing
-constexpr uint32_t kReorderMinMsDef    = 5;     // adaptive window floor (ms)
-constexpr uint32_t kReorderGrowPadMs   = 5;     // safety margin added on window growth
-constexpr uint32_t kReorderDecayMs     = 2000;  // quiet period before the window decays
-constexpr uint32_t kReorderDecayStepMs = 5;     // window shrink per decay step
-constexpr uint32_t kReorderSlotCap     = 8;     // max per-peer buffered packet slots
-constexpr uint32_t kReorderPeerCap     = 32;    // max distinct IPv4 sources
-constexpr uint32_t kReorderDrainCapDef = 96;    // default real WSARecvFrom calls per hook invocation
-constexpr uint32_t kReorderDrainCapMax = 128;   // hard cap for drain loop
-constexpr uint32_t kReorderMaxPktBytes = 1500;  // max UDP datagram size
-constexpr uint32_t kReorderWakeTickMs  = 10;    // wake-thread poll interval
-constexpr uint32_t kReorderWakeIdleMs  = 10;    // send wake only if game hasn't polled this long
-constexpr uint32_t kReorderWakeBurstCap = 8;    // max wakes without an intervening game poll
-
-struct ReorderSlot {
-    uint64_t    ts;                          // GetTickCount64() on arrival
-    uint32_t    seq;                         // BZRNet sequence number (payload[13] u32le)
-    uint32_t    len;                         // payload byte count
-    uint32_t    used;                        // 1 = slot is occupied
-    uint32_t    _pad;
-    sockaddr_in from;                        // source address
-    uint8_t     data[kReorderMaxPktBytes];   // full packet contents
-};
-
-struct PeerBuf {
-    uint64_t    key;            // (ipv4_raw << 16) | port_host_order; 0 = empty
-    uint32_t    seq_init;       // 1 once last_seq is valid
-    uint32_t    last_seq;       // last sequence number delivered to the game
-    uint32_t    filled;         // number of occupied slots
-    uint32_t    win_ms;         // adaptive hold window for this peer
-    uint64_t    last_adjust_ms; // last window grow/decay timestamp
-    ReorderSlot slots[kReorderSlotCap];
-};
-
+// The state machine itself lives in shared/reorder_core.h, shared verbatim with
+// the Windows winmm proxy: the two used to carry character-identical copies of
+// this logic, which meant every defect existed twice and every fix had to be
+// written twice.  It is covered by tests/reorder_test.cpp, which runs natively
+// with no game involved.
 static bool              g_reorder_enabled  = false;
-static bool              g_reorder_adapt    = true;    // BZ_REORDER_ADAPT=0 -> fixed window
-static uint32_t          g_reorder_ms       = kReorderDefaultMs;   // window ceiling
-static uint32_t          g_reorder_min_ms   = kReorderMinMsDef;    // adaptive floor
-static uint32_t          g_reorder_depth    = kReorderSlotCap;
-static uint32_t          g_reorder_peers    = kReorderPeerCap;
 static uint32_t          g_reorder_drain    = kReorderDrainCapDef;
-static PeerBuf           g_peers[kReorderPeerCap];    // zero-initialized (BSS)
+static ReorderCtx        g_rx;                        // zero-initialized (BSS)
 static CRITICAL_SECTION  g_reorder_cs       = {};
 static bool              g_reorder_cs_ready = false;
+
+// Periodic stats emission.  These counters are the point of V4.7: before them
+// every tuning decision was made blind, through the game's own drop counter,
+// which cannot see the latency this buffer adds.  BZ_REORDER_STATS=0 silences.
+static bool              g_reorder_stats    = true;
+static uint64_t          g_stats_last_ms    = 0;
+constexpr uint64_t       kReorderStatsMs    = 10000;
 
 // Wake helper: the reorder hook drains the kernel socket, so a game thread
 // sleeping in select()/WSAEventSelect() never sees the socket readable while
@@ -246,28 +219,25 @@ static const uint8_t     kGovSig[15] = {
     0x68, 0x48, 0xF4, 0xFF, 0xFF
 };
 
-// AutoKick threshold overrides (BZ_AUTOKICK_*, each 0 = leave the game's value).
-// The kick that ejects a "lagging" player is governed by four .data globals the
-// session parser reads from net.ini's [Net] section at match start (captured
-// 2026-07-04 from the decrypted image; monitor at 0x576c40):
-//   AutoKickStart 0x8e8d0c  grace period (ms) after a join before monitoring  (default 10000)
-//   AutoKickPing  0x8e8cf8  ping ceiling (ms); a tick above this is "bad"      (default 750)
-//   AutoKickLoss  0x8e8bfc  loss-count ceiling; a tick above this is "bad"     (default 25)
-//   AutoKickTime  0x8e8ce4  ms the connection must stay continuously bad       (default 15000)
-// A tick is bad when ping > AutoKickPing OR loss > AutoKickLoss; once bad for
-// AutoKickTime the host kicks the player.  Auto-kick is HOST-ENFORCED, so these
-// only bite when THIS machine hosts the session.  We data-poke the globals
-// (DRM-safe, no .text write) and re-assert every poll, so our value wins over
-// both the stock default and any net.ini value.  Version-gated on kGovSig.
-static uint32_t          g_ak_time          = 0;
-static uint32_t          g_ak_ping          = 0;
-static uint32_t          g_ak_loss          = 0;
-static uint32_t          g_ak_start         = 0;
-static volatile LONG     g_ak_stop          = 0;
-static uint32_t *const   kAkStartAddr       = reinterpret_cast<uint32_t *>(0x008e8d0c);
-static uint32_t *const   kAkPingAddr        = reinterpret_cast<uint32_t *>(0x008e8cf8);
-static uint32_t *const   kAkLossAddr        = reinterpret_cast<uint32_t *>(0x008e8bfc);
-static uint32_t *const   kAkTimeAddr        = reinterpret_cast<uint32_t *>(0x008e8ce4);
+// Outbound burst measurement, and optional smoothing (shared/send_pace.h).
+// The measurement is always on: nothing in this project had ever looked at what
+// the local machine puts on the wire, even though a peer's retransmit flood is
+// the failure that has actually ended matches.  Smoothing is opt-in via
+// BZ_SEND_PACE=<bytes/sec> because it trades send latency for burst shape and
+// there is no evidence yet that this machine needs it.
+static PaceCtx           g_tx;
+static CRITICAL_SECTION  g_pace_cs          = {};
+static bool              g_pace_cs_ready    = false;
+static volatile LONG     g_pace_stop        = 0;
+static uint32_t          g_pace_rate        = 0;   // 0 = measure only
+static uint32_t          g_pace_max_ms      = kPaceMaxDelayDef;
+
+// The game's whole [Net] tunable block, written directly into .data.  Table,
+// addresses, presets and the sanity gate live in shared/net_globals.h; this is
+// just the state the poll thread owns.  Version-gated on kGovSig, host-enforced
+// for the auto-kick subset, effective on every machine for the governor subset.
+static NetGlobal         g_net_tbl[kNetGlobalCount];
+static volatile LONG     g_net_stop         = 0;
 
 struct DupEntry {
     SOCKET           sock;
@@ -429,6 +399,82 @@ static void dup_purge_socket(SOCKET s) {
     LeaveCriticalSection(&g_dup_cs);
 }
 
+// ── Send pacer ───────────────────────────────────────────────────────────────
+// Sends run while g_pace_cs is held.  The syscall under a lock is deliberate:
+// it is what guarantees queued packets leave in the order the game produced
+// them, and BZ sends from a single thread so there is nothing to contend with.
+
+// Flush everything queued, in order, ignoring due times.  Caller holds g_pace_cs.
+static void pace_flush_locked() {
+    PaceEntry e;
+    while (pace_pop_any(&g_tx, &e)) {
+        if (g_real_sendto != nullptr) {
+            g_real_sendto(static_cast<SOCKET>(e.sock),
+                          reinterpret_cast<const char *>(e.data),
+                          static_cast<int>(e.len), 0,
+                          reinterpret_cast<const sockaddr *>(e.to), e.tolen);
+        }
+    }
+}
+
+// Offer a datagram to the pacer.  Returns true when the pacer has taken
+// ownership and the caller must report success WITHOUT sending; false when the
+// caller should perform the real send itself (which is always the case while
+// pacing is off, so the measurement costs a lock and nothing else).
+static bool pace_take(SOCKET s, const uint8_t *data, uint32_t len,
+                      const sockaddr *to, int tolen) {
+    if (!g_pace_cs_ready || g_real_sendto == nullptr || data == nullptr
+        || to == nullptr || tolen <= 0 || len == 0 || len > kReorderMaxPktBytes
+        || static_cast<uint32_t>(tolen) > kPaceAddrBytes) {
+        return false;
+    }
+
+    const uint64_t now = GetTickCount64();
+    uint64_t due = 0;
+
+    EnterCriticalSection(&g_pace_cs);
+    PaceDecision d = pace_admit(&g_tx, len, now, &due);
+    if (d == kPaceQueued) {
+        if (pace_enqueue(&g_tx, static_cast<uintptr_t>(s), to, tolen, data, len, due)) {
+            LeaveCriticalSection(&g_pace_cs);
+            return true;
+        }
+        d = kPaceFlushThenSend;   // could not store it; give up on shaping
+    }
+    if (d == kPaceFlushThenSend) {
+        pace_flush_locked();
+    }
+    LeaveCriticalSection(&g_pace_cs);
+    return false;
+}
+
+// Releases queued datagrams as they come due, and closes measurement windows
+// so a burst that ends the traffic still gets counted.
+static DWORD WINAPI send_pace_thread(LPVOID) {
+    while (InterlockedCompareExchange(&g_pace_stop, 0, 0) == 0) {
+        // While pacing is off there is nothing to release, so tick lazily —
+        // just often enough to roll the one-second stats window.
+        Sleep(g_pace_rate ? kPaceTickMs : 250);
+        if (!g_pace_cs_ready) {
+            continue;
+        }
+        const uint64_t now = GetTickCount64();
+        EnterCriticalSection(&g_pace_cs);
+        pace_tick(&g_tx, now);
+        PaceEntry e;
+        while (pace_pop_due(&g_tx, now, &e)) {
+            if (g_real_sendto != nullptr) {
+                g_real_sendto(static_cast<SOCKET>(e.sock),
+                              reinterpret_cast<const char *>(e.data),
+                              static_cast<int>(e.len), 0,
+                              reinterpret_cast<const sockaddr *>(e.to), e.tolen);
+            }
+        }
+        LeaveCriticalSection(&g_pace_cs);
+    }
+    return 0;
+}
+
 // Pacer thread: transmits queued duplicates once their delay elapses.
 static DWORD WINAPI dup_pacer_thread(LPVOID) {
     while (InterlockedCompareExchange(&g_dup_stop, 0, 0) == 0) {
@@ -454,14 +500,6 @@ static DWORD WINAPI dup_pacer_thread(LPVOID) {
         }
     }
     return 0;
-}
-
-static inline int32_t seq_cmp_u32(uint32_t a, uint32_t b) {
-    return static_cast<int32_t>(a - b);
-}
-
-static inline bool seq_ahead_or_equal(uint32_t seq, uint32_t want) {
-    return seq_cmp_u32(seq, want) >= 0;
 }
 
 void init_buffer_paths() {
@@ -967,16 +1005,42 @@ int WSAAPI hooked_closesocket(SOCKET s) {
     log_line("hooked_closesocket: sid=%d sock=0x%08lx rc=%d wsa=%d", sid, static_cast<unsigned long>(s), rc, static_cast<int>(WSAGetLastError()));
     forget_socket_id(s);
     // Reset per-peer reorder state.  BZ uses one UDP socket for all P2P; closing
-    // it ends the session, so all buffered packets are now stale.
+    // it ends the session, so all buffered packets are now stale.  Dump the
+    // session's counters first — this is the summary line to compare between
+    // A/B runs, and after the reset it would be lost.
     if (g_reorder_cs_ready) {
+        char line[1024];
+        bool have_stats = false;
         EnterCriticalSection(&g_reorder_cs);
-        std::memset(g_peers, 0, sizeof(g_peers));
-        if (s == g_reorder_sock) {
+        bool was_reorder_sock = (s == g_reorder_sock);
+        if (was_reorder_sock && g_reorder_stats) {
+            have_stats = reorder_format_stats(&g_rx, line, sizeof(line)) > 0;
+        }
+        reorder_reset(&g_rx);
+        if (was_reorder_sock) {
             g_reorder_sock = INVALID_SOCKET;
         }
         LeaveCriticalSection(&g_reorder_cs);
+        if (have_stats) {
+            log_line("session end: %s", line);
+        }
     }
     dup_purge_socket(s);
+    if (g_pace_cs_ready) {
+        char pline[512];
+        bool have_pace = false;
+        EnterCriticalSection(&g_pace_cs);
+        pace_flush_locked();                    // do not strand the game's tail
+        pace_purge_socket(&g_tx, static_cast<uintptr_t>(s));
+        if (g_reorder_stats) {
+            pace_tick(&g_tx, GetTickCount64());
+            have_pace = pace_format_stats(&g_tx, pline, sizeof(pline)) > 0;
+        }
+        LeaveCriticalSection(&g_pace_cs);
+        if (have_pace) {
+            log_line("session end: %s", pline);
+        }
+    }
     return rc;
 }
 
@@ -1000,180 +1064,75 @@ static uint32_t scatter_copy(LPWSABUF bufs, DWORD nbufs, const uint8_t *src, uin
     return done;
 }
 
-// Look up or create the PeerBuf for addr.  Caller must hold g_reorder_cs.
-static PeerBuf *reorder_get_peer(const sockaddr_in &addr) {
-    uint64_t k = (static_cast<uint64_t>(static_cast<uint32_t>(addr.sin_addr.S_un.S_addr)) << 16)
-                 | static_cast<uint64_t>(ntohs(addr.sin_port));
-    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
-        if (g_peers[i].key == k) {
-            return &g_peers[i];
-        }
+// Hand one datagram to the caller's WSARecvFrom arguments.  Every exit from
+// the reorder path goes through here: buffered release, short/non-IPv4
+// pass-through, peer-table-full fallback, and eviction overflow.  Must be
+// called with g_reorder_cs released — buffer_log_event takes its own lock.
+static int deliver_to_caller(SOCKET s,
+                             LPWSABUF buffers, DWORD buffer_count,
+                             LPDWORD bytes_received, LPDWORD inout_flags,
+                             sockaddr *from, LPINT fromlen,
+                             const sockaddr_in &src,
+                             const uint8_t *data, uint32_t len) {
+    uint32_t copied = scatter_copy(buffers, buffer_count, data, len);
+    if (bytes_received != nullptr) *bytes_received = copied;
+    if (inout_flags != nullptr) *inout_flags = 0;
+    if (from != nullptr && fromlen != nullptr) {
+        int sa = (*fromlen < static_cast<int>(sizeof(src)))
+                 ? *fromlen : static_cast<int>(sizeof(src));
+        if (sa > 0) std::memcpy(from, &src, static_cast<size_t>(sa));
+        *fromlen = static_cast<int>(sizeof(src));
     }
-    for (uint32_t i = 0; i < g_reorder_peers; ++i) {
-        if (g_peers[i].key == 0) {
-            std::memset(&g_peers[i], 0, sizeof(g_peers[i]));
-            g_peers[i].key = k;
-            g_peers[i].win_ms = g_reorder_adapt ? g_reorder_min_ms : g_reorder_ms;
-            g_peers[i].last_adjust_ms = GetTickCount64();
-            return &g_peers[i];
+
+    if (g_buffer_log_enabled) {
+        uint32_t requested = 0;
+        for (DWORD i = 0; i < buffer_count && buffers != nullptr; ++i) {
+            requested += buffers[i].len;
         }
+        uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
+        const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
+                             ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
+        buffer_log_event(kEventTypeWSARecvFrom, s,
+                         reinterpret_cast<const sockaddr *>(&src),
+                         0, requested, copied, 0u, pay, pay_len);
     }
-    return nullptr; // peer table full
+
+    WSASetLastError(0);
+    return 0;
 }
 
-// Adapt the peer's hold window based on the arriving packet, BEFORE insertion.
-// Grow on evidence that reordering actually happens on this link:
-//   - a packet we already skipped past arrives late (window was too small), or
-//   - the awaited in-order successor arrives while later packets are held
-//     (the wait it resolved tells us how big the window needs to be).
-// True loss never grows the window: a lost packet simply never arrives.
-// Caller must hold g_reorder_cs.
-static void reorder_adapt_on_arrival(PeerBuf *pb, uint32_t seq, uint64_t now_ms) {
-    if (!g_reorder_adapt || !pb->seq_init) {
+// Emit the reorder counters every kReorderStatsMs.  Formatting is pure
+// snprintf so it is cheap enough to do under the lock; the file write is not,
+// so log_line runs after the lock is released.
+static void maybe_log_reorder_stats(uint64_t now_ms) {
+    if (!g_reorder_stats || !g_reorder_cs_ready) {
         return;
     }
-
-    int32_t cmp = seq_cmp_u32(seq, pb->last_seq);
-    if (cmp == 0) {
-        // Exact duplicate of the last delivered packet (link-layer retransmit,
-        // common on WiFi): not reorder evidence, must not grow the window.
+    char line[1024];
+    bool due = false;
+    EnterCriticalSection(&g_reorder_cs);
+    if (now_ms - g_stats_last_ms >= kReorderStatsMs) {
+        g_stats_last_ms = now_ms;
+        due = reorder_format_stats(&g_rx, line, sizeof(line)) > 0;
+    }
+    LeaveCriticalSection(&g_reorder_cs);
+    if (!due) {
         return;
     }
-    if (cmp < 0) {
-        // Late/backward arrival: we released its successors too early.
-        uint32_t grown = pb->win_ms * 2 + kReorderGrowPadMs;
-        pb->win_ms = (grown > g_reorder_ms) ? g_reorder_ms : grown;
-        pb->last_adjust_ms = now_ms;
-        return;
-    }
+    log_line("%s", line);
 
-    if (seq == pb->last_seq + 1 && pb->filled > 0) {
-        // Gap just closed: measure how long the held packets waited.
-        uint64_t oldest_ts = now_ms;
-        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-            if (pb->slots[i].used && pb->slots[i].ts < oldest_ts) {
-                oldest_ts = pb->slots[i].ts;
-            }
-        }
-        uint32_t waited = static_cast<uint32_t>(now_ms - oldest_ts) + kReorderGrowPadMs;
-        if (waited > g_reorder_ms) {
-            waited = g_reorder_ms;
-        }
-        if (waited > pb->win_ms) {
-            pb->win_ms = waited;
-            pb->last_adjust_ms = now_ms;
+    // Outbound counters share the cadence: an A/B is only readable when the
+    // receive and send sides are timestamped together.
+    if (g_pace_cs_ready) {
+        char pline[512];
+        EnterCriticalSection(&g_pace_cs);
+        pace_tick(&g_tx, now_ms);
+        const bool ok = pace_format_stats(&g_tx, pline, sizeof(pline)) > 0;
+        LeaveCriticalSection(&g_pace_cs);
+        if (ok) {
+            log_line("%s", pline);
         }
     }
-}
-
-// Shrink the window back toward the floor after a quiet period with no
-// reorder evidence.  Called on delivery.  Caller must hold g_reorder_cs.
-static void reorder_decay(PeerBuf *pb, uint64_t now_ms) {
-    if (!g_reorder_adapt || now_ms - pb->last_adjust_ms < kReorderDecayMs) {
-        return;
-    }
-    pb->win_ms = (pb->win_ms > g_reorder_min_ms + kReorderDecayStepMs)
-                 ? pb->win_ms - kReorderDecayStepMs : g_reorder_min_ms;
-    pb->last_adjust_ms = now_ms;
-}
-
-// Insert a received packet.  Duplicates are silently dropped.  When all slots
-// are full the oldest packet is evicted to make room.  Caller must hold g_reorder_cs.
-static void reorder_insert(PeerBuf *pb, uint32_t seq, uint64_t ts,
-                           const sockaddr_in &from, const uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-        if (pb->slots[i].used && pb->slots[i].seq == seq) {
-            return; // duplicate
-        }
-    }
-    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-        if (!pb->slots[i].used) {
-            pb->slots[i].used = 1;
-            pb->slots[i].seq  = seq;
-            pb->slots[i].ts   = ts;
-            pb->slots[i].from = from;
-            uint32_t n = (len > kReorderMaxPktBytes) ? kReorderMaxPktBytes : len;
-            std::memcpy(pb->slots[i].data, data, n);
-            pb->slots[i].len = n;
-            ++pb->filled;
-            return;
-        }
-    }
-    // All slots occupied: evict the oldest.
-    uint32_t oix = 0;
-    for (uint32_t i = 1; i < g_reorder_depth; ++i) {
-        if (pb->slots[i].used && pb->slots[i].ts < pb->slots[oix].ts) {
-            oix = i;
-        }
-    }
-    pb->slots[oix].used = 1;
-    pb->slots[oix].seq  = seq;
-    pb->slots[oix].ts   = ts;
-    pb->slots[oix].from = from;
-    uint32_t n = (len > kReorderMaxPktBytes) ? kReorderMaxPktBytes : len;
-    std::memcpy(pb->slots[oix].data, data, n);
-    pb->slots[oix].len = n;
-    // filled count unchanged: one evicted, one inserted
-}
-
-// Find the best slot to deliver.  Prefers the exact in-order successor of
-// last_seq, falling back to the lowest-seq packet once it has aged out.
-// Returns slot index or -1 if nothing is ready.  Caller must hold g_reorder_cs.
-static int reorder_pick(PeerBuf *pb, uint64_t now_ms) {
-    if (pb->filled == 0) {
-        return -1;
-    }
-    if (pb->seq_init) {
-        uint32_t want = pb->last_seq + 1;
-        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-            if (pb->slots[i].used && pb->slots[i].seq == want) {
-                return static_cast<int>(i);
-            }
-        }
-
-        int best_ahead = -1;
-        uint32_t best_dist = 0;
-        int best_oldest = -1;
-        for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-            if (!pb->slots[i].used) {
-                continue;
-            }
-            if (now_ms < pb->slots[i].ts || (now_ms - pb->slots[i].ts) < pb->win_ms) {
-                continue;
-            }
-
-            if (best_oldest < 0 || pb->slots[i].ts < pb->slots[best_oldest].ts) {
-                best_oldest = static_cast<int>(i);
-            }
-
-            if (seq_ahead_or_equal(pb->slots[i].seq, want)) {
-                uint32_t dist = pb->slots[i].seq - want;
-                if (best_ahead < 0 || dist < best_dist) {
-                    best_ahead = static_cast<int>(i);
-                    best_dist = dist;
-                }
-            }
-        }
-        if (best_ahead >= 0) {
-            return best_ahead;
-        }
-        if (best_oldest >= 0) {
-            return best_oldest;
-        }
-        return -1;
-    }
-
-    // On first packet for a peer, deliver the oldest buffered slot immediately.
-    int oldest = -1;
-    for (uint32_t i = 0; i < g_reorder_depth; ++i) {
-        if (!pb->slots[i].used) {
-            continue;
-        }
-        if (oldest < 0 || pb->slots[i].ts < pb->slots[oldest].ts) {
-            oldest = static_cast<int>(i);
-        }
-    }
-    return oldest;
 }
 
 int WSAAPI hooked_recvfrom(SOCKET s, char *buf, int len, int flags, sockaddr *from, int *fromlen) {
@@ -1262,10 +1221,16 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
 
     // ── Reorder-buffered synchronous path ────────────────────────────────────
     //
-    // Strategy: drain all available UDP datagrams from the socket into per-peer
-    // priority queues, then return the best in-order candidate to the caller.
-    // Packets that are still waiting for their predecessor are held up to
-    // g_reorder_ms milliseconds before being forced out.
+    // Drain the datagrams the kernel already has into per-peer queues, then
+    // return the best in-order candidate.  Packets still waiting for their
+    // predecessor are held up to the peer's adaptive window (bounded by
+    // g_rx.max_hold_ms) before being released regardless.
+    //
+    // The drain stops as soon as any peer's ring fills.  Before V4.7 it pulled
+    // up to 96 datagrams into 8-slot rings and *discarded* the overflow, so
+    // under exactly the bursts this buffer is meant to help it destroyed
+    // packets the vanilla game would have received.  Undrained datagrams now
+    // simply stay in the 4 MB kernel receive buffer, in order, costing nothing.
 
     uint8_t drain_buf[kReorderMaxPktBytes];
     WSABUF  drain_wsabuf;
@@ -1282,7 +1247,12 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
         g_last_recv_call_ms = GetTickCount64();
     }
 
+    uint32_t drained = 0;
     for (uint32_t di = 0; di < g_reorder_drain; ++di) {
+        if (reorder_drain_saturated(&g_rx)) {
+            break;  // no room left; deliver what we have and come back
+        }
+
         DWORD       drain_bytes  = 0;
         DWORD       drain_flags  = 0;
         sockaddr_in drain_src    = {};
@@ -1291,9 +1261,23 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
         int drc = g_real_wsarecvfrom(s, &drain_wsabuf, 1, &drain_bytes, &drain_flags,
                                      reinterpret_cast<sockaddr *>(&drain_src), &drain_srclen,
                                      nullptr, nullptr);
-        if (drc != 0 || drain_bytes == 0) {
-            break; // socket drained (WSAEWOULDBLOCK) or error
+        if (drc != 0) {
+            if (static_cast<int>(WSAGetLastError()) == WSAEMSGSIZE) {
+                // Datagram larger than our drain buffer.  The stack has already
+                // consumed and truncated it, so treating this as "socket empty"
+                // would strand everything queued behind it.  Count it instead
+                // and keep draining; a non-zero emsgsize in the stats means
+                // kReorderMaxPktBytes is too small for this game's traffic.
+                ++drained;
+                g_rx.stats.emsgsize++;
+                continue;
+            }
+            break;  // socket drained (WSAEWOULDBLOCK) or a real error
         }
+        if (drain_bytes == 0) {
+            break;
+        }
+        ++drained;
 
         // Discard our own wake datagrams (see wake thread): they exist only
         // to mark the socket readable and must never reach the game.
@@ -1305,127 +1289,75 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
         // Packets too short for a sequence field, or from non-IPv4 sources,
         // cannot be reordered: deliver the first such packet immediately.
         if (drain_src.sin_family != AF_INET || drain_bytes < kReorderSeqMinPay) {
-            uint32_t copied = scatter_copy(buffers, buffer_count, drain_buf, drain_bytes);
-            if (bytes_received != nullptr) *bytes_received = copied;
-            if (inout_flags != nullptr) *inout_flags = 0;
-            if (from != nullptr && fromlen != nullptr) {
-                int sa = (*fromlen < drain_srclen) ? *fromlen : drain_srclen;
-                if (sa > 0) std::memcpy(from, &drain_src, static_cast<size_t>(sa));
-                *fromlen = drain_srclen;
-            }
+            g_rx.stats.bypass_short++;
             LeaveCriticalSection(&g_reorder_cs);
-            if (g_buffer_log_enabled) {
-                uint32_t requested = 0;
-                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
-                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
-                const uint8_t *pay = (pay_len > 0 && buffers[0].buf != nullptr)
-                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
-                buffer_log_event(kEventTypeWSARecvFrom, s,
-                                 reinterpret_cast<const sockaddr *>(&drain_src),
-                                 0, requested, copied, 0u, pay, pay_len);
-            }
-            WSASetLastError(0);
-            return 0;
+            return deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
+                                     from, fromlen, drain_src, drain_buf, drain_bytes);
         }
 
         uint32_t seq = 0;
         std::memcpy(&seq, drain_buf + kReorderSeqOffset, sizeof(seq));
 
-        PeerBuf *pb = reorder_get_peer(drain_src);
+        uint64_t arrival_ms = GetTickCount64();
+        PeerBuf *pb = reorder_get_peer(&g_rx, drain_src, arrival_ms);
         if (pb == nullptr) {
-            // Peer table is full: deliver this packet immediately (fallback).
-            uint32_t copied = scatter_copy(buffers, buffer_count, drain_buf, drain_bytes);
-            if (bytes_received != nullptr) *bytes_received = copied;
-            if (inout_flags != nullptr) *inout_flags = 0;
-            if (from != nullptr && fromlen != nullptr) {
-                int sa = (*fromlen < drain_srclen) ? *fromlen : drain_srclen;
-                if (sa > 0) std::memcpy(from, &drain_src, static_cast<size_t>(sa));
-                *fromlen = drain_srclen;
-            }
+            // Every peer entry is live and none is idle enough to reclaim:
+            // pass this packet straight through rather than buffering it.
+            g_rx.stats.bypass_table_full++;
             LeaveCriticalSection(&g_reorder_cs);
-            if (g_buffer_log_enabled) {
-                uint32_t requested = 0;
-                for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
-                uint16_t pay_len = static_cast<uint16_t>((copied < g_buffer_payload_bytes) ? copied : g_buffer_payload_bytes);
-                const uint8_t *pay = (pay_len > 0 && buffers[0].buf != nullptr)
-                                     ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
-                buffer_log_event(kEventTypeWSARecvFrom, s,
-                                 reinterpret_cast<const sockaddr *>(&drain_src),
-                                 0, requested, copied, 0u, pay, pay_len);
-            }
-            WSASetLastError(0);
-            return 0;
+            return deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
+                                     from, fromlen, drain_src, drain_buf, drain_bytes);
         }
 
-        uint64_t arrival_ms = GetTickCount64();
-        reorder_adapt_on_arrival(pb, seq, arrival_ms);
-        reorder_insert(pb, seq, arrival_ms, drain_src, drain_buf, drain_bytes);
+        reorder_adapt_on_arrival(&g_rx, pb, seq, arrival_ms);
+
+        ReorderSlot evicted;
+        InsertResult ins = reorder_insert(&g_rx, pb, seq, arrival_ms, drain_src,
+                                          drain_buf, drain_bytes, &evicted);
+
         // This socket demonstrably carries reorderable traffic: it is the one
         // the wake thread should target, and its polls reset the wake budget.
         g_reorder_sock = s;
         g_last_recv_call_ms = arrival_ms;
+
+        if (ins == kInsertEvicted) {
+            // Ring was full: the displaced packet goes to the game now rather
+            // than being dropped.  Out of order beats not delivered at all.
+            reorder_note_delivery(&g_rx, pb, evicted.seq, evicted.ts, arrival_ms, kDeliverEvicted);
+            if (drained > g_rx.stats.max_drain_depth) {
+                g_rx.stats.max_drain_depth = drained;
+            }
+            LeaveCriticalSection(&g_reorder_cs);
+            return deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
+                                     from, fromlen, evicted.from, evicted.data, evicted.len);
+        }
     }
 
-    // Scan the peer table for the first packet that is ready to deliver.
+    if (drained > g_rx.stats.max_drain_depth) {
+        g_rx.stats.max_drain_depth = drained;
+    }
+
     uint64_t now_ms = GetTickCount64();
-    int best_pi = -1;
-    int best_si = -1;
-    for (uint32_t pi = 0; pi < g_reorder_peers; ++pi) {
-        if (g_peers[pi].key == 0) {
-            continue;
-        }
-        int si = reorder_pick(&g_peers[pi], now_ms);
-        if (si >= 0) {
-            best_pi = pi;
-            best_si = si;
-            break;
-        }
-    }
-
-    if (best_pi < 0) {
+    uint32_t best_pi = 0;
+    int      best_si = -1;
+    int      kind    = kDeliverInOrder;
+    if (!reorder_next_ready(&g_rx, now_ms, &best_pi, &best_si, &kind)) {
         // Nothing is ready yet: tell the game the socket is empty for now.
         LeaveCriticalSection(&g_reorder_cs);
+        maybe_log_reorder_stats(now_ms);
         WSASetLastError(WSAEWOULDBLOCK);
         return SOCKET_ERROR;
     }
 
-    // Deliver the chosen packet to the caller.
-    PeerBuf     *pb  = &g_peers[best_pi];
-    ReorderSlot *pkt = &pb->slots[best_si];
-
-    uint32_t    delivered      = scatter_copy(buffers, buffer_count, pkt->data, pkt->len);
-    sockaddr_in deliver_from   = pkt->from;
-
-    if (bytes_received != nullptr) *bytes_received = delivered;
-    if (inout_flags != nullptr) *inout_flags = 0;
-    if (from != nullptr && fromlen != nullptr) {
-        int sa = (*fromlen < static_cast<int>(sizeof(pkt->from)))
-                 ? *fromlen : static_cast<int>(sizeof(pkt->from));
-        if (sa > 0) std::memcpy(from, &pkt->from, static_cast<size_t>(sa));
-        *fromlen = static_cast<int>(sizeof(pkt->from));
-    }
-
-    pb->last_seq = pkt->seq;
-    pb->seq_init = 1;
-    pkt->used    = 0;
-    if (pb->filled > 0) --pb->filled;
-    reorder_decay(pb, now_ms);
+    ReorderSlot pkt;
+    reorder_take(&g_rx, &g_rx.tbl[best_pi], best_si, now_ms, kind, &pkt);
 
     LeaveCriticalSection(&g_reorder_cs);
 
-    if (g_buffer_log_enabled) {
-        uint32_t requested = 0;
-        for (DWORD i = 0; i < buffer_count; ++i) requested += buffers[i].len;
-        uint16_t pay_len = static_cast<uint16_t>((delivered < g_buffer_payload_bytes) ? delivered : g_buffer_payload_bytes);
-        const uint8_t *pay = (pay_len > 0 && buffers != nullptr && buffers[0].buf != nullptr)
-                             ? reinterpret_cast<const uint8_t *>(buffers[0].buf) : nullptr;
-        buffer_log_event(kEventTypeWSARecvFrom, s,
-                         reinterpret_cast<const sockaddr *>(&deliver_from),
-                         0, requested, delivered, 0u, pay, pay_len);
-    }
-
-    WSASetLastError(0);
-    return 0;
+    int rc = deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
+                               from, fromlen, pkt.from, pkt.data, pkt.len);
+    maybe_log_reorder_stats(now_ms);
+    return rc;
 }
 
 int WSAAPI hooked_ioctlsocket(SOCKET s, long cmd, u_long *argp) {
@@ -1507,12 +1439,25 @@ int WSAAPI hooked_sendto(SOCKET s, const char *buf, int len, int flags, const so
         return SOCKET_ERROR;
     }
 
-    int rc = g_real_sendto(s, buf, len, flags, to, tolen);
+    // Measure (always) and optionally pace.  When the pacer takes ownership the
+    // game is told the send succeeded, which is what a UDP send means anyway:
+    // handed off, no delivery promise.
+    int  rc;
+    bool paced = (flags == 0 && len > 0
+                  && pace_take(s, reinterpret_cast<const uint8_t *>(buf),
+                               static_cast<uint32_t>(len), to, tolen));
+    if (paced) {
+        rc = len;
+    } else {
+        rc = g_real_sendto(s, buf, len, flags, to, tolen);
+    }
 
     // Duplicate only IPv4 datagrams large enough to carry a BZRNet sequence
     // field: control/wake packets stay single-shot.  The first call's result
     // and error state are what the game sees.
-    if (g_send_dup && rc >= 0 && buf != nullptr && to != nullptr
+    // Skip duplication when the pacer owns the packet: the original has not
+    // left yet, so a copy sent now would arrive first and be seen as a reorder.
+    if (g_send_dup && !paced && rc >= 0 && buf != nullptr && to != nullptr
         && to->sa_family == AF_INET && len >= static_cast<int>(kReorderSeqMinPay)
         && !dup_is_loopback(to)) {
         int wsa = static_cast<int>(WSAGetLastError());
@@ -1542,8 +1487,41 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
         return SOCKET_ERROR;
     }
 
-    int rc = g_real_wsasendto(s, buffers, buffer_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
-    int wsa = static_cast<int>(WSAGetLastError());
+    // Measure (always) and optionally pace.  Only the synchronous path: an
+    // overlapped send is the caller's to complete, and taking ownership of one
+    // would mean completing its OVERLAPPED ourselves — the same class of
+    // mistake that froze the game on the receive side in V4.1.
+    int rc  = 0;
+    int wsa = 0;
+    bool paced = false;
+    if (overlapped == nullptr && completion_routine == nullptr && flags == 0
+        && to != nullptr && buffers != nullptr && buffer_count > 0) {
+        uint8_t  flat[kReorderMaxPktBytes];
+        uint32_t total = 0;
+        bool fits = true;
+        for (DWORD i = 0; i < buffer_count; ++i) {
+            if (buffers[i].buf == nullptr || buffers[i].len == 0) {
+                continue;
+            }
+            if (total + buffers[i].len > kReorderMaxPktBytes) {
+                fits = false;
+                break;
+            }
+            std::memcpy(flat + total, buffers[i].buf, buffers[i].len);
+            total += buffers[i].len;
+        }
+        if (fits && total > 0 && pace_take(s, flat, total, to, tolen)) {
+            if (bytes_sent != nullptr) {
+                *bytes_sent = total;
+            }
+            paced = true;
+        }
+    }
+
+    if (!paced) {
+        rc = g_real_wsasendto(s, buffers, buffer_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
+        wsa = static_cast<int>(WSAGetLastError());
+    }
 
     // Duplicate only IPv4 datagrams large enough to carry a BZRNet sequence
     // field.  The duplicate is a separate synchronous send from a flat copy,
@@ -2206,22 +2184,25 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
     return 0;
 }
 
-// Relax the host's auto-kick thresholds to the BZ_AUTOKICK_* values.
+// Write the game's [Net] tunables straight into .data.
 //
-// Same DRM-safe strategy as governor_patch_thread: we never touch .text (that
-// trips SteamStub's code-integrity check).  The four thresholds live in .data
-// globals which carry no integrity check, so we overwrite them with aligned
-// 32-bit stores (atomic on x86).  The session parser rewrites them at every
-// match start (from net.ini or the stock default), so we re-assert on a poll
-// loop — within one tick of any match starting, our value wins.  We confirm the
-// game build via the unique kGovSig scan before trusting the fixed addresses;
-// if the signature is absent or ambiguous we do nothing.  Host-enforced: this
-// only affects kicks when the local machine is the session host.
-DWORD WINAPI autokick_patch_thread(LPVOID) {
+// Same DRM-safe strategy as governor_patch_thread and for the same reason: a
+// `.text` rewrite was verified to apply and then trip SteamStub's integrity
+// check, while `.data` carries no such check and aligned 32-bit stores are
+// atomic on x86.  The session parser rewrites these globals at every match
+// start (from net.ini, or the stock default when net.ini is found-but-not-
+// applied, which is the observed behaviour), so we re-assert on a poll loop:
+// within one tick of any match starting, our values win.
+//
+// The build is confirmed via the unique kGovSig scan before the fixed
+// addresses are trusted, and each entry is sanity-gated against a plausible
+// range in net_globals.h — a wrong address is vetoed and logged rather than
+// written blind.
+DWORD WINAPI net_patch_thread(LPVOID) {
     if (!is_target_main_module()) {
         return 0;
     }
-    if (g_ak_time == 0 && g_ak_ping == 0 && g_ak_loss == 0 && g_ak_start == 0) {
+    if (!net_globals_any(g_net_tbl, kNetGlobalCount)) {
         return 0;
     }
     // Let SteamStub decrypt .text first (well before any match starts).
@@ -2230,7 +2211,7 @@ DWORD WINAPI autokick_patch_thread(LPVOID) {
     BYTE *text = nullptr;
     size_t text_size = 0;
     if (!find_section(".text", &text, &text_size)) {
-        log_line("autokick_patch: .text section not found");
+        log_line("net_patch: .text section not found");
         return 0;
     }
 
@@ -2241,40 +2222,42 @@ DWORD WINAPI autokick_patch_thread(LPVOID) {
         }
     }
     if (matches != 1) {
-        log_line("autokick_patch: %d version signature matches (need exactly 1) - "
+        log_line("net_patch: %d version signature matches (need exactly 1) - "
                  "disabled. Game version may have changed; re-run BZ_GOV_SCAN.", matches);
         return 0;
     }
 
-    struct AkSlot { uint32_t *addr; uint32_t val; const char *name; bool logged; };
-    AkSlot slots[4] = {
-        { kAkStartAddr, g_ak_start, "AutoKickStart", false },
-        { kAkPingAddr,  g_ak_ping,  "AutoKickPing",  false },
-        { kAkLossAddr,  g_ak_loss,  "AutoKickLoss",  false },
-        { kAkTimeAddr,  g_ak_time,  "AutoKickTime",  false },
-    };
-    log_line("autokick_patch: version confirmed; overriding start=%u ping=%u loss=%u "
-             "time=%u (0=leave; re-asserted every %ums, host-enforced)",
-             static_cast<unsigned>(g_ak_start), static_cast<unsigned>(g_ak_ping),
-             static_cast<unsigned>(g_ak_loss), static_cast<unsigned>(g_ak_time),
+    log_line("net_patch: version confirmed; asserting [Net] globals every %ums "
+             "(re-applied at every match start; auto-kick entries are host-enforced)",
              static_cast<unsigned>(kGovPollMs));
 
-    while (InterlockedCompareExchange(&g_ak_stop, 0, 0) == 0) {
-        for (AkSlot &s : slots) {
-            if (s.val == 0 || *s.addr == s.val) {
-                continue;
-            }
-            uint32_t prev = *s.addr;
-            *s.addr = s.val;
-            if (!s.logged) {
-                log_line("autokick_patch: %s %u -> %u (match started)",
-                         s.name, static_cast<unsigned>(prev), static_cast<unsigned>(s.val));
-                s.logged = true;
+    while (InterlockedCompareExchange(&g_net_stop, 0, 0) == 0) {
+        if (net_globals_apply(g_net_tbl, kNetGlobalCount) > 0) {
+            for (size_t i = 0; i < kNetGlobalCount; ++i) {
+                NetGlobal &g = g_net_tbl[i];
+                if (!g.changed) {
+                    continue;
+                }
+                g.changed = 0;
+                if (g.state == kNgVetoed) {
+                    log_line("net_patch: %s VETOED - 0x%08lx holds %u, outside the "
+                             "plausible range %u..%u (stock is %u). Address is wrong "
+                             "for this build; not writing it.",
+                             g.ini_key, static_cast<unsigned long>(g.va),
+                             static_cast<unsigned>(g.seen),
+                             static_cast<unsigned>(g.lo), static_cast<unsigned>(g.hi),
+                             static_cast<unsigned>(g.stock));
+                } else {
+                    log_line("net_patch: %s %u -> %u (%s, stock %u)",
+                             g.ini_key, static_cast<unsigned>(g.seen),
+                             static_cast<unsigned>(g.want), g.env,
+                             static_cast<unsigned>(g.stock));
+                }
             }
         }
         Sleep(kGovPollMs);
     }
-    log_line("autokick_patch: stopping");
+    log_line("net_patch: stopping");
     return 0;
 }
 
@@ -2301,8 +2284,8 @@ DWORD WINAPI reorder_wake_thread(LPVOID) {
         uint64_t last_call = 0;
 
         EnterCriticalSection(&g_reorder_cs);
-        for (uint32_t i = 0; i < g_reorder_peers; ++i) {
-            if (g_peers[i].key != 0 && g_peers[i].filled > 0) {
+        for (uint32_t i = 0; i < g_rx.peers; ++i) {
+            if (g_rx.tbl[i].key != 0 && g_rx.tbl[i].filled > 0) {
                 held = true;
                 break;
             }
@@ -2414,69 +2397,103 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             InitializeCriticalSection(&g_dup_cs);
             g_dup_cs_ready = true;
         }
+        if (!g_pace_cs_ready) {
+            InitializeCriticalSection(&g_pace_cs);
+            g_pace_cs_ready = true;
+        }
         init_buffer_log_if_needed();
         {
             // Reorder enabled by default; BZ_REORDER=0 disables.
+            reorder_init(&g_rx);
             const char *reorder_env = std::getenv("BZ_REORDER");
             g_reorder_enabled = (reorder_env == nullptr || *reorder_env == '\0')
                                 ? true : env_truthy(reorder_env);
             const char *adapt_env = std::getenv("BZ_REORDER_ADAPT");
-            g_reorder_adapt = (adapt_env == nullptr || *adapt_env == '\0')
-                              ? true : env_truthy(adapt_env);
+            g_rx.adapt = (adapt_env == nullptr || *adapt_env == '\0')
+                         ? true : env_truthy(adapt_env);
             const char *wake_env = std::getenv("BZ_REORDER_WAKE");
             g_wake_enabled = (wake_env == nullptr || *wake_env == '\0')
                              ? true : env_truthy(wake_env);
-            g_reorder_ms = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
-            g_reorder_min_ms = clamp_u32(parse_env_u32("BZ_REORDER_MIN_MS", kReorderMinMsDef), 0, g_reorder_ms);
-            g_reorder_depth = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
-            g_reorder_peers = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
-            g_reorder_drain = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
+            const char *stats_env = std::getenv("BZ_REORDER_STATS");
+            g_reorder_stats = (stats_env == nullptr || *stats_env == '\0')
+                              ? true : env_truthy(stats_env);
+            g_rx.win_max_ms  = clamp_u32(parse_env_u32("BZ_REORDER_WINDOW_MS", kReorderDefaultMs), 5, 200);
+            g_rx.win_min_ms  = clamp_u32(parse_env_u32("BZ_REORDER_MIN_MS", kReorderMinMsDef), 0, g_rx.win_max_ms);
+            // Absolute ceiling on how long any single packet may be held,
+            // independent of the adaptive window.  This is the number that
+            // bounds the latency the buffer can add to the game's streams —
+            // and therefore to the round-trip ping a host measures against
+            // AutoKickPing.  Defaults to the window ceiling.
+            g_rx.max_hold_ms = clamp_u32(parse_env_u32("BZ_REORDER_MAX_HOLD_MS", g_rx.win_max_ms), 0, 500);
+            g_rx.depth       = clamp_u32(parse_env_u32("BZ_REORDER_DEPTH", kReorderSlotCap), 1, kReorderSlotCap);
+            g_rx.peers       = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
+            g_reorder_drain  = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
             // Off by default: adds upstream traffic on the P2P socket.
             g_send_dup = env_truthy(std::getenv("BZ_SEND_DUP"));
             g_dup_delay_ms = clamp_u32(parse_env_u32("BZ_DUP_DELAY_MS", kDupDelayMsDef), 0, 500);
             g_dup_max_pps  = clamp_u32(parse_env_u32("BZ_DUP_MAX_PPS", kDupMaxPpsDef), 0, 2000);
             // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
             g_dscp = clamp_u32(parse_env_u32("BZ_DSCP", kDscpDefault), 0, 63);
+            // Outbound pacing.  Measurement is unconditional; smoothing needs
+            // an explicit rate because it trades send latency for burst shape.
+            // Note the pacer can only absorb BZ_SEND_PACE_MAX_MS worth of
+            // budget, so at BZ's rates the 20 ms default shapes very little —
+            // read send_stats before raising either knob.
+            g_pace_rate   = clamp_u32(parse_env_u32("BZ_SEND_PACE", 0), 0, 10000000);
+            g_pace_max_ms = clamp_u32(parse_env_u32("BZ_SEND_PACE_MAX_MS", kPaceMaxDelayDef), 0, 200);
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
-            // Governor cold-start rate (0 = disabled). Clamp to a sane band.
-            g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 0), 0, 200000);
-            // AutoKick threshold overrides (each 0 = leave the game's value).
-            // The relax preset is ON by default (BZ_AUTOKICK_RELAX=0 restores
-            // stock kicking) and fills only the knobs not set individually.
-            // Takes precedence over net.ini, which the game ignores unless it
-            // ships inside the session's active mod (2026-07-05: 15s stock
-            // kick fired with the 9990001 net.ini found-but-unapplied).
-            {
-                const char *ak_env = std::getenv("BZ_AUTOKICK_RELAX");
-                bool ak_relax = (ak_env == nullptr || *ak_env == '\0')
-                                ? true : env_truthy(ak_env);
-                g_ak_start = clamp_u32(parse_env_u32("BZ_AUTOKICK_START", ak_relax ? 60000 : 0), 0, 600000);
-                g_ak_ping  = clamp_u32(parse_env_u32("BZ_AUTOKICK_PING",  ak_relax ? 2000  : 0), 0, 60000);
-                g_ak_loss  = clamp_u32(parse_env_u32("BZ_AUTOKICK_LOSS",  ak_relax ? 200   : 0), 0, 100000);
-                g_ak_time  = clamp_u32(parse_env_u32("BZ_AUTOKICK_TIME",  ak_relax ? 60000 : 0), 0, 600000);
-            }
+            // Governor cold-start rate.  ON by default since V4.7: the game
+            // hardcodes a 4000 B/s start for every match (a 2026-07-19 session
+            // log still shows "Bandwidth usage now set to 4000" at match start),
+            // which starves the opening world-state burst.  Poking MinBandwidth
+            // below covers the session-setup copy; this covers the separate
+            // hardcoded push.  BZ_GOV_START=0 disables.
+            g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 16000), 0, 200000);
+            // The whole [Net] block, written straight into .data.  Presets are
+            // on by default (BZ_NET_TUNE=0 / BZ_AUTOKICK_RELAX=0 restore stock)
+            // and mirror net-ini/net.ini — which encodes the intended tuning but
+            // has twice been proven found-but-not-applied by the game.
+            net_globals_defaults(g_net_tbl);
+            net_globals_configure(g_net_tbl, kNetGlobalCount);
         }
         log_line("DllMain: DLL_PROCESS_ATTACH");
         log_line("governor_patch: %s (BZ_GOV_START=%u; 0=disabled)",
                  g_gov_start ? "enabled" : "disabled", static_cast<unsigned>(g_gov_start));
-        log_line("autokick_patch: %s (start=%u ping=%u loss=%u time=%u; 0=leave, host-enforced)",
-                 (g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) ? "enabled" : "disabled",
-                 static_cast<unsigned>(g_ak_start), static_cast<unsigned>(g_ak_ping),
-                 static_cast<unsigned>(g_ak_loss), static_cast<unsigned>(g_ak_time));
+        {
+            char nets[512];
+            int p = std::snprintf(nets, sizeof(nets), "net_patch: %s",
+                                  net_globals_any(g_net_tbl, kNetGlobalCount) ? "enabled" : "disabled");
+            for (size_t i = 0; i < kNetGlobalCount && p > 0 && static_cast<size_t>(p) < sizeof(nets); ++i) {
+                if (g_net_tbl[i].want == 0) {
+                    continue;
+                }
+                p += std::snprintf(nets + p, sizeof(nets) - static_cast<size_t>(p), " %s=%u",
+                                   g_net_tbl[i].ini_key, static_cast<unsigned>(g_net_tbl[i].want));
+            }
+            log_line("%s (0/absent=leave game value; AutoKick* are host-enforced)", nets);
+        }
+        log_line("send_pace: %s rate_bps=%u max_delay_ms=%u"
+                 " (burst measurement is always on; BZ_SEND_PACE=<bytes/sec> to smooth)",
+                 g_pace_rate ? "enabled" : "measure-only",
+                 static_cast<unsigned>(g_pace_rate),
+                 static_cast<unsigned>(g_pace_max_ms));
         log_line("send_dup: %s dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip dscp=%u"
                  " (BZ_SEND_DUP=1 to enable outbound packet duplication)",
                  g_send_dup ? "enabled" : "disabled",
                  static_cast<unsigned>(g_dup_delay_ms),
                  static_cast<unsigned>(g_dup_max_pps),
                  static_cast<unsigned>(g_dscp));
-        log_line("reorder: %s max_window_ms=%u min_window_ms=%u adapt=%d wake=%d depth=%u peers=%u drain=%u seq_offset=%u",
+        log_line("reorder: %s max_window_ms=%u min_window_ms=%u max_hold_ms=%u adapt=%d wake=%d"
+                 " stats=%d depth=%u peers=%u drain=%u seq_offset=%u",
                  g_reorder_enabled ? "enabled" : "DISABLED",
-                 static_cast<unsigned>(g_reorder_ms),
-                 static_cast<unsigned>(g_reorder_min_ms),
-                 g_reorder_adapt ? 1 : 0,
+                 static_cast<unsigned>(g_rx.win_max_ms),
+                 static_cast<unsigned>(g_rx.win_min_ms),
+                 static_cast<unsigned>(g_rx.max_hold_ms),
+                 g_rx.adapt ? 1 : 0,
                  g_wake_enabled ? 1 : 0,
-                 static_cast<unsigned>(g_reorder_depth),
-                 static_cast<unsigned>(g_reorder_peers),
+                 g_reorder_stats ? 1 : 0,
+                 static_cast<unsigned>(g_rx.depth),
+                 static_cast<unsigned>(g_rx.peers),
                  static_cast<unsigned>(g_reorder_drain),
                  static_cast<unsigned>(kReorderSeqOffset));
         if (!hook_setsockopt_iat()) {
@@ -2512,12 +2529,25 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                 log_line("DllMain: failed to create governor scan thread gle=%lu", static_cast<unsigned long>(GetLastError()));
             }
         }
-        if ((g_ak_time || g_ak_ping || g_ak_loss || g_ak_start) && is_target_main_module()) {
-            HANDLE akp = CreateThread(nullptr, 0, &autokick_patch_thread, nullptr, 0, nullptr);
-            if (akp != nullptr) {
-                CloseHandle(akp);
+        if (net_globals_any(g_net_tbl, kNetGlobalCount) && is_target_main_module()) {
+            HANDLE netp = CreateThread(nullptr, 0, &net_patch_thread, nullptr, 0, nullptr);
+            if (netp != nullptr) {
+                CloseHandle(netp);
             } else {
-                log_line("DllMain: failed to create autokick patch thread gle=%lu", static_cast<unsigned long>(GetLastError()));
+                log_line("DllMain: failed to create net patch thread gle=%lu", static_cast<unsigned long>(GetLastError()));
+            }
+        }
+        if (is_target_main_module()) {
+            pace_init(&g_tx, g_pace_rate, g_pace_max_ms, GetTickCount64());
+            HANDLE pace = CreateThread(nullptr, 0, &send_pace_thread, nullptr, 0, nullptr);
+            if (pace != nullptr) {
+                CloseHandle(pace);
+            } else {
+                log_line("DllMain: failed to create send pace thread gle=%lu"
+                         " - pacing disabled, measurement continues",
+                         static_cast<unsigned long>(GetLastError()));
+                g_pace_rate = 0;
+                g_tx.rate_bps = 0;
             }
         }
         if (g_send_dup && g_dup_delay_ms > 0 && is_target_main_module()) {
@@ -2537,7 +2567,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         InterlockedExchange(&g_wake_stop, 1);
         InterlockedExchange(&g_dup_stop, 1);
         InterlockedExchange(&g_gov_stop, 1);
-        InterlockedExchange(&g_ak_stop, 1);
+        InterlockedExchange(&g_net_stop, 1);
+        InterlockedExchange(&g_pace_stop, 1);
         if (g_wake_sender != INVALID_SOCKET && g_real_closesocket != nullptr) {
             g_real_closesocket(g_wake_sender);
             g_wake_sender = INVALID_SOCKET;
@@ -2562,6 +2593,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         if (g_dup_cs_ready) {
             DeleteCriticalSection(&g_dup_cs);
             g_dup_cs_ready = false;
+        }
+        if (g_pace_cs_ready) {
+            DeleteCriticalSection(&g_pace_cs);
+            g_pace_cs_ready = false;
         }
     }
 

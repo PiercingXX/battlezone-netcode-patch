@@ -9,7 +9,7 @@ $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
 $netIniUrl = if ($env:BZNET_NETINI_URL) { $env:BZNET_NETINI_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/net-ini/net.ini" }
-$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "d31af1a2c3023419d6f93f37372481345c3f7fc13677cc2e6d308a8cd039521b" }
+$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "a3d6766c09e801f3f05e57f2a67de841add3c86f08dc24e9e043c0efc75841e6" }
 
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]

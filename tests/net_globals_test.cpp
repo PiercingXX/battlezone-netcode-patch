@@ -1,0 +1,244 @@
+// tests/net_globals_test.cpp — host-side tests for shared/net_globals.h
+//
+// This header writes raw 32-bit values to hardcoded addresses inside a running
+// game.  If an address is wrong, the write lands on something else.  The sanity
+// gate is the only thing standing between a stale address and memory
+// corruption, so it is worth testing on its own.
+//
+// The table entries here point at ordinary variables instead of the game's
+// .data, which exercises the same code with no game involved.
+//
+//   make -C tests run
+
+#include "../shared/net_globals.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <initializer_list>
+
+using namespace bznet;
+
+namespace {
+
+int g_checks = 0;
+int g_failures = 0;
+const char *g_case = "";
+
+void check(bool ok, const char *what, long long got, long long want) {
+    ++g_checks;
+    if (!ok) {
+        ++g_failures;
+        std::printf("  FAIL [%s] %s: got %lld, want %lld\n", g_case, what, got, want);
+    }
+}
+
+// Each macro evaluates its arguments exactly once: several call sites pass
+// net_globals_apply(), which advances state, and re-evaluating it for the
+// failure message would both corrupt the test and misreport the value.
+#define CHECK_EQ(a, b) do { long long a_ = (long long)(a), b_ = (long long)(b); \
+                            check(a_ == b_, #a, a_, b_); } while (0)
+#define CHECK(x)       do { bool x_ = (x); check(x_, #x, (long long)x_, 1LL); } while (0)
+
+void begin(const char *name) {
+    g_case = name;
+    std::printf("- %s\n", name);
+}
+
+// A one-entry table aimed at a caller-owned word, shaped like MaxBandwidth.
+NetGlobal make_entry(uint32_t *target, uint32_t want) {
+    NetGlobal g{};
+    g.va      = reinterpret_cast<uintptr_t>(target);
+    g.ini_key = "MaxBandwidth";
+    g.env     = "BZ_NET_MAXBANDWIDTH";
+    g.stock   = 16000;
+    g.lo      = 1000;
+    g.hi      = 4000000;
+    g.want    = want;
+    g.state   = kNgPending;
+    return g;
+}
+
+// The happy path: a plausible live value is accepted and overwritten, and the
+// pre-write value is recorded for the log.
+void test_applies_plausible_value() {
+    begin("a plausible live value is gated through and written");
+    uint32_t live = 16000;                 // stock default
+    NetGlobal t = make_entry(&live, 320000);
+
+    CHECK_EQ(net_globals_apply(&t, 1), 1); // first pass is notable
+    CHECK_EQ(t.state, kNgApplied);
+    CHECK_EQ(t.seen, 16000u);              // what the game had
+    CHECK_EQ(live, 320000u);               // what we wrote
+    CHECK_EQ(t.changed, 1);
+
+    // Steady state: no further writes, nothing more to log.
+    t.changed = 0;
+    CHECK_EQ(net_globals_apply(&t, 1), 0);
+    CHECK_EQ(t.changed, 0);
+    CHECK_EQ(live, 320000u);
+}
+
+// The whole point of the gate: an address that does not hold what we think must
+// never be written.  A stale address after a game update looks exactly like this.
+void test_vetoes_implausible_value() {
+    begin("an implausible live value is vetoed, never written");
+    uint32_t not_bandwidth = 0x0042f1a0;   // looks like a pointer, not a rate
+    NetGlobal t = make_entry(&not_bandwidth, 320000);
+
+    CHECK_EQ(net_globals_apply(&t, 1), 1);
+    CHECK_EQ(t.state, kNgVetoed);
+    CHECK_EQ(t.seen, 0x0042f1a0u);
+    CHECK_EQ(not_bandwidth, 0x0042f1a0u);  // untouched
+
+    // Veto is permanent: later passes must not retry it.
+    t.changed = 0;
+    CHECK_EQ(net_globals_apply(&t, 1), 0);
+    CHECK_EQ(not_bandwidth, 0x0042f1a0u);
+}
+
+void test_vetoes_zero() {
+    begin("a zeroed address is vetoed (uninitialised or wrong)");
+    uint32_t zero = 0;
+    NetGlobal t = make_entry(&zero, 320000);
+    net_globals_apply(&t, 1);
+    CHECK_EQ(t.state, kNgVetoed);
+    CHECK_EQ(zero, 0u);
+}
+
+// The game's session parser rewrites these at every match start; we must win
+// the next poll without needing a restart.
+void test_reasserts_after_game_overwrites() {
+    begin("the value is re-asserted after the game's session parser rewrites it");
+    uint32_t live = 16000;
+    NetGlobal t = make_entry(&live, 320000);
+    net_globals_apply(&t, 1);
+    CHECK_EQ(live, 320000u);
+
+    live = 16000;                          // match start: parser writes stock
+    t.changed = 0;
+    net_globals_apply(&t, 1);
+    CHECK_EQ(live, 320000u);               // reclaimed within one poll
+    CHECK_EQ(t.changed, 0);                // but not re-logged every match
+}
+
+void test_zero_want_leaves_value_alone() {
+    begin("want=0 means leave the game's value alone");
+    uint32_t live = 16000;
+    NetGlobal t = make_entry(&live, 0);
+    CHECK_EQ(net_globals_apply(&t, 1), 0);
+    CHECK_EQ(live, 16000u);
+    CHECK_EQ(t.state, kNgPending);         // never even read
+}
+
+// The shipped table must be internally consistent: every documented stock
+// default has to pass its own sanity gate, or the patch would veto itself on a
+// stock game.
+void test_shipped_table_admits_stock_defaults() {
+    begin("every shipped entry's stock default passes its own sanity gate");
+    NetGlobal tbl[kNetGlobalCount];
+    net_globals_defaults(tbl);
+    for (size_t i = 0; i < kNetGlobalCount; ++i) {
+        const NetGlobal &g = tbl[i];
+        check(g.stock >= g.lo && g.stock <= g.hi,
+              g.ini_key, g.stock, (long long)g.lo);
+        check(g.va != 0, "va set", (long long)g.va, 1);
+        check(g.env != nullptr && g.env[0] == 'B', "env name set", 1, 1);
+    }
+}
+
+// And every preset value we would write must also pass, for the same reason:
+// the entry is re-gated against the value we ourselves left behind.
+void test_shipped_presets_pass_their_own_gate() {
+    begin("every preset value passes the gate it will later be re-read through");
+    NetGlobal tbl[kNetGlobalCount];
+    net_globals_defaults(tbl);
+    for (size_t i = 0; i < kNetGlobalCount; ++i) {
+        const NetGlobal &g = tbl[i];
+        for (uint32_t v : {kNetTunePreset[i], kAutoKickRelaxPreset[i]}) {
+            if (v == 0) {
+                continue;
+            }
+            check(v >= g.lo && v <= g.hi, g.ini_key, v, (long long)g.hi);
+        }
+    }
+}
+
+void test_env_presets_and_overrides() {
+    begin("env: presets default on, per-key override wins, BZ_NET_TUNE=0 opts out");
+    NetGlobal tbl[kNetGlobalCount];
+
+    // Defaults: both presets on.
+    unsetenv("BZ_NET_TUNE");
+    unsetenv("BZ_AUTOKICK_RELAX");
+    unsetenv("BZ_NET_MAXBANDWIDTH");
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
+
+    // Per-key override beats the preset.
+    setenv("BZ_NET_MAXBANDWIDTH", "48000", 1);
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 48000u);
+
+    // An override outside the sanity range falls back to the preset rather
+    // than queuing a write the gate would reject.
+    setenv("BZ_NET_MAXBANDWIDTH", "5", 1);
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
+    unsetenv("BZ_NET_MAXBANDWIDTH");
+
+    // BZ_NET_TUNE=0 drops the governor preset but leaves auto-kick relax.
+    setenv("BZ_NET_TUNE", "0", 1);
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 0u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    CHECK(net_globals_any(tbl, kNetGlobalCount));
+
+    // Both off: nothing to do, and the proxy skips the thread entirely.
+    setenv("BZ_AUTOKICK_RELAX", "0", 1);
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK(!net_globals_any(tbl, kNetGlobalCount));
+
+    unsetenv("BZ_NET_TUNE");
+    unsetenv("BZ_AUTOKICK_RELAX");
+}
+
+// A wrong address must not take the rest of the table down with it.
+void test_veto_is_per_entry() {
+    begin("one vetoed entry does not stop the others");
+    uint32_t good = 16000;
+    uint32_t bad  = 0xdeadbeef;
+    NetGlobal tbl[2] = {make_entry(&good, 320000), make_entry(&bad, 320000)};
+    net_globals_apply(tbl, 2);
+    CHECK_EQ(tbl[0].state, kNgApplied);
+    CHECK_EQ(tbl[1].state, kNgVetoed);
+    CHECK_EQ(good, 320000u);
+    CHECK_EQ(bad, 0xdeadbeefu);
+}
+
+}  // namespace
+
+int main() {
+    std::printf("net_globals V4.7 tests\n");
+    test_applies_plausible_value();
+    test_vetoes_implausible_value();
+    test_vetoes_zero();
+    test_reasserts_after_game_overwrites();
+    test_zero_want_leaves_value_alone();
+    test_shipped_table_admits_stock_defaults();
+    test_shipped_presets_pass_their_own_gate();
+    test_env_presets_and_overrides();
+    test_veto_is_per_entry();
+
+    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}

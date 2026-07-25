@@ -1,26 +1,25 @@
 # Battlezone 98 Redux Netcode Patch
 
-## What's New in V4.5
+Battlezone drops any UDP packet that doesn't arrive in *exact* sequential order,
+even by a millisecond. WiFi, wireless, international, anything with mild jitter —
+you're not losing those packets to the network, you're losing them to a
+sequencing rule that tolerates zero deviation.
 
-> The reorder fix, bigger buffers, and **DSCP priority marking** are on by default — **install and play, nothing to configure.** DSCP tags your game packets so a WMM/SQM router serves them ahead of bulk downloads (real effect under Proton; harmless no-op on stock Windows).
->
-> **New: send-governor cold-start fix (`BZ_GOV_START`, opt-in).** The game hardcodes a 4000 B/s send rate at the *start of every match* and ramps up slowly — which is exactly why packet drops cluster in the first ~60 seconds. We dumped the DRM-decrypted game code at runtime, found the constant, and confirmed that rewriting it in-place works but trips SteamStub's anti-tamper — so the fix is a **data-only** patch that lifts the live send-rate off 4000 without touching game code. Set `BZ_GOV_START=16000` to try it. It's sender-side, so it also improves how your traffic reaches *unpatched* peers. Off by default while it's validated in live matches — see the note below.
+This patch sits in front of the game as a DLL proxy. It buffers wayward packets
+briefly and releases them in order, forces bigger socket buffers, marks your
+traffic for router priority, and writes the game's own network tuning directly
+into memory. The game never knows it's there.
+
+**Everyone in the lobby should install it.** The reorder fix is receive-side, so
+your install protects your inbound packets and nobody else's.
+
+Current version: **V4.7** — see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-Battlezone's netcode drops any UDP packet that doesn't arrive in *exact* sequential order, even by milliseconds. WiFi? Wireless? International? Anything with even mild jitter? You're not losing packets to the network - you're losing them to a rigid sequencing requirement that tolerates zero deviation.
+## Install
 
-This patch intercepts wayward packets mid-flight, buffers them briefly, and releases them in order. The game never knows it's there.
-
-**Measured result (live A/B, same map, same opponent): 121 drops → 40 drops per match. ~65% fewer out-of-order drops.**
-
----
-
-## Quick Start
-
-**Everyone in the lobby should install this** — the fix is receive-side, so each install only protects that player's own inbound packets.
-
-### Windows 🪟
+### Windows
 
 Paste into PowerShell:
 
@@ -28,95 +27,54 @@ Paste into PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
 ```
 
-Auto-detects your install (registry + Steam library folders), downloads the prebuilt `winmm.dll` (SHA256-verified), and installs the tuned `net.ini` as a local mod. No launch option changes needed — reorder, bigger buffers, the setsockopt fix, and DSCP marking are active by default. To help test the opt-in governor cold-start fix, run `setx BZ_GOV_START 16000` and fully restart Steam; confirm `governor_patch: enabled` in `winmm_proxy.log`.
+Finds your install, downloads the SHA256-verified `winmm.dll`, and installs the
+tuned `net.ini`. No launch options to set. Launch the game normally.
 
-### Linux / Proton 🐧
+> **Defender note:** some users see `winmm.dll` quarantined as
+> `Program:Win32/Contebrew.A!ml` — a heuristic detection common for unsigned DLL
+> proxies. Restore it from Protection History and add an exception for that one
+> file in the game folder. Don't disable AV globally.
 
-Step 1 — paste into terminal:
+### Linux / Proton
+
+**Step 1** — paste into a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_linux.sh | bash
 ```
 
-The installer will:
+It detects your install (native, Snap or Flatpak Steam), builds `dsound.dll`
+from source, offers to raise the kernel UDP buffer limits, and installs the
+tuned `net.ini`. Set `BZNET_ASSUME_YES=1` to skip the prompts.
 
-- auto-detect your install (native, Snap, or Flatpak Steam)
-- ask before installing build dependencies (MinGW cross-compiler, make) via apt, pacman, or dnf
-- build `dsound.dll` locally from source and install it
-- offer to raise the kernel UDP buffer limits — without this, the kernel silently clamps the enlarged socket buffers to ~208 KB
-- install the tuned `net.ini` as a local mod
-- run the Linux EXU compatibility repair (best effort)
-
-Non-interactive? Set `BZNET_ASSUME_YES=1`.
-
-Step 2 — set Steam launch options:
+**Step 2** — set Steam launch options for Battlezone 98 Redux:
 
 ```text
 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
-That's all you need — the reorder patch, bigger buffers, and DSCP marking are on by default. To help test the opt-in governor cold-start fix, add `BZ_GOV_START=16000` before `%command%` (see the note at the top); confirm `governor_patch: enabled` in `dsound_proxy.log`.
+Without step 2 the DLL is never loaded. That's the whole install.
 
-### Who Should Install It?
+> Have both native **and** Flatpak Steam? They're separate installs with
+> separate launch options. Patch and configure each one.
 
-Everyone playing, ideally. Battlezone drops out-of-order packets **at the receiver**, and this patch sits in front of *your* copy of the game — it un-scrambles packets arriving *to you* and does nothing for packets you send to others. If only you install it, enemies look smooth on your screen while you still look laggy on theirs.
+### Manual install
 
-| Component | Who benefits from *your* install |
-|---|---|
-| Reorder buffer | Only you (your inbound from every peer) |
-| Bigger socket buffers | Only you (your burst tolerance) |
-| DSCP marking | Only you (your outbound gets router priority, if your router honours it) |
-| Tuned net.ini | Your own send governor (it runs on every machine, not just the host's) |
-
-Playing with someone who can't or won't install? There's no client-side setting that fixes *their* end — if their connection is the bottleneck, they need wired ethernet, router QoS, or to stop background uploads. (`BZ_SEND_DUP` was the old answer here; testing showed it doesn't help — see the note at the top.)
+Prefer to do it by hand, or need a second install patched? See
+[docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md).
 
 ---
 
-## How It Works
+## Check it's working
 
-- **Adaptive per-peer reorder window:** starts at a 5 ms floor so clean connections pay near-zero added latency, grows toward a 100 ms ceiling only when reordering is actually observed on that link, and decays back down when the link is clean. The 100 ms ceiling is what produced the measured 65% drop reduction (the old 45 ms default left too many near-misses on the table).
-- **Wake thread:** the reorder hook drains the kernel socket, so a game sleeping in `select()` could leave held packets stranded. A background thread nudges the socket readable so held packets release on time.
-- **4 MB receive / 512 KB send socket buffers**, forced at socket creation for burst tolerance — and re-forced through a `setsockopt` hook on both platforms, so the game can't shrink the send buffer back to 32 KB (it tries to, on real Windows).
-- **DSCP priority marking (`BZ_DSCP`, default 46 = EF):** tags the P2P socket so routers running WMM (WiFi voice queue) or SQM/fq_codel serve game packets ahead of bulk traffic — targeting queueing delay, which live testing showed is the real lag source under load. Effective under Proton; a no-op on stock Windows (which needs qWAVE or a router rule). `BZ_DSCP=0` disables.
-- **Loss redundancy (`BZ_SEND_DUP=1`) — deprecated, off by default.** Re-sends outbound P2P datagrams via the `WSASendTo` hook so a genuinely *lost* packet could still arrive, with a time-shifted copy (`BZ_DUP_DELAY_MS`) and rate cap (`BZ_DUP_MAX_PPS`). Live A/B testing showed it doesn't help this game and hurts busy uplinks (a peer's link went 3.6 → 47.9 drops/min with it on), because at BZ's ~30 packets/sec the rate cap rarely engages and duplication still ~doubles the packet load. Kept for completeness; leave it off.
-- **Governor cold-start fix (`BZ_GOV_START`, opt-in):** the game's send-rate governor hardcodes a 4000 B/s start for *every* match and ramps up slowly, starving the opening world-state burst — which is why the heaviest packet drops cluster in the first ~60 seconds. Setting `BZ_GOV_START=16000` raises that start. It's a **data-only** patch (the proxy watches the live send-rate value and lifts the 4000 cold-start to your target; it never modifies game code, so the DRM's integrity check is untouched). Sender-side, so it improves how your packets reach *every* peer, patched or not. Off by default; verified not to crash the DRM, still being validated in live matches.
-- **Auto-kick threshold relax (`BZ_AUTOKICK_RELAX` / `BZ_AUTOKICK_*`, on by default, host-only):** the `System automatically kicked <player>` drop mid-match is a host-side timer — a player is ejected once their connection stays bad (ping over `AutoKickPing`, default 750 ms, *or* loss over `AutoKickLoss`, default 25) continuously for `AutoKickTime` (default 15 s). We recovered these four `[Net]` thresholds from the decrypted code; the proxy widens them automatically so a transient lag spike no longer kicks anyone (`BZ_AUTOKICK_RELAX=0` restores stock kicking). Same **data-only**, DRM-safe poke as `BZ_GOV_START`, re-asserted every 100 ms so it also overrides the fragile `net.ini` path. Enforced by the session host, so it only helps when *you* host.
-- Everything runs in userspace via DLL proxy injection (`dsound.dll` on Proton, `winmm.dll` on Windows). Same code, same tuning env vars (`BZ_REORDER_*`, `BZ_SEND_DUP`, `BZ_DUP_*`, `BZ_DSCP`, `BZ_GOV_START`, `BZ_AUTOKICK_*`) on both platforms — see the proxy READMEs.
+Play one multiplayer match, quit, then run the verify script.
 
-## What We Learned About the Game (the hard way)
-
-Verified in live testing, because the community wisdom was mostly stale:
-
-- **net.ini only loads through the mod system — and even then, found ≠ applied.** A copy next to `battlezone98redux.exe` is silently ignored. The installers deliver it as a local mod at `packaged_mods/9990001/net.ini`, which the game logs as `MOD FOUND` on both platforms — but a live match (2026-07-05) proved the values still aren't always applied: the host ran `AutoKickTime = 45000` in that file yet kicked at the stock 15 s, and its bandwidth sat below the file's `MinBandwidth`. Working theory: the game only parses net.ini out of the session's *active* mod (the map's mod), not from every discovered mod. The proxies' env-var pokes bypass this path entirely, which is why the auto-kick relax now defaults on.
-- **Disabling a workshop mod in-game does NOT stop its net.ini loading.** Only unsubscribing does. If you're subscribed to the "Auto-Kick Reduction Patch" (workshop `1895622040`), it overrides the local mod — and it caps your send rate at 32 KB/s.
-- **The send-rate governor runs on every machine**, not just the host's. And it always starts at a hardcoded 4,000 bytes/s, ramping up slowly — `MinBandwidth` does not set the starting rate, and in short matches the `MaxBandwidth` ceiling is never reached.
-- The game exe imports classic winsock functions **by ordinal** and sends all P2P traffic via `WSASendTo` (`sendto` isn't in its import table at all). On real Windows its receives are overlapped/IOCP; under Proton they aren't.
-
-## Version History
-
-- **V1–V2:** forced bigger UDP socket buffers (final: 512 KB send / 4 MB receive). Better burst tolerance.
-- **V3:** in-proxy out-of-order packet reordering (`WSARecvFrom` hook), per-peer buffering with deterministic sequence release. Sequence field located at `payload[13..16]` (u32le) via binary capture analysis.
-- **V4:** adaptive reorder window (5 ms floor), wake thread for stranded packets, Linux kernel-clamp fix in the installer, Windows/Linux tuning parity, `BZ_SEND_DUP`, drop metrics in the verify script.
-- **V4.1:** **Windows launch-freeze hotfix** — the hook was routing the game's overlapped (IOCP) receives through the synchronous reorder path, hanging the game at the loading screen (Proton was unaffected; the bug existed since V3). Also: ordinal IAT patching, and `BZ_SEND_DUP` moved to the `WSASendTo` hook where it actually works.
-- **V4.2:** reorder ceiling default raised 45 → 100 ms after live A/B testing measured ~65% fewer drops (121 → 40/43 on the same map/opponent); harmless on clean links thanks to the adaptive floor. net.ini now installs as a local packaged mod.
-- **V4.3:** reworked `BZ_SEND_DUP` (loopback-skip + time-shifted + rate-capped copies), added `BZ_DSCP` priority marking, ported the `setsockopt` re-force hook to Windows, and added the opt-in `BZ_GOV_SCAN` diagnostic that locates the hardcoded 4000 B/s governor start constant in the DRM-decrypted image at runtime.
-- **V4.4:** **`BZ_SEND_DUP` deprecated.** A ~10-game A/B series (1v1s + 2v2s, logs from all peers) settled it: outbound duplication doesn't help this game and degrades busy uplinks — one link went 3.6 → 47.9 drops/min with it on, because at BZ's ~30 pkt/s the rate cap rarely engages so it still ~doubles packet load. It's removed from all recommended launch options and installer prompts (still present, opt-in, off). The validated core is the always-on reorder + bigger buffers + DSCP marking. The governor scanner is now on both proxies. Full verdict + method: [`test-logs/2026-07-03_dup_test_summary.md`](test-logs/2026-07-03_dup_test_summary.md); analysis tool at [`tools/analyze_drops.py`](tools/analyze_drops.py); options survey: [`resources/PATCH_OPTIONS_RESEARCH.md`](resources/PATCH_OPTIONS_RESEARCH.md).
-- **V4.5 (current):** **send-governor cold-start fix (`BZ_GOV_START`, opt-in).** The governor hardcodes a 4000 B/s start for every match — the root of the first-60-seconds drop clusters, and the biggest remaining drop source. We dumped the DRM-decrypted code at runtime, located the exact site, and found that rewriting the constant in `.text` works but SteamStub's integrity check then kills the game — so the fix is a **data-only** patch: the proxy watches the live send-rate value and lifts the 4000 cold-start to `BZ_GOV_START` (e.g. 16000), never touching game code. Verified end-to-end that it applies and the game survives (no DRM trip). It's sender-side, so it also improves how your traffic reaches unpatched peers. Off by default pending live-match validation. See the proxy READMEs for the `BZ_GOV_START` knob.
-
----
-
-## Verify It Worked ✅
-
-Launch the game once (start or join a multiplayer session), quit, then:
-
-**Linux** — run from the game folder:
+**Linux:**
 
 ```bash
 cd "/path/to/Battlezone 98 Redux"
-/path/to/battlezone-netcode-patch-master/Linux/verify_net_patch.sh
+/path/to/battlezone-netcode-patch/Linux/verify_net_patch.sh
 ```
-
-Expect `VERIFY RESULT: PASS` plus a per-session drop count (`Game-side packet drops this session: ...`) you can compare across matches.
 
 **Windows:**
 
@@ -124,106 +82,199 @@ Expect `VERIFY RESULT: PASS` plus a per-session drop count (`Game-side packet dr
 .\Microslop\verify_windows.ps1
 ```
 
-Quick manual checks in any log:
+Expect `VERIFY RESULT: PASS`. If you'd rather eyeball it, open the proxy log
+(`dsound_proxy.log` or `winmm_proxy.log`, next to the game exe) and look for:
 
-- Proxy log (`dsound_proxy.log` / `winmm_proxy.log`): `reorder: enabled max_window_ms=100 ...` and `effective readback SO_SNDBUF=524288 ... SO_RCVBUF=4194304`
-- `BZLogger.txt`: `MOD FOUND net.ini at ...packaged_mods\9990001` confirms the net.ini mod loaded
+| Line | Means |
+|---|---|
+| `reorder: enabled max_window_ms=100 …` | reorder buffer is live |
+| `effective readback SO_SNDBUF=524288 … SO_RCVBUF=4194304` | socket buffers applied |
+| `net_patch: version confirmed` | the game build was recognised |
+| `net_patch: MinBandwidth 4000 -> 16000` | tuning is being written into the game |
+| `reorder_stats: …` (every 10s) | counters are recording |
+| `send_stats: …` (every 10s) | outbound traffic is being measured |
 
----
-
-## Want To Do It Manually Instead? 🔧
-
-These steps assume the source archive is extracted to `~/Downloads/battlezone-netcode-patch-master`.
-
-### Linux / Proton
-
-1. Install build tools.
-
-Debian/Ubuntu:
-```bash
-sudo apt install mingw-w64 make
-```
-
-Arch/Manjaro:
-```bash
-sudo pacman -S mingw-w64-gcc make
-```
-
-2. Raise the kernel UDP buffer limits (the deploy script warns but does not apply this):
-
-```bash
-sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=524288
-printf 'net.core.rmem_max=4194304\nnet.core.wmem_max=524288\n' | sudo tee /etc/sysctl.d/99-battlezone-netcode.conf
-```
-
-3. Deploy to your Battlezone install (builds from source, installs the DLL and net.ini mod, runs EXU repair):
-
-```bash
-cd "$HOME/Downloads/battlezone-netcode-patch-master"
-./Linux/deploy_linux.sh "/path/to/steamapps/common/Battlezone 98 Redux"
-```
-
-Common game paths: native `~/.local/share/Steam/steamapps/common/...`, Snap `~/snap/steam/common/.local/share/Steam/steamapps/common/...`, Flatpak `~/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/...`
-
-4. Steam launch options:
-
-```text
-WINEDLLOVERRIDES=dsound=n,b %command% -nointro
-```
-
-### Windows
-
-**Defender note:** some users report Defender quarantining `winmm.dll` from source ZIP downloads as `Program:Win32/Contebrew.A!ml` — a heuristic detection common for unsigned DLL proxies. If it triggers: restore from Protection history, add a narrow exception for that one game-folder DLL only, and report the false positive. Don't disable AV globally.
-
-1. Recommended: use the prebuilt DLL (`prebuilt/windows/winmm.dll`; verify with `sha256sum -c winmm.dll.sha256`).
-2. Or build it yourself (advanced): `cd Microslop/winmm_proxy && make` → `build/winmm.dll`.
-3. Copy `winmm.dll` to the game folder (`...\steamapps\common\Battlezone 98 Redux\`).
-4. Optionally copy `net-ini/net.ini` to `...\Battlezone 98 Redux\packaged_mods\9990001\net.ini`.
-5. Launch normally — no launch option changes on Windows.
-
-Full Windows notes: [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md)
+**Not working?** `net_patch: … VETOED` or `0 version signature matches` means
+the game updated and the memory addresses moved — the patch falls back to stock
+behaviour rather than risking anything. Everything else still works. Open an
+issue with the log.
 
 ---
 
-## Optional Logging
+## Testing: how to collect a useful session
 
-If you want hard data instead of vibes:
+The numbers that matter now are **hold_ms**, **evicted** and **visible warps**,
+not just the drop count. Collecting them takes two files per player per game.
 
-Windows:
+### Before you play
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass -Force
-& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Start
-# Play session
-& "$HOME\Downloads\battlezone-netcode-patch-master\buffer-logging\buffer_logger_windows.ps1" -Action Stop
-```
+1. Everyone installs the patch and confirms `VERIFY RESULT: PASS`.
+2. Agree who is hosting. Auto-kick thresholds are enforced by the **host only**,
+   so the host's install is what decides whether anyone gets kicked.
+3. If anyone is subscribed to the Steam Workshop mod **"Auto-Kick Reduction
+   Patch" (`1895622040`)**, unsubscribe. It ships its own `net.ini` that
+   overrides the patch's and caps send rate at 32 KB/s. *Disabling it in-game is
+   not enough — you must unsubscribe.*
 
-Linux:
+### After each match
+
+> **Critical: `BZLogger.txt` is overwritten every time the game launches.**
+> Copy it aside *before* anyone relaunches, or the game is lost.
+
+From the game folder (`…/steamapps/common/Battlezone 98 Redux/`), copy both:
+
+- `BZLogger.txt` — the game's own log (drops, warps, kicks, governor)
+- `dsound_proxy.log` (Linux) or `winmm_proxy.log` (Windows) — the patch's counters
+
+Rename them per player and per game, e.g. `game3_piercingxx_BZLogger.txt`.
+
+### Sending logs
+
+**Zip and attach the files.** Pasted logs always truncate — these run to tens of
+megabytes.
+
+### Reading the results
 
 ```bash
-./buffer-logging/buffer_logger_linux.sh start "/path/to/Battlezone 98 Redux" 32 65536
-# Play session
-./buffer-logging/buffer_logger_linux.sh stop
+python3 tools/analyze_drops.py game3_piercingxx_dsound_proxy.log game3_piercingxx_BZLogger.txt
 ```
 
-Details: [logging_readme.md](logging_readme.md)
+| What it reports | Healthy | What a bad value means |
+|---|---|---|
+| real drops/min, per peer | low | high on one link only = that peer's uplink |
+| `hold_ms max` | well under 100 | **latency this patch is adding to you** — high here is warping and kick risk, not a win |
+| `evicted` | 0 | a queue filled and packets went out out-of-order; raise `BZ_REORDER_DEPTH` |
+| `emsgsize` | 0 | datagrams were too big for the drain buffer and the stack destroyed them — report this |
+| visible warps/min (≥50 m) | low | the actual symptom, as opposed to the raw warp count, which is ~90% sub-metre noise |
+| `governor` range | starts ≥16000 | still opening at 4000 means the cold-start fix didn't apply |
+| `peak_pps` / `burst_seconds` | low | *your* machine is producing retransmit floods |
+
+A drop-count improvement bought with a large `hold_ms max` is a regression, not
+a win. That's the trap every earlier round of testing walked into.
+
+### Testing without the game
+
+```bash
+make -C tests run    # 30 cases, 506 assertions, no game required
+```
+
+### Optional: raw packet capture
+
+Only needed for deep analysis — see [logging_readme.md](logging_readme.md).
 
 ---
 
-## Known Limits
+## What it does
 
-- Fixes out-of-order handling, not raw packet loss or congestion. Reordering can't recover packets delayed *beyond* the 100 ms window — heavy congestion produces exactly this, and no receiver-side patch can fix a saturated uplink (that's a wired-ethernet / router-QoS problem on the sending peer's end). Outbound duplication was tested as a loss mitigation and deprecated (see the top note).
-  
-- The game's send governor hardcodes a 4 KB/s start at match start (net.ini can't change it), which drives the start-of-match drop bursts. This is now addressed by the opt-in `BZ_GOV_START` data patch (see How It Works) — off by default while it's validated in live matches. The exe is DRM-encrypted, so this is a runtime in-memory fix, not a static one.
-  
-- If you're subscribed to a workshop mod that ships net.ini, it overrides the patch's tuned copy — unsubscribe (disabling in-game is not enough).
-  
-- On real Windows the game receives via overlapped/IOCP, which the reorder hook deliberately bypasses — so Windows players currently get bigger buffers, DSCP, and dup, but **not** inbound reordering. Reorder is fully active under Proton. (An IOCP-aware reorder path is on the roadmap.)
+**Receive side (helps you):**
+
+- **Adaptive per-peer reorder buffer.** Starts at a 5 ms floor so clean links
+  pay almost nothing, grows only when reordering is actually observed, and
+  decays back within seconds. `BZ_REORDER_MAX_HOLD_MS` caps how long any packet
+  can ever be held.
+- **4 MB receive / 512 KB send socket buffers**, re-forced through a
+  `setsockopt` hook so the game can't shrink them back.
+- **Counters** (`reorder_stats`) reporting deliveries by kind, drops, and the
+  latency the patch itself adds.
+
+**Send side (helps everyone receiving from you):**
+
+- **The game's `[Net]` tuning, written into memory** every 100 ms:
+  `MinBandwidth` 16000, `MaxBandwidth` 320000, `UpCount` 100, `DownCount` 50,
+  `MaxPing` 450. Stock `MaxPing = 300` matters most for warping — a jitter spike
+  makes the governor *cut* your send rate, so fewer updates arrive, so you warp
+  more, and the cut sustains the spike. `net.ini` was supposed to deliver these
+  but has twice been caught found-but-not-applied.
+- **Governor cold-start fix.** The game opens every match at a hardcoded
+  4000 B/s trickle; this lifts it to 16000.
+- **DSCP priority marking** (EF/46) so a WMM or SQM router serves your game
+  traffic ahead of bulk downloads. Real effect under Proton; a no-op on stock
+  Windows.
+- **Outbound burst measurement** (`send_stats`), always on.
+
+**Host only:**
+
+- **Auto-kick relax.** A player is ejected once their connection stays bad for
+  15 s (stock). Widened to 60 s with a 2 s ping ceiling, so a transient spike no
+  longer kicks anyone.
+
+All memory writes are data-only and DRM-safe — no game code is modified — and
+every address is sanity-checked before it's written.
 
 ---
 
-## More Technical Docs
+## Tuning
 
-- [Linux/proton_dsound_proxy/README.md](Linux/proton_dsound_proxy/README.md)
-- [Microslop/winmm_proxy/README.md](Microslop/winmm_proxy/README.md)
-- [net-ini/README.md](net-ini/README.md)
+Everything above has an environment variable, and the defaults are meant to be
+what you want. Full tables:
+
+- [Linux / Proton proxy](Linux/proton_dsound_proxy/README.md)
+- [Windows proxy](Microslop/winmm_proxy/README.md)
+- [net.ini (superseded, kept as fallback)](net-ini/README.md)
+
+The ones worth knowing:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BZ_NET_TUNE` | `1` | `0` restores the game's stock governor behaviour |
+| `BZ_AUTOKICK_RELAX` | `1` | `0` restores stock auto-kicking |
+| `BZ_GOV_START` | `16000` | `0` restores the stock 4000 B/s cold start |
+| `BZ_REORDER` | `1` | `0` disables inbound reordering entirely |
+| `BZ_REORDER_STATS` | `1` | `0` silences the 10-second counter lines |
+| `BZ_SEND_PACE` | `0` | bytes/sec outbound smoothing; off, measure first |
+| `BZ_IOCP_SCAN` | `0` | Windows: log which completion API the game uses |
+
+---
+
+## Known limits
+
+- **It fixes ordering, not loss or congestion.** No receiver-side patch can fix
+  a saturated uplink on the *sending* peer's end. That's a wired-ethernet or
+  router-QoS problem for them.
+
+- **Reordering is not free, and the drop counter hides the cost.** Holding a
+  packet to reorder it adds latency, and the game's drop count stops counting a
+  packet the moment it's held — whether or not you're better off. V4.7 bounds
+  the cost and measures it, but the old "65% fewer drops" headline was never the
+  whole story.
+
+- **Windows players get no inbound reordering yet.** On real Windows the game
+  receives via overlapped/IOCP, which the reorder hook deliberately bypasses —
+  routing those through it froze the game at the loading screen in V4.1. Windows
+  installs get the socket buffers, the `[Net]` tuning, the governor fix and the
+  auto-kick relax; reordering is fully active only under Proton.
+  `BZ_IOCP_REORDER=1` exists but **has never run on real Windows** — leave it
+  off unless you're deliberately testing it. `BZ_IOCP_SCAN=1` is read-only and
+  safe, and answers the one question blocking this work.
+
+- **Ping packets aren't yet exempt from receive buffering.** If ping replies
+  ride the ordered queue, the buffer inflates the round-trip time a host
+  measures against the kick threshold. `BZ_REORDER_MAX_HOLD_MS` caps the damage;
+  a proper fast lane needs one capture session to identify the packet type.
+
+- **The memory addresses are pinned to one game build.** If Rebellion patches
+  the game, expect `net_patch: … VETOED` and stock behaviour — not a crash, but
+  not the fix either.
+
+- **A workshop mod shipping `net.ini` overrides the patch's copy.** Unsubscribe;
+  disabling in-game isn't enough.
+
+---
+
+## Things we learned the hard way
+
+- **`net.ini` only loads through the mod system — and even then, found ≠
+  applied.** A copy next to the exe is silently ignored. Delivered as a local
+  mod the game logs `MOD FOUND`, yet a 2026-07-05 match proved the values still
+  weren't used: the host ran `AutoKickTime = 45000` and kicked at the stock 15 s.
+  Working theory is that only the session's *active* mod (the map's) is parsed.
+  This is why V4.7 writes the values into memory instead.
+- **The send governor runs on every machine**, not just the host's — contrary to
+  long-standing community wisdom. Only auto-kick is host-enforced.
+- **The raw warp count means nothing.** ~90% of `Possible Large Warp` lines are
+  sub-metre corrections. Filter by distance or you're measuring noise.
+- **The game imports winsock functions by ordinal** and sends all P2P traffic via
+  `WSASendTo`; `sendto` isn't in its import table at all.
+
+Full research notes: [resources/](resources/) ·
+[test-logs/](test-logs/)

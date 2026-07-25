@@ -1,5 +1,19 @@
 # Host-Side net.ini Tuning
 
+> **Superseded as of V4.7 — kept for reference and as a fallback.**
+>
+> The proxy now writes these same values straight into the game's configuration
+> globals (`BZ_NET_*`, on by default; see `shared/net_globals.h`), because this
+> file has twice been observed *found but not applied*: BZLogger printed
+> `MOD FOUND net.ini` while the host still kicked at the stock 15 s and the
+> governor still sat below the `MinBandwidth` written here. The working theory
+> is that only the session's active mod — the map's — is ever parsed.
+>
+> The installers still place this file, and it does no harm when it works. But
+> do not rely on it, and do not tune here expecting an effect: check
+> `net_patch:` lines in the proxy log instead. Also note the correction below —
+> the governor runs on **every** machine, not only the host's.
+
 The DLL proxy fixes the *receive* side (out-of-order drops). This `net.ini`
 fixes the *send* side: BZ98R's `Net::AdjustBandwidth` governor cuts the send
 rate every time ping exceeds `MaxPing` and caps it at `MaxBandwidth`. With
@@ -7,8 +21,11 @@ the stock (or the popular workshop "Auto-Kick Reduction Patch") values, one
 jitter spike can collapse the send rate to a trickle and the lag feeds
 itself.
 
-**This only takes effect on the machine hosting the game.** Clients gain
-nothing from installing it, but it never hurts.
+**Partly host-only.** The auto-kick thresholds are enforced by the session
+host, so only the host's values matter for kicks. The *governor* keys
+(`MinBandwidth`, `MaxBandwidth`, `UpCount`, `DownCount`, `MaxPing`) run on
+every machine — both clients and host log `Net: Bandwidth usage now set to`,
+contradicting the long-standing community claim that this file is host-only.
 
 ## Install
 

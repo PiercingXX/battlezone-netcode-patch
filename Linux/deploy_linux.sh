@@ -66,7 +66,11 @@ echo
 echo "Deployment complete."
 echo "Steam launch options should be:"
 echo 'WINEDLLOVERRIDES=dsound=n,b %command% -nointro'
-echo '(Reorder, bigger buffers, DSCP priority, and the host auto-kick relax are on'
-echo ' by default - nothing else to set. BZ_AUTOKICK_RELAX=0 restores stock kicking.)'
+echo '(Reorder, bigger buffers, DSCP priority, the [Net] tuning poke, the governor'
+echo ' cold-start fix and the host auto-kick relax are all on by default - nothing'
+echo ' else to set. BZ_NET_TUNE=0 / BZ_AUTOKICK_RELAX=0 / BZ_GOV_START=0 opt out.)'
+echo '(After a match, check dsound_proxy.log for net_patch: / reorder_stats: /'
+echo ' send_stats: lines, then run:'
+echo '   tools/analyze_drops.py <game>/dsound_proxy.log <game>/BZLogger.txt)'
 echo '(BZ_SEND_DUP=1 exists but is deprecated: live testing showed duplication does not'
 echo ' help this game and degrades busy uplinks. Leave it off.)'
