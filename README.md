@@ -55,9 +55,6 @@ WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 
 Without step 2 the DLL is never loaded. That's the whole install.
 
-> Have both native **and** Flatpak Steam? They're separate installs with
-> separate launch options. Patch and configure each one.
-
 ### Manual install
 
 Prefer to do it by hand, or need a second install patched? See
