@@ -1296,7 +1296,7 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
         }
 
         uint32_t seq = 0;
-        std::memcpy(&seq, drain_buf + kReorderSeqOffset, sizeof(seq));
+        seq = reorder_seq_from_payload(reinterpret_cast<const uint8_t *>(drain_buf));
 
         uint64_t arrival_ms = GetTickCount64();
         PeerBuf *pb = reorder_get_peer(&g_rx, drain_src, arrival_ms);
@@ -2403,11 +2403,28 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         }
         init_buffer_log_if_needed();
         {
-            // Reorder enabled by default; BZ_REORDER=0 disables.
+            // Reorder is OFF by default since 2026-07-26; BZ_REORDER=1 enables.
+            //
+            // Two independent measurements retired it.  It never ran: the game
+            // issues overlapped WSARecvFrom (28% of calls return
+            // WSA_IO_PENDING), which hits the `overlapped != nullptr` bypass
+            // below, so across a 2.5 h session it buffered zero packets and
+            // emitted no reorder_stats at all.  And it had nothing to do: a
+            // 65,536-datagram wire capture measured out-of-order arrivals at
+            // 0.0-0.2% across all three packet classes, corroborated by the
+            // game's own log, where 6,998 of 7,012 discards were packets
+            // already consumed and only 14 arrived early.  The traffic problem
+            // on these links is duplication (56-83%) and outright loss, neither
+            // of which a reorder buffer addresses.
+            //
+            // The code is kept, tested and correct rather than deleted, because
+            // the finding is about *these* links; a link that genuinely
+            // reorders would still be served by it.  Turning it on also needs a
+            // receive path that can reach it — see Known Limits in the README.
             reorder_init(&g_rx);
             const char *reorder_env = std::getenv("BZ_REORDER");
             g_reorder_enabled = (reorder_env == nullptr || *reorder_env == '\0')
-                                ? true : env_truthy(reorder_env);
+                                ? false : env_truthy(reorder_env);
             const char *adapt_env = std::getenv("BZ_REORDER_ADAPT");
             g_rx.adapt = (adapt_env == nullptr || *adapt_env == '\0')
                          ? true : env_truthy(adapt_env);
@@ -2448,7 +2465,15 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             // which starves the opening world-state burst.  Poking MinBandwidth
             // below covers the session-setup copy; this covers the separate
             // hardcoded push.  BZ_GOV_START=0 disables.
-            g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 16000), 0, 200000);
+            // Raised 16000 -> 40000 on 2026-07-26.  This, not MinBandwidth, is what
+            // sets a match's opening send rate (see shared/net_globals.h).  A live
+            // match sat at 16000 for 72 s *after* the simulation started, then took
+            // 2.4 min to reach 40 kB/s and 4.7 min to reach 80 kB/s, while the
+            // governor eventually ran to 91,900-112,700 with no ping-driven cutback
+            // and measured peak send was only 64,361 B/s.  The opening was therefore
+            // far below what the link demonstrably carried.  Not yet validated at
+            // 40000 across a full match; BZ_GOV_START=16000 restores the old value.
+            g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 40000), 0, 200000);
             // The whole [Net] block, written straight into .data.  Presets are
             // on by default (BZ_NET_TUNE=0 / BZ_AUTOKICK_RELAX=0 restore stock)
             // and mirror net-ini/net.ini — which encodes the intended tuning but

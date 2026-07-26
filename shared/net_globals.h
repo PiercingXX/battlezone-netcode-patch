@@ -65,12 +65,23 @@ inline void net_globals_defaults(NetGlobal *t) {
     size_t i = 0;
 
     // ── Send governor ────────────────────────────────────────────────────────
-    // MinBandwidth is also the value copied into the live send rate when a
-    // session is set up (at 0x56fdb2, *before* net.ini is read at 0x56ffcf),
-    // which is why net.ini could never raise the cold start.  Poked here, it
-    // can: 16000 keeps game state flowing instead of opening every match at a
-    // 4 KB/s trickle.  BZ_GOV_START remains the backstop for the separate
-    // hardcoded 4000 push.
+    // NOT the opening send rate — tested 2026-07-26 and disproved.  A match run
+    // with BZ_NET_MINBANDWIDTH=40000 (proxy log confirms `MinBandwidth 1000 ->
+    // 40000` applied) still opened at 16000, and governor_patch logged
+    // `cold-start caught, send-rate 4000 -> 16000`, meaning the live rate was
+    // still 4000 at session setup.  Had this value been copied there, the rate
+    // would have read 40000 and the cold-start watcher — which fires only on
+    // exactly 4000 — could never have triggered.  It did not act as a floor
+    // afterwards either: the rate climbed 16000 -> 16500 -> 17000 without ever
+    // jumping to 40000.
+    //
+    // So the claim that this is copied into the live send rate at 0x56fdb2 is
+    // wrong for this build, and by extension the identification of this address
+    // as MinBandwidth is itself unconfirmed.  The sanity gate below only rejects
+    // values outside [500, 2000000], which is far too wide to catch a wrong
+    // address.  BZ_GOV_START is what actually sets the opening rate; tune the
+    // ramp with that.  Left at 0 (leave the game's value) until the address is
+    // re-verified.
     t[i++] = NetGlobal{0x008e8cf4, "MinBandwidth",  "BZ_NET_MINBANDWIDTH",  4000,   500, 2000000, 0, 0, kNgPending, 0};
     // Ceiling.  A 2026-07-19 session was observed ramping to 79,600 B/s, so a
     // "safe" low cap would be a regression; the governor is closed-loop
@@ -117,7 +128,10 @@ enum {
 // Preset values applied when the BZ_NET_TUNE preset is on.  These mirror
 // net-ini/net.ini.  Index-aligned with the table above; 0 = leave alone.
 constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
-    16000,   // MinBandwidth
+    0,       // MinBandwidth — writing this changed nothing measurable in a live
+             // A/B (see the entry above) and the address is unconfirmed, so we
+             // no longer write it by default.  BZ_NET_MINBANDWIDTH still forces
+             // a value for anyone re-testing it.
     320000,  // MaxBandwidth
     100,     // UpCount
     50,      // DownCount

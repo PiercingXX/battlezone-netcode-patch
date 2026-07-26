@@ -103,21 +103,29 @@ struct Sim {
 
             const sockaddr_in from = peer_addr(w.peer);
             std::memset(buf, 0, sizeof(buf));
-            std::memcpy(buf + kReorderSeqOffset, &w.seq, sizeof(w.seq));
+            // Write the sequence exactly as the wire carries it: u16 big-endian.
+            // This used to memcpy a host-order u32, which silently agreed with
+            // whatever the header said and so could never catch a wrong field.
+            buf[kReorderSeqOffset]     = static_cast<uint8_t>((w.seq >> 8) & 0xff);
+            buf[kReorderSeqOffset + 1] = static_cast<uint8_t>(w.seq & 0xff);
+
+            // Read it back out the way the proxies do, so the wire encoding is
+            // on the tested path rather than bypassed by handing w.seq along.
+            const uint32_t seq = reorder_seq_from_payload(buf);
 
             PeerBuf *pb = reorder_get_peer(&ctx, from, now);
             if (pb == nullptr) {
                 ctx.stats.bypass_table_full++;
-                out.push_back(Delivered{w.peer, w.seq});
+                out.push_back(Delivered{w.peer, seq});
                 return true;
             }
 
-            reorder_adapt_on_arrival(&ctx, pb, w.seq, now);
+            reorder_adapt_on_arrival(&ctx, pb, seq, now);
 
             ReorderSlot evicted;
             std::memset(&evicted, 0, sizeof(evicted));
             const InsertResult r =
-                reorder_insert(&ctx, pb, w.seq, now, from, buf, w.len, &evicted);
+                reorder_insert(&ctx, pb, seq, now, from, buf, w.len, &evicted);
             if (r == kInsertEvicted) {
                 reorder_note_delivery(&ctx, pb, evicted.seq, evicted.ts, now, kDeliverEvicted);
                 out.push_back(Delivered{w.peer, evicted.seq});
@@ -187,7 +195,7 @@ bool ascending_for(const Sim &s, uint32_t peer) {
         if (d.peer != peer) {
             continue;
         }
-        if (seen && seq_cmp_u32(d.seq, last) <= 0) {
+        if (seen && seq_cmp(d.seq, last) <= 0) {
             return false;
         }
         last = d.seq;
@@ -451,6 +459,41 @@ void test_duplicate_dropped() {
 
 }  // namespace
 
+// The sequence field is 16 bits, so it wraps every 65,536 packets — at the
+// 100-200 packets/sec measured live that is every 6-11 minutes, i.e. at least
+// once in an ordinary match.  Comparing in 32-bit space reads 0xffff -> 0x0000
+// as a 65,535-packet *backward* jump, rejects everything after it as stale, and
+// stalls the peer for the rest of the game.
+void test_sequence_wrap() {
+    begin("16-bit sequence wrap is not read as a backward jump");
+    Sim s;
+    for (uint32_t i = 0; i < 40; ++i) {
+        s.send(0, (0xffe0 + i) & kReorderSeqMask);
+        s.pump();
+        s.advance(10);
+    }
+    CHECK_EQ(s.out.size(), 40u);
+    CHECK(ascending_for(s, 0));
+    CHECK_EQ(s.ctx.stats.dropped_stale, 0u);
+    CHECK_EQ(s.ctx.stats.delivered_forced, 0u);
+    CHECK_EQ(s.win_of(0), kReorderMinMsDef);
+}
+
+// Reordering that straddles the wrap must still be repaired, not passed
+// through: the gap-fill arithmetic has to wrap too, not just the comparison.
+void test_reorder_across_wrap() {
+    begin("out-of-order arrival straddling the wrap is still reordered");
+    Sim s;
+    s.send(0, 0xfffe); s.pump(); s.advance(10);
+    s.send(0, 0x0000); s.pump(); s.advance(5);   // jumped the wrap, gap open
+    s.send(0, 0xffff); s.pump(); s.advance(10);  // straggler fills it
+    s.advance(kReorderDefaultMs * 2);
+    s.pump();
+    CHECK_EQ(s.out.size(), 3u);
+    CHECK(ascending_for(s, 0));
+    CHECK_EQ(s.ctx.stats.dropped_stale, 0u);
+}
+
 int main() {
     std::printf("reorder_core V4.7 regression tests\n");
     test_clean_in_order();
@@ -463,6 +506,8 @@ int main() {
     test_peer_reclaim();
     test_max_hold_ceiling();
     test_duplicate_dropped();
+    test_sequence_wrap();
+    test_reorder_across_wrap();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

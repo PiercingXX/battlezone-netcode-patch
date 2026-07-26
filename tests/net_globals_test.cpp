@@ -174,10 +174,20 @@ void test_env_presets_and_overrides() {
     unsetenv("BZ_NET_MAXBANDWIDTH");
     net_globals_defaults(tbl);
     net_globals_configure(tbl, kNetGlobalCount);
-    CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
+    // MinBandwidth is deliberately NOT written by default since 2026-07-26: a
+    // live A/B showed writing it changed nothing, and the address is
+    // unconfirmed.  See the entry in shared/net_globals.h.
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
     CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
+
+    // ...but anyone re-testing it can still force a value by env.
+    setenv("BZ_NET_MINBANDWIDTH", "40000", 1);
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 40000u);
+    unsetenv("BZ_NET_MINBANDWIDTH");
 
     // Per-key override beats the preset.
     setenv("BZ_NET_MAXBANDWIDTH", "48000", 1);

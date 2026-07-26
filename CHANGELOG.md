@@ -1,6 +1,70 @@
 # Changelog
 
-## V4.7 (current)
+## V4.8 (current)
+
+**Measurement corrected the record: the reorder buffer never ran, and on real
+links there was nothing for it to reorder. It now ships off by default.**
+
+### What a wire capture showed
+
+`buffer-logging/decode_buffer_log.py` (specified in the buffer-logging readme
+since the logger landed, never written until now) decoded a 65,536-datagram
+capture from a live match:
+
+- **The game receives via overlapped I/O.** 100% of receives go through
+  `WSARecvFrom`, and 28% return `WSA_IO_PENDING`. The reorder path bypasses
+  overlapped calls, so across a 2.5-hour session it buffered zero packets and
+  emitted no `reorder_stats` line at all — under Proton, where reordering was
+  documented as "fully active". Every improvement measured to date belongs to
+  the `[Net]` poke, the socket buffers and DSCP marking.
+- **Out-of-order arrivals are 0.0-0.2%.** Measured per packet class, and
+  corroborated by the game's own log: 6,998 of 7,012 discards were packets
+  already consumed, only 14 arrived early. The real traffic problem is
+  duplication (56-83%) and loss (10-27%).
+
+`BZ_REORDER` therefore defaults to **0**. The code is kept, tested and correct
+rather than deleted — the finding is about these links, not all links.
+
+### Two long-standing errors corrected
+
+- **Sequence field.** Read as u32 little-endian at payload offset 13; it is
+  **u16 big-endian at offset 16**. The old field could not distinguish packets:
+  two datagrams with different sequence numbers both read `0x380000c1`, because
+  byte 16 is the counter's high byte landing as that u32's most significant
+  byte. It changed once per 256 packets. Extraction now lives in one shared
+  helper instead of three separate `memcpy`s, comparison wraps in 16-bit space
+  (the counter wraps every ~6-11 minutes of play, which 32-bit comparison would
+  have read as a 65,535-packet backward jump and stalled the peer on), and two
+  regression tests cover the wrap. `resources/valid_capture_reorder_signal_*`
+  are marked superseded.
+- **`MinBandwidth` does not set the opening send rate.** A live A/B with
+  `BZ_NET_MINBANDWIDTH=40000` opened at 16000 anyway, with the live rate still
+  4000 at session setup. `BZ_GOV_START` is the real lever. `MinBandwidth` is no
+  longer written by default and its address is flagged unconfirmed.
+
+### Governor
+
+`BZ_GOV_START` raised 16000 -> 40000. A measured match sat at the opening rate
+for 72 seconds *after* the simulation started, took 4.7 minutes to reach
+80 kB/s, and peaked at 64 kB/s actual send against a governor budget that ran to
+112,700 — the opening was far below what the link carried. Not yet validated at
+40000 across a full match.
+
+### Tooling
+
+`tools/analyze_drops.py` was scoring every A/B on a number that did not mean
+what its docstring claimed. Discards are all *already-consumed* packets, not
+stale/out-of-order arrivals; `expected #0` (23-46% of lines) was folded into the
+headline; a heuristic silently halved the result; and session slicing ran each
+match into every later one, reporting a 20.8-minute game as 72.5 minutes. All
+fixed, plus retransmits-per-MB added as the log's actual loss signal.
+
+The buffer logger now writes a paste-ready `launch_options.txt` (a header line
+above it meant a select-all paste fed Steam the header) and documents the
+`%command%` ordering rule. The Linux proxy wrote literal `\r\n` into
+`bz_buffer_log.meta.txt` where the Windows one writes real CRLF.
+
+## V4.7
 
 **Reorder-buffer correctness pass, the whole `[Net]` block written directly into
 the game, outbound measurement, and Windows IOCP groundwork.**

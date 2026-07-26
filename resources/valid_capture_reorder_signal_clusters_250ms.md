@@ -1,5 +1,17 @@
 # Signal-Only Reorder Events
 
+> **SUPERSEDED — 2026-07-26.** This analysis derived the reorder sequence field
+> as u32 little-endian at payload offset 13, and the "backward" class below from
+> it. A live 65,536-datagram capture on 2026-07-26 showed that field is not the
+> packet counter: two datagrams with different sequence numbers read back
+> identical under it, because byte 16 is the counter's high byte landing as the
+> most significant byte of that little-endian u32. The real field is **u16
+> big-endian at offset 16** (`shared/reorder_core.h`). Re-measured with the
+> correct field, out-of-order arrivals are **0.0-0.2%**, not the rate implied
+> here — so the "backward" events counted below are an artifact of reading the
+> wrong bytes. Kept for provenance; do not re-derive an offset from it.
+
+
 - Source: /media/Working-Storage/GitHub/Battlezone Netcode Patch/resources/valid_capture_reorder_events.csv
 - Filter: classes in ['backward', 'forward_gap_small']
 - Retained events: 240

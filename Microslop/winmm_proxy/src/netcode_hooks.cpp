@@ -705,7 +705,7 @@ static BOOL WINAPI Hooked_GetQueuedCompletionStatus(HANDLE port, LPDWORD bytes,
 
         g_iocp_completed++;
         uint32_t seq = 0;
-        std::memcpy(&seq, r->buf + kReorderSeqOffset, sizeof(seq));
+        seq = reorder_seq_from_payload(reinterpret_cast<const uint8_t *>(r->buf));
         const sockaddr_in src = *reinterpret_cast<sockaddr_in *>(r->from);
         r->ov = nullptr;
 
@@ -726,7 +726,7 @@ static BOOL WINAPI Hooked_GetQueuedCompletionStatus(HANDLE port, LPDWORD bytes,
 
         // Already superseded: the game would discard it as stale anyway, and
         // holding it helps nobody.  Pass it on without moving the cursor.
-        if (seq_cmp_u32(seq, pb->last_seq) <= 0) {
+        if (seq_cmp(seq, pb->last_seq) <= 0) {
             g_rx.stats.dropped_stale++;
             LeaveCriticalSection(&g_iocp_cs);
             *bytes = b; *key = k; *ov = o;
@@ -1293,7 +1293,7 @@ static int WSAAPI Hooked_WSARecvFrom(
         }
 
         uint32_t seq = 0;
-        std::memcpy(&seq, drain_buf + kReorderSeqOffset, sizeof(seq));
+        seq = reorder_seq_from_payload(reinterpret_cast<const uint8_t *>(drain_buf));
 
         uint64_t arrival_ms = GetTickCount64();
         PeerBuf *pb = reorder_get_peer(&g_rx, drain_src, arrival_ms);
@@ -1951,10 +1951,14 @@ void InstallNetcodeHooks()
     // Apply user-tunable reorder parameters (all optional; parity with the
     // Linux dsound proxy env vars)
     {
+        // Reorder is OFF by default since 2026-07-26; BZ_REORDER=1 enables.
+        // See the matching note in the Linux proxy: the game's overlapped
+        // receives never reach this path, and a live capture measured
+        // out-of-order arrivals at 0.0-0.2%.  Kept, tested, and off.
         reorder_init(&g_rx);
         const char *reorder_env = std::getenv("BZ_REORDER");
         g_reorder_enabled = (reorder_env == nullptr || *reorder_env == '\0')
-                            ? true : env_truthy(reorder_env);
+                            ? false : env_truthy(reorder_env);
         const char *adapt_env = std::getenv("BZ_REORDER_ADAPT");
         g_rx.adapt = (adapt_env == nullptr || *adapt_env == '\0')
                      ? true : env_truthy(adapt_env);
@@ -1997,7 +2001,15 @@ void InstallNetcodeHooks()
         // hardcodes a 4000 B/s start for every match, which starves the opening
         // world-state burst.  Poking MinBandwidth below covers the session-setup
         // copy; this covers the separate hardcoded push.  BZ_GOV_START=0 disables.
-        g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 16000), 0, 200000);
+        // Raised 16000 -> 40000 on 2026-07-26.  This, not MinBandwidth, is what
+        // sets a match's opening send rate (see shared/net_globals.h).  A live
+        // match sat at 16000 for 72 s *after* the simulation started, then took
+        // 2.4 min to reach 40 kB/s and 4.7 min to reach 80 kB/s, while the
+        // governor eventually ran to 91,900-112,700 with no ping-driven cutback
+        // and measured peak send was only 64,361 B/s.  The opening was therefore
+        // far below what the link demonstrably carried.  Not yet validated at
+        // 40000 across a full match; BZ_GOV_START=16000 restores the old value.
+        g_gov_start = clamp_u32(parse_env_u32("BZ_GOV_START", 40000), 0, 200000);
         // The whole [Net] block, written straight into .data.  Presets are on by
         // default (BZ_NET_TUNE=0 / BZ_AUTOKICK_RELAX=0 restore stock) and mirror
         // net-ini/net.ini — which encodes the intended tuning but has twice been

@@ -35,10 +35,25 @@
 namespace bznet {
 
 // ── Wire layout ──────────────────────────────────────────────────────────────
-// Sequence field: u32le at payload byte offset 13, located via live binary
-// capture analysis (resources/valid_capture_reorder_signal_only.csv).
-constexpr uint32_t kReorderSeqOffset    = 13;
-constexpr uint32_t kReorderSeqMinPay    = 17;   // shortest payload carrying a seq
+// Sequence field: u16 BIG-endian at payload byte offset 16.
+//
+// This was u32 little-endian at offset 13 until 2026-07-26, from
+// resources/valid_capture_reorder_signal_only.csv.  A live capture that day
+// (65,536 datagrams, bz_buffer_log.bin) showed that field cannot be the packet
+// counter: two datagrams whose sequence numbers differ read back *identical*
+// under it —
+//     payload ...c1 00 00 38 f3   u32le@13 = 0x380000c1   u16be@16 = 0x38f3
+//     payload ...c1 00 00 38 f5   u32le@13 = 0x380000c1   u16be@16 = 0x38f5
+// because byte 16 is the counter's high byte and lands as the *most*
+// significant byte of that little-endian u32.  The old field therefore only
+// changed once per 256 packets: 340 distinct values where the real counter had
+// 3,806.  Scoring every offset/width/endianness for per-peer monotonicity put
+// u16be@16 at 0.984-1.000 forward-step across all three observed packet
+// classes (18-byte heartbeat, ~250-byte state, mid), independently.
+constexpr uint32_t kReorderSeqOffset    = 16;
+constexpr uint32_t kReorderSeqBytes     = 2;
+constexpr uint32_t kReorderSeqMask      = 0xffffu;
+constexpr uint32_t kReorderSeqMinPay    = 18;   // shortest payload carrying a seq
 
 // ── Window tuning ────────────────────────────────────────────────────────────
 constexpr uint32_t kReorderDefaultMs    = 100;  // window ceiling
@@ -88,7 +103,7 @@ enum InsertResult {
 
 struct ReorderSlot {
     uint64_t    ts;                          // arrival time (ms)
-    uint32_t    seq;                         // BZRNet sequence (payload[13] u32le)
+    uint32_t    seq;                         // BZRNet sequence (u16be at payload[16])
     uint32_t    len;                         // payload byte count
     uint32_t    used;                        // 1 = slot occupied
     uint32_t    _pad;
@@ -142,12 +157,32 @@ struct ReorderCtx {
     ReorderStats stats;
 };
 
-inline int32_t seq_cmp_u32(uint32_t a, uint32_t b) {
-    return static_cast<int32_t>(a - b);
+// Sequence comparison must wrap in the counter's OWN width, not in 32 bits.
+// The field is 16 bits, so it wraps every 65,536 packets — at the ~100-200
+// packets/sec measured in a live match that is roughly every 6-11 minutes, i.e.
+// at least once in an ordinary game.  Comparing in 32-bit space would read the
+// wrap as a 65,535-packet backward jump and stall the peer for the rest of the
+// match.
+inline int32_t seq_cmp(uint32_t a, uint32_t b) {
+    return static_cast<int16_t>(static_cast<uint16_t>(a) - static_cast<uint16_t>(b));
+}
+
+// Successor of a sequence number, wrapping in the field's width.
+inline uint32_t seq_next(uint32_t s) {
+    return (s + 1) & kReorderSeqMask;
 }
 
 inline bool seq_ahead_or_equal(uint32_t seq, uint32_t want) {
-    return seq_cmp_u32(seq, want) >= 0;
+    return seq_cmp(seq, want) >= 0;
+}
+
+// Read the sequence out of a datagram.  Single definition so the two proxies
+// and the IOCP path cannot drift on width or endianness — they previously each
+// did their own memcpy, which is how a wrong offset stayed wrong in three
+// places at once.  Caller must have checked len >= kReorderSeqMinPay.
+inline uint32_t reorder_seq_from_payload(const uint8_t *p) {
+    return (static_cast<uint32_t>(p[kReorderSeqOffset]) << 8)
+         |  static_cast<uint32_t>(p[kReorderSeqOffset + 1]);
 }
 
 inline void reorder_init(ReorderCtx *c) {
@@ -254,7 +289,7 @@ inline void reorder_adapt_on_arrival(ReorderCtx *c, PeerBuf *pb, uint32_t seq, u
         return;
     }
 
-    const int32_t cmp = seq_cmp_u32(seq, pb->last_seq);
+    const int32_t cmp = seq_cmp(seq, pb->last_seq);
     if (cmp == 0) {
         // Exact duplicate of the last delivered packet (link-layer retransmit,
         // common on WiFi): not reorder evidence, must not grow the window.
@@ -275,7 +310,7 @@ inline void reorder_adapt_on_arrival(ReorderCtx *c, PeerBuf *pb, uint32_t seq, u
         return;
     }
 
-    if (seq == pb->last_seq + 1 && pb->filled > 0) {
+    if (seq == seq_next(pb->last_seq) && pb->filled > 0) {
         // Gap just closed: measure how long the held packets waited.
         uint64_t oldest_ts = now;
         for (uint32_t i = 0; i < c->depth; ++i) {
@@ -333,7 +368,7 @@ inline void reorder_purge_stale(ReorderCtx *c, PeerBuf *pb) {
         if (!pb->slots[i].used) {
             continue;
         }
-        if (seq_cmp_u32(pb->slots[i].seq, pb->last_seq) <= 0) {
+        if (seq_cmp(pb->slots[i].seq, pb->last_seq) <= 0) {
             pb->slots[i].used = 0;
             if (pb->filled > 0) {
                 --pb->filled;
@@ -351,7 +386,7 @@ inline void reorder_purge_stale(ReorderCtx *c, PeerBuf *pb) {
 // tracking for everything that followed.  It now only ever advances.
 inline void reorder_note_delivery(ReorderCtx *c, PeerBuf *pb, uint32_t seq,
                                   uint64_t arrival_ts, uint64_t now, int kind) {
-    if (!pb->seq_init || seq_cmp_u32(seq, pb->last_seq) > 0) {
+    if (!pb->seq_init || seq_cmp(seq, pb->last_seq) > 0) {
         pb->last_seq = seq;
     }
     pb->seq_init = 1;
@@ -396,7 +431,7 @@ inline void reorder_note_delivery(ReorderCtx *c, PeerBuf *pb, uint32_t seq,
 inline InsertResult reorder_insert(ReorderCtx *c, PeerBuf *pb, uint32_t seq, uint64_t ts,
                                    const sockaddr_in &from, const uint8_t *data, uint32_t len,
                                    ReorderSlot *evicted_out) {
-    if (pb->seq_init && seq_cmp_u32(seq, pb->last_seq) <= 0) {
+    if (pb->seq_init && seq_cmp(seq, pb->last_seq) <= 0) {
         c->stats.dropped_stale++;
         return kInsertStale;
     }
@@ -467,7 +502,7 @@ inline int reorder_pick(ReorderCtx *c, PeerBuf *pb, uint64_t now, int *kind_out)
                 best = static_cast<int>(i);
                 continue;
             }
-            const int32_t cmp = seq_cmp_u32(pb->slots[i].seq, pb->slots[best].seq);
+            const int32_t cmp = seq_cmp(pb->slots[i].seq, pb->slots[best].seq);
             if (cmp < 0 || (cmp == 0 && pb->slots[i].ts < pb->slots[best].ts)) {
                 best = static_cast<int>(i);
             }
@@ -476,7 +511,7 @@ inline int reorder_pick(ReorderCtx *c, PeerBuf *pb, uint64_t now, int *kind_out)
         return best;
     }
 
-    const uint32_t want = pb->last_seq + 1;
+    const uint32_t want = seq_next(pb->last_seq);
     for (uint32_t i = 0; i < c->depth; ++i) {
         if (pb->slots[i].used && pb->slots[i].seq == want) {
             return static_cast<int>(i);
