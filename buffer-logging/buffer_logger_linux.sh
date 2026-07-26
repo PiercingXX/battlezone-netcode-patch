@@ -33,9 +33,10 @@ write_launch_options() {
   local ring_records="$3"
   local peer_filter="$4"
 
+  # This file must contain the paste-ready line and NOTHING else.  It used to
+  # carry a human-readable header above the line, and a select-all paste then
+  # fed Steam the header too.  Explanation lives in README_NEXT_STEPS.txt.
   {
-    echo "Linux Steam launch options for buffer logging:"
-    echo
     printf 'WINEDLLOVERRIDES=dsound=n,b BZ_BUFFER_LOG=1 BZ_BUFFER_LOG_BYTES=%s BZ_BUFFER_LOG_RING=%s' "$payload_bytes" "$ring_records"
     if [[ -n "$peer_filter" ]]; then
       printf ' BZ_BUFFER_LOG_PEER="%s"' "$peer_filter"
@@ -94,16 +95,27 @@ start_session() {
   write_launch_options "$session_dir/launch_options.txt" "$payload_bytes" "$ring_records" "$peer_filter"
 
   cat >"$session_dir/README_NEXT_STEPS.txt" <<EOF
-1. Copy the Steam launch options from launch_options.txt.
+1. Paste the WHOLE single line from launch_options.txt into the Steam launch
+   options for Battlezone 98 Redux, replacing what is there.
 2. Start Battlezone 98 Redux.
 3. Reproduce the packet-order issue.
-4. Run ./buffer-logging/buffer_logger_linux.sh stop
+4. Exit the game normally. An unclean exit never flushes the ring buffer and
+   bz_buffer_log.bin will be missing or empty.
+5. Run ./buffer-logging/buffer_logger_linux.sh stop
+
+ORDER MATTERS. Everything before %command% is an environment variable;
+everything after it is an argument handed to the game. Put BZ_BUFFER_LOG=1
+after %command% and the game tries to open it as a mission file and stops
+with: Could not load "BZ_BUFFER_LOG=1".
 
 Expected lightweight outputs from the game folder:
 - dsound_proxy.log
 - bz_buffer_log.bin
 - bz_buffer_log.meta.txt
 - BZLogger.txt
+
+Decode the capture with:
+  python3 buffer-logging/decode_buffer_log.py <bundle>/bz_buffer_log.bin --seq-scan
 EOF
 
   echo "Buffer logging session started."
