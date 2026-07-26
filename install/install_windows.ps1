@@ -9,7 +9,12 @@ $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
 $netIniUrl = if ($env:BZNET_NETINI_URL) { $env:BZNET_NETINI_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/net-ini/net.ini" }
-$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "762a1f491d67a2da146a5331ea1ccd6360cb611472dab8ed004cb5bf8d926269" }
+# Must match prebuilt/windows/winmm.dll.sha256.  Deliberately pinned here
+# rather than fetched: the sidecar comes from the same URL as the DLL, so
+# reading it would downgrade this from an integrity check to a corruption
+# check.  tools/check_prebuilt_pins.sh fails if the two drift apart — run it
+# after any prebuilt refresh, or Windows installs break on the next pull.
+$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "5faa0935231e0e8c23000fd8bd087cb8cf177c9c43cc161d950bc86de17deb22" }
 
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]
