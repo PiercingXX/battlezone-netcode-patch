@@ -9,12 +9,21 @@ $ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 $gamePath = if ($args.Count -ge 1 -and $args[0]) { [string]$args[0] } elseif ($env:BZNET_GAME_PATH) { $env:BZNET_GAME_PATH } else { "" }
 $dllUrl = if ($env:BZNET_DLL_URL) { $env:BZNET_DLL_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll" }
 $netIniUrl = if ($env:BZNET_NETINI_URL) { $env:BZNET_NETINI_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/net-ini/net.ini" }
-# Must match prebuilt/windows/winmm.dll.sha256.  Deliberately pinned here
-# rather than fetched: the sidecar comes from the same URL as the DLL, so
-# reading it would downgrade this from an integrity check to a corruption
-# check.  tools/check_prebuilt_pins.sh fails if the two drift apart — run it
-# after any prebuilt refresh, or Windows installs break on the next pull.
-$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "5faa0935231e0e8c23000fd8bd087cb8cf177c9c43cc161d950bc86de17deb22" }
+$shaUrl = if ($env:BZNET_WINMM_SHA256_URL) { $env:BZNET_WINMM_SHA256_URL } else { "https://raw.githubusercontent.com/$repoSlug/$ref/prebuilt/windows/winmm.dll.sha256" }
+# The expected hash is read from the sidecar next to the DLL, not baked in
+# here.  A hardcoded pin goes stale the moment the prebuilt is refreshed, and
+# because this script gets cached (by raw.githubusercontent's CDN, and by
+# anyone who saved it to disk) a refresh broke installs for people running a
+# copy from before it.  That happened on 2026-07-26 and cost a round of
+# support.  The sidecar always travels with the binary, so the two cannot
+# disagree.
+#
+# This is a corruption/truncation check, not a defence against a compromised
+# repo: the sidecar shares an origin with the DLL, and `irm | iex` already
+# grants that origin arbitrary code execution, so a hardcoded pin bought very
+# little.  Anyone who does want strict pinning can set BZNET_WINMM_SHA256 to
+# a known value and it wins over the sidecar.
+$expectedHash = if ($env:BZNET_WINMM_SHA256) { $env:BZNET_WINMM_SHA256.ToLowerInvariant() } else { "" }
 
 function Get-SteamRoots {
     $roots = New-Object System.Collections.Generic.List[string]
@@ -143,6 +152,23 @@ $downloadedDll = Join-Path $tempRoot "winmm.dll"
 
 try {
     New-Item -ItemType Directory -Path $tempRoot | Out-Null
+
+    if (-not $expectedHash) {
+        # Sidecar format is `sha256sum` output: "<64 hex>  winmm.dll".
+        Write-Host "Fetching expected hash from $shaUrl"
+        $shaText = (Invoke-WebRequest -Uri $shaUrl -UseBasicParsing).Content
+        # .Content is a string for text/plain, but byte[] if a proxy strips or
+        # rewrites the content type.  Normalise before matching.
+        if ($shaText -is [byte[]]) {
+            $shaText = [System.Text.Encoding]::ASCII.GetString($shaText)
+        }
+        $shaMatch = [regex]::Match($shaText, '[0-9a-fA-F]{64}')
+        if (-not $shaMatch.Success) {
+            throw "Could not read a SHA256 from $shaUrl. Set BZNET_WINMM_SHA256 to install anyway."
+        }
+        $expectedHash = $shaMatch.Value.ToLowerInvariant()
+    }
+
     Write-Host "Downloading known-good winmm.dll from $dllUrl"
     Invoke-WebRequest -Uri $dllUrl -OutFile $downloadedDll
     Assert-Hash -FilePath $downloadedDll -ExpectedSha256 $expectedHash

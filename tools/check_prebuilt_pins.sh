@@ -38,25 +38,25 @@ for dll in prebuilt/linux/dsound.dll prebuilt/windows/winmm.dll; do
     fi
 done
 
-# --- installer pins vs the binaries they will download ----------------------
-# install_linux.sh pins nothing today; if it ever grows a pin, add it here.
-win_dll="$REPO_ROOT/prebuilt/windows/winmm.dll"
-ps1="$REPO_ROOT/install/install_windows.ps1"
-if [[ -f "$win_dll" && -f "$ps1" ]]; then
-    actual="$(sha256sum "$win_dll" | cut -d' ' -f1)"
-    # The fallback literal in: $expectedHash = if (...) { ... } else { "<hash>" }
-    pinned="$(grep -oE '"[0-9a-f]{64}"' "$ps1" | tr -d '"' | head -1)"
-    if [[ -z "$pinned" ]]; then
-        fail "no 64-hex pin found in install/install_windows.ps1 — did the line move?"
-    elif [[ "$pinned" != "$actual" ]]; then
-        fail "install/install_windows.ps1 pin is stale — Windows installs will break
-    prebuilt: $actual
-    pinned:   $pinned
-  Fix: set \$expectedHash in install/install_windows.ps1 to the prebuilt hash."
+# --- installers must not hardcode a hash ------------------------------------
+# install_windows.ps1 reads prebuilt/windows/winmm.dll.sha256 at run time
+# instead of carrying a literal, so a prebuilt refresh cannot strand people
+# running a cached copy of the script.  Reintroducing a literal would bring
+# back the 2026-07-26 breakage, so flag any that appears.  BZNET_WINMM_SHA256
+# remains available to callers who want strict pinning.
+for script in install/install_windows.ps1 install/install_linux.sh; do
+    path="$REPO_ROOT/$script"
+    [[ -f "$path" ]] || continue
+    # Ignore comment lines: the rationale text mentions hashes by name.
+    literal="$(grep -vE '^\s*(#)' "$path" | grep -oE '[0-9a-f]{64}' | head -1 || true)"
+    if [[ -n "$literal" ]]; then
+        fail "$script hardcodes a SHA256 ($literal)
+  A refresh of the prebuilt will strand anyone running a cached copy of this
+  script. Read the .sha256 sidecar at run time instead."
     else
-        echo "ok: install_windows.ps1 pin matches prebuilt/windows/winmm.dll"
+        echo "ok: $script carries no hardcoded hash"
     fi
-fi
+done
 
 if [[ $status -ne 0 ]]; then
     echo >&2

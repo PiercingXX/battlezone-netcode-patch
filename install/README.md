@@ -41,3 +41,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:BZNET_GAME_PATH='D:
 ```
 
 Windows installs the known-good `winmm.dll` from this repo and verifies SHA256 before deploy. No Steam launch option changes are required.
+
+The expected hash is read from `prebuilt/windows/winmm.dll.sha256` at run time rather than baked into the script, so refreshing the prebuilt cannot break people running a cached or saved copy of the installer. To pin a specific build instead, set `BZNET_WINMM_SHA256` and it wins over the sidecar:
+
+```powershell
+$env:BZNET_WINMM_SHA256='<64 hex>'
+```

@@ -85,6 +85,29 @@ with provenance on a preceding `process exit without closesocket:` line.
 
 This is a measurement fix, not a netcode change — no packet path is touched.
 
+### Windows installer no longer hardcodes the prebuilt's hash
+
+Refreshing `prebuilt/windows/winmm.dll` broke every Windows install: the hash
+was also written as a literal in `install/install_windows.ps1`, and the script
+is cached both by raw.githubusercontent and by anyone who saved it, so copies
+from before the refresh kept checking the new binary against the old hash.
+Updating the literal did not help those copies — they carry their own.
+
+The script now reads `prebuilt/windows/winmm.dll.sha256` at run time, so the
+hash always travels with the binary it describes. This is a corruption check
+rather than a defence against a compromised repo — the sidecar shares an origin
+with the DLL, and `irm | iex` already grants that origin code execution — which
+is roughly what the literal was worth too. `BZNET_WINMM_SHA256` still forces a
+specific value for anyone who wants strict pinning.
+
+The Windows prebuilt is reverted to the V4.8 build published at `2438ff1` so
+already-cached installers keep working. It therefore does not yet carry the
+`DLL_PROCESS_DETACH` counter backstop; the Linux prebuilt does. Refresh it in a
+deliberate release once the sidecar-reading installer has propagated.
+
+`tools/check_prebuilt_pins.sh` verifies each prebuilt against its sidecar and
+fails if an installer reintroduces a hardcoded hash.
+
 ### Known limit in the loss metric
 
 `retransmits per MB sent` divides by the **median governor budget**
