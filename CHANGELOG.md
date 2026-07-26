@@ -64,6 +64,38 @@ above it meant a select-all paste fed Steam the header) and documents the
 `%command%` ordering rule. The Linux proxy wrote literal `\r\n` into
 `bz_buffer_log.meta.txt` where the Windows one writes real CRLF.
 
+### Session counters survive an exit that skips `closesocket`
+
+The first full V4.8 match produced no `session end: send_stats` line at all.
+Both proxies emitted that summary from exactly one place — `hooked_closesocket`
+— and the game held its P2P socket open through the post-match lobby, then went
+away without unwinding. `DLL_PROCESS_DETACH` signalled the worker threads and
+deleted the critical sections without ever formatting the counters, so a
+19.7-minute measurement was discarded at the last step.
+
+Both proxies now re-emit from the detach path when `closesocket` did not get
+there first, guarded by two flags so a clean shutdown still logs once. The
+detach path differs in three ways, all forced by the loader lock: locks are
+taken with `TryEnterCriticalSection`, because the worker threads are already
+terminated and a section one of them owned would never be released; the pacer
+queue is not flushed, since sending is unsafe once ws2_32 may have unwound; and
+no state is reset, as nothing will read it. The `session end: ` prefix is
+byte-identical to the closesocket path so `analyze_drops.py` keeps matching it,
+with provenance on a preceding `process exit without closesocket:` line.
+
+This is a measurement fix, not a netcode change — no packet path is touched.
+
+### Known limit in the loss metric
+
+`retransmits per MB sent` divides by the **median governor budget**
+(`analyze_drops.py:256`), not by bytes actually sent. The budget is known to
+overstate real sending — V4.7 measured 64 kB/s actual against a budget running
+to 112,700 — and the ratio is not fixed, so the figure is only comparable
+between runs whose budgets are in the same range. The 2026-07-26 V4.8 match sat
+at a median of 25,700 against 76,600 for the run it was being compared to,
+which is too wide a gap to score. Now that `send_stats` survives process exit,
+a future revision can use the proxy's own `bytes=` as the denominator.
+
 ## V4.7
 
 **Reorder-buffer correctness pass, the whole `[Net]` block written directly into

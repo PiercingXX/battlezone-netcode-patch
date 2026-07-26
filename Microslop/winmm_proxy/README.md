@@ -93,6 +93,22 @@ game's streams, which the game's own drop counter cannot show. `evicted` and
 and needs a deeper `BZ_REORDER_DEPTH` or a larger packet buffer respectively.
 Run `tools/analyze_drops.py <proxy log>` to have these read out for you.
 
+The `session end:` lines are normally written from `closesocket`. A game that
+exits without closing its P2P socket never reaches that path, and before V4.8
+the whole session's counters went with it — the 2026-07-26 V4.8 match lost its
+send measurement exactly this way on the Proton proxy. `ShutdownNetcodeHooks`
+now re-emits them on the `DLL_PROCESS_DETACH` path as a backstop, preceded by:
+
+```
+process exit without closesocket: emitting session counters from DLL_PROCESS_DETACH
+```
+
+Treat that marker as a caveat on the numbers below it, not on their validity:
+the counters are accurate as of process exit, but the pacer queue is not
+flushed on this path, so a few in-flight packets may be uncounted. If a worker
+thread died holding a lock the line reads `... lock held at exit, send_stats
+lost` instead, and there is nothing to recover.
+
 ### `[Net]` tuning poke (`BZ_NET_*`, on by default)
 
 The game reads its whole `[Net]` configuration into fixed globals at match

@@ -139,6 +139,15 @@ static bool              g_reorder_stats       = true;
 static uint64_t          g_stats_last_ms       = 0;
 constexpr uint64_t       kReorderStatsMs       = 10000;
 
+// Whether the session summary already reached the log.  hooked_closesocket is
+// the normal emit site, but a game that exits without closing its P2P socket
+// never reaches it — the 2026-07-26 V4.8 match did exactly that on the Proton
+// proxy and lost the whole send measurement.  ShutdownNetcodeHooks re-emits
+// when these are still false; they exist so a clean shutdown does not get a
+// second, duplicate line.
+static bool              g_reorder_stats_logged = false;
+static bool              g_send_stats_logged    = false;
+
 // ---------------------------------------------------------
 // Wake helper: the reorder hook drains the kernel socket, so a game thread
 // sleeping in select()/WSAEventSelect() never sees the socket readable while
@@ -1387,6 +1396,7 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
         LeaveCriticalSection(&g_reorder_cs);
         if (have_stats) {
             ProxyLog("session end: %s", line);
+            g_reorder_stats_logged = true;
         }
     }
 
@@ -1404,10 +1414,80 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
         LeaveCriticalSection(&g_pace_cs);
         if (have_pace) {
             ProxyLog("session end: %s", pline);
+            g_send_stats_logged = true;
         }
     }
 
     return rc;
+}
+
+// Last-chance emit for the session counters, called from ShutdownNetcodeHooks
+// on the DLL_PROCESS_DETACH path.
+//
+// Three things differ from the closesocket path, all forced by running under
+// the loader lock at process exit:
+//   - Locks are taken with TryEnterCriticalSection.  The worker threads are
+//     already terminated by this point, so a section one of them still owned
+//     will never be released and EnterCriticalSection would hang the exit.
+//   - The pacer queue is not flushed.  Sending is not safe once ws2_32 may
+//     have unwound, and the counters are what we came for, not the tail.
+//   - Nothing is reset afterwards.  The process is going away regardless, and
+//     reorder_reset/pace_purge_socket would only touch state nobody reads.
+//
+// The "session end: " prefix is kept byte-identical to the closesocket path so
+// tools/analyze_drops.py keeps matching it; provenance goes on its own line.
+static void emit_session_stats_at_exit()
+{
+    if (!g_reorder_stats) {
+        return;                                 // BZ_REORDER_STATS=0
+    }
+    if (g_reorder_stats_logged && g_send_stats_logged) {
+        return;                                 // clean shutdown already did it
+    }
+
+    bool noted = false;
+    auto note = [&noted]() {
+        if (!noted) {
+            ProxyLog("process exit without closesocket: emitting session"
+                     " counters from DLL_PROCESS_DETACH");
+            noted = true;
+        }
+    };
+
+    if (!g_reorder_stats_logged && g_reorder_cs_ready) {
+        char line[1024];
+        bool have_stats = false;
+        if (TryEnterCriticalSection(&g_reorder_cs)) {
+            have_stats = reorder_format_stats(&g_rx, line, sizeof(line)) > 0;
+            LeaveCriticalSection(&g_reorder_cs);
+        } else {
+            note();
+            ProxyLog("session end: reorder lock held at exit, reorder_stats lost");
+        }
+        if (have_stats) {
+            note();
+            ProxyLog("session end: %s", line);
+            g_reorder_stats_logged = true;
+        }
+    }
+
+    if (!g_send_stats_logged && g_pace_cs_ready) {
+        char pline[512];
+        bool have_pace = false;
+        if (TryEnterCriticalSection(&g_pace_cs)) {
+            pace_tick(&g_tx, GetTickCount64());
+            have_pace = pace_format_stats(&g_tx, pline, sizeof(pline)) > 0;
+            LeaveCriticalSection(&g_pace_cs);
+        } else {
+            note();
+            ProxyLog("session end: pace lock held at exit, send_stats lost");
+        }
+        if (have_pace) {
+            note();
+            ProxyLog("session end: %s", pline);
+            g_send_stats_logged = true;
+        }
+    }
 }
 
 // ---------------------------------------------------------
@@ -2289,6 +2369,10 @@ void ShutdownNetcodeHooks()
         g_realClosesocket(g_wake_sender);
         g_wake_sender = INVALID_SOCKET;
     }
+    // Before anything below tears the critical sections down: a game that
+    // exited without closing its P2P socket has not written its counters yet,
+    // and this is the last place they can be recovered.
+    emit_session_stats_at_exit();
     if (g_wake_thread != nullptr) {
         CloseHandle(g_wake_thread);
         g_wake_thread = nullptr;
