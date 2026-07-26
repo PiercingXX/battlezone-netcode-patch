@@ -1,24 +1,45 @@
 #!/usr/bin/env python3
-"""Per-link BZRNet drop analysis for BZ_SEND_DUP A/B testing.
+"""Per-link BZRNet discard analysis.
 
 BZRNet logs every rejected packet as:
   BZRNet P2P Dropping Packet Type 0 For Client <steamid> (Packet #R received, #E expected)
 
-Raw counts are meaningless once duplication is in play, so this classifies each
-drop per sender:
-  echo  (E-R == 1): discard of an intentional duplicate / engine resend. Harmless.
-  real  (E-R >= 2): a genuine stale / out-of-order arrival. The number that matters.
+These lines are NOT loss, and they are not out-of-order arrivals either.  On the
+2026-07-26 five-log set, 6,998 of 7,012 such lines had R < E — the packet had
+*already been consumed*.  A packet arriving early (R > E) is accepted, not
+dropped, so it never appears here at all.  Every line is therefore a duplicate
+or a retransmission that arrived after the original.  Reading them as "stale /
+out-of-order" and scoring an A/B on that number, as this tool did until
+2026-07-26, overstated the interesting quantity by 2-3x.
 
-When the sender was duplicating, each real stale packet is logged twice (original
-+ copy), so real counts are also reported halved ("uniq").
+Classified per sender:
+  dup1    (E-R == 1)  duplicate of the packet just consumed — engine resend or
+                      a network duplicate.  The ordinary background rate.
+  resend  (E-R >= 2)  a block of already-delivered packets sent again; E-R is
+                      how far back the block reached.  Rises with real loss on
+                      the reverse path, because the sender is not being acked.
+  exp0    (E == 0)    no expected sequence for this peer: the same R repeats
+                      2-5x within a millisecond.  23-46% of all lines.
+  ahead   (R > E)     a packet from the future.  Vanishingly rare (14 of 7,012);
+                      if it climbs, the sequence model here is wrong.
 
-Drop counts alone are a misleading score, though: a packet the proxy holds and
-later releases in order stops being counted as a drop whether or not the player
+None of these four is a loss count.  The real loss signal in BZLogger is
+"BZRNet P2P TRY Sent N to <ip>" — the sender retransmitting unacked data —
+and it is reported per peer below, normalised per MB so it stays comparable
+across bandwidth changes.
+
+Drop counts are a misleading score for a second reason: a packet the proxy
+holds and later releases in order stops being counted whether or not the player
 is better off.  So this also reads the proxy's own V4.7 `reorder_stats:` lines
 out of dsound_proxy.log / winmm_proxy.log and reports what the buffer did —
 above all hold_ms(max), the latency the patch itself added, and
 delivered_evicted, packets it had to release out of order under storage
 pressure.  Judge an A/B on all three numbers, not on the drop count alone.
+
+If those lines are absent entirely, the reorder buffer never ran: it is
+implemented only in the WSARecvFrom hook and bypasses overlapped receives.
+Confirm with buffer-logging/decode_buffer_log.py before crediting it for
+anything.
 
 Usage:
   analyze_drops.py LOG [LOG ...] [--launch SUBSTR] [--names steamid=Name,...]
@@ -52,6 +73,9 @@ DROP_RE = re.compile(
 )
 LAUNCH_RE = re.compile(r'Launching Network Game (.+?), Map (\S+)')
 START_RE = re.compile(r'Starting BattleZone 98 Redux')
+# The match actually ending — the player returning to the shell.  This, not the
+# next process start, is a session's real end boundary.
+MATCH_END_RE = re.compile(r'SetRunning: was RUN_STARTED, now RUN_WAS_QUIT')
 
 # V4.7 proxy counters, emitted every 10 s and once more at session end.
 REORDER_RE = re.compile(r'(session end: )?reorder_stats: (.+)$')
@@ -78,17 +102,23 @@ UNLAG_RE = re.compile(r'Chat Message: (.+?) stopped lagging')
 KICK_RE = re.compile(r'Auto kicking player (.+?) due to (.+)')
 # A second drop class, distinct from the Type 0 stale discards.
 UNKNOWN_SRC_RE = re.compile(r"Dropping Packet \(Source IP doesn't match any known player\)")
+# The sender retransmitting unacked reliable data.  This, not the Type 0
+# discards, is the log's actual loss signal.
+TRY_SENT_RE = re.compile(r'BZRNet P2P TRY Sent (\d+) to ([\d.]+):(\d+)')
 
 # Distance buckets in metres.  "visible" starts at 50 m: below that a correction
 # is inside the noise a player reads as ordinary movement.
 WARP_BUCKETS = (1.0, 10.0, 50.0, 200.0, 1000.0)
 WARP_VISIBLE_M = 50.0
 
-# Echo-rate thresholds for inferring outbound duplication, per minute per link.
+# dup1-rate thresholds for inferring outbound duplication, per minute per link.
 # Measured: ~8/min is ordinary engine resend noise, ~40/min is reachable under
-# heavy congestion with dup off, ~300/min is dup actually running.
-DUP_ECHO_RATE_PER_MIN = 150.0
-DUP_ECHO_RATE_SUSPECT = 60.0
+# heavy congestion with dup off, ~300/min is BZ_SEND_DUP actually running.
+# These only raise a flag now.  The old code silently halved the "real" column
+# whenever it tripped, which meant the headline number changed by 2x on a
+# heuristic — a worse failure than the noise it was correcting for.
+DUP_RATE_PER_MIN = 150.0
+DUP_RATE_SUSPECT = 60.0
 
 DEFAULT_NAMES = {
     'S76561198884003346': 'PiercingXX',
@@ -103,11 +133,15 @@ def parse_ts(s):
 
 
 def session_slice(lines, launch_substr):
-    """Return (start_idx, lobby, map) for the chosen session.
+    """Return (start_idx, end_idx, lobby, map) for the chosen session.
 
-    A session runs from its 'Launching Network Game' line to the next 'Starting
-    BattleZone' (a relaunch) or end of file.  Without --launch, the last launch
-    in the file is used.
+    A match runs from its 'Launching Network Game' line to the RUN_STARTED ->
+    RUN_WAS_QUIT transition that ends it.  Ending instead at the next 'Starting
+    BattleZone' — a *process* restart, which most sessions never do — ran every
+    match into all the matches after it: on the 2026-07-26 set that reported a
+    20.8 min game as 72.5 min and folded five later matches' drops into it.
+    Falling back to the next launch line, then to the process restart, keeps
+    older logs that lack the SetRunning markers working.
     """
     launches = [(i, m.group(1), m.group(2))
                 for i, l in enumerate(lines)
@@ -120,6 +154,11 @@ def session_slice(lines, launch_substr):
     else:
         chosen = launches[-1]
     start_idx = chosen[0]
+    for j in range(start_idx + 1, len(lines)):
+        if MATCH_END_RE.search(lines[j]):
+            return start_idx, j, chosen[1], chosen[2]
+        if LAUNCH_RE.search(lines[j]):
+            return start_idx, j, chosen[1], chosen[2]
     end_idx = len(lines)
     for j in range(start_idx + 1, len(lines)):
         if START_RE.search(lines[j]):
@@ -134,6 +173,7 @@ def parse_session_events(lines):
     bandwidth = []      # (timestamp, bytes/sec, interval ms)
     lag = []            # (timestamp, kind, who)
     unknown_src = 0
+    retransmit = defaultdict(int)   # peer ip -> count
 
     for ln in lines:
         m = WARP_RE.match(ln)
@@ -151,11 +191,15 @@ def parse_session_events(lines):
             if m:
                 lag.append((ln.split(' ', 1)[0], kind, m.group(1)))
                 break
+        m = TRY_SENT_RE.search(ln)
+        if m:
+            retransmit[m.group(2)] += 1
+            continue
         if UNKNOWN_SRC_RE.search(ln):
             unknown_src += 1
 
     return {'warps': warps, 'bandwidth': bandwidth, 'lag': lag,
-            'unknown_src': unknown_src}
+            'unknown_src': unknown_src, 'retransmit': retransmit}
 
 
 def print_session_events(ev, dur_min):
@@ -180,12 +224,41 @@ def print_session_events(ev, dur_min):
     bw = ev['bandwidth']
     if bw:
         rates = [r for _, r, _ in bw]
-        cold = sum(1 for r in rates if r == 4000)
+        # The logged figure is a total across peers, so a lone 4000 sample at
+        # match start is just the cold start before the last peer joins and is
+        # normal even when the poke is working.  Only a rate that *stays* there
+        # means the bump never landed.  Warning on any 4000 sample, as this did
+        # until 2026-07-26, fired on healthy patched sessions.
+        cold = sum(1 for r in rates if r <= 4000)
         note = ""
-        if cold:
-            note = (f"   <-- {cold} match start(s) still at the hardcoded 4000 cold start"
-                    " (BZ_GOV_START / MinBandwidth poke not in effect)")
-        print(f"   governor: {len(rates)} adjustments, {min(rates)} -> {max(rates)} B/s{note}")
+        if cold >= 3:
+            note = (f"   <-- {cold} samples still at/below the 4000 cold start"
+                    " (BZ_GOV_START / MinBandwidth poke not landing)")
+        print(f"   governor: {len(rates)} adjustments, {min(rates)} -> {max(rates)} B/s"
+              f", median {sorted(rates)[len(rates) // 2]}{note}")
+        # How long the opening trickle lasted: the ramp, not the ceiling, is
+        # what a short match actually lives with.
+        for target in (40000, 80000):
+            if max(rates) >= target:
+                t0 = bw[0][0]
+                hit = next(t for t, r, _ in bw if r >= target)
+                mins = (parse_ts(hit) - parse_ts(t0)).total_seconds() / 60.0
+                print(f"   reached {target} B/s after {mins:.1f} min")
+
+    rt = ev.get('retransmit')
+    if rt:
+        total = sum(rt.values())
+        rate = (total / dur_min) if dur_min else 0.0
+        detail = ", ".join(f"{ip}={n}" for ip, n in
+                           sorted(rt.items(), key=lambda kv: -kv[1])[:6])
+        print(f"   retransmits (TRY Sent): {total} = {rate:.1f}/min   {detail}")
+        # Normalised, so a bandwidth change does not masquerade as a loss change.
+        if bw:
+            med_bps = sorted(r for _, r, _ in bw)[len(bw) // 2]
+            mb_per_min = med_bps * 60.0 / 1e6
+            if mb_per_min > 0:
+                print(f"   retransmits per MB sent: {rate / mb_per_min:.1f}"
+                      "   <-- compare A/Bs on this, not the raw rate")
 
     for ts, kind, who in ev['lag']:
         mark = "!!" if kind == 'KICKED' else " -"
@@ -234,7 +307,18 @@ def print_reorder_report(path, config, stats):
         print(f"   config: {state}  window={config['window_ms']}ms "
               f"floor={config['min_ms']}ms {hold}")
     if not stats:
-        print("   (no reorder_stats lines — pre-V4.7 proxy, or reorder never ran)\n")
+        if config and config['max_hold_ms'] is not None:
+            # max_hold_ms only exists from V4.7, and V4.7 emits reorder_stats
+            # every 10 s plus once from closesocket.  Absent counters on a V4.7
+            # proxy are not ambiguous: the buffer handled zero packets.
+            print("   ! NO reorder_stats at all on a V4.7 proxy — the reorder buffer")
+            print("     never buffered a packet this session. It is implemented only in")
+            print("     the WSARecvFrom hook and bypasses overlapped receives, so any")
+            print("     improvement measured here belongs to the [Net] poke and socket")
+            print("     buffers instead. Confirm the receive path with")
+            print("     buffer-logging/decode_buffer_log.py before crediting it.\n")
+        else:
+            print("   (no reorder_stats lines — pre-V4.7 proxy, or reorder never ran)\n")
         return
 
     delivered = stats.get('delivered', 0)
@@ -272,15 +356,24 @@ def analyze_file(path, launch_substr, names):
         lines = fh.read().splitlines()
     start_idx, end_idx, lobby, mapname = session_slice(lines, launch_substr)
 
-    stats = defaultdict(lambda: {'echo': 0, 'real': 0})
+    stats = defaultdict(lambda: {'dup1': 0, 'resend': 0, 'exp0': 0, 'ahead': 0,
+                                 'depths': []})
     tmin = tmax = None
     for ln in lines[start_idx:end_idx]:
         m = DROP_RE.match(ln)
         if not m:
             continue
         cid, r, e = m.group(2), int(m.group(3)), int(m.group(4))
-        key = 'echo' if (e - r) == 1 else 'real'
-        stats[cid][key] += 1
+        d = stats[cid]
+        if e == 0:
+            d['exp0'] += 1
+        elif r > e:
+            d['ahead'] += 1
+        elif e - r == 1:
+            d['dup1'] += 1
+        else:
+            d['resend'] += 1
+            d['depths'].append(e - r)
         t = parse_ts(m.group(1))
         tmin = t if tmin is None else tmin
         tmax = t
@@ -311,29 +404,44 @@ def print_report(rep):
         print_session_events(rep['events'], rep['dur_min'])
         print()
         return
-    rows = sorted(rep['stats'].items(), key=lambda kv: -kv[1]['real'])
+    rows = sorted(rep['stats'].items(), key=lambda kv: -kv[1]['resend'])
     dur = rep['dur_min'] or 0
+    totals = defaultdict(int)
     for cid, d in rows:
         name = names.get(cid, cid)
-        echo_rate = (d['echo'] / dur) if dur else 0.0
-        # Duplication is inferred from the echo rate, not a raw count: an 8
-        # minute game accumulates ~60 echoes from ordinary engine resends
-        # alone, so the old absolute >50 test flagged healthy sessions as
-        # duplicating and then halved their real counts on that basis.
+        for k in ('dup1', 'resend', 'exp0', 'ahead'):
+            totals[k] += d[k]
+        dup1_rate = (d['dup1'] / dur) if dur else 0.0
+        # Duplication is inferred from the dup1 rate, not a raw count: an 8
+        # minute game accumulates ~60 from ordinary engine resends alone, so
+        # the old absolute >50 test flagged healthy sessions as duplicating.
         # Measured baselines: ~8/min idle, up to ~40/min under heavy
-        # congestion without dup, ~300/min with dup actually on.
-        dup_on = echo_rate >= DUP_ECHO_RATE_PER_MIN
-        uniq = d['real'] // 2 if dup_on else d['real']
-        rate = (uniq / dur) if dur else 0
-        if dup_on:
-            flag = '  [sender dup ON: real counts halved]'
-        elif echo_rate >= DUP_ECHO_RATE_SUSPECT:
-            flag = '  [echo rate high - congestion or dup; check the sender]'
+        # congestion without dup, ~300/min with BZ_SEND_DUP actually on.
+        if dup1_rate >= DUP_RATE_PER_MIN:
+            flag = '  [sender dup very likely ON]'
+        elif dup1_rate >= DUP_RATE_SUSPECT:
+            flag = '  [dup1 rate high - congestion or dup; check the sender]'
         else:
             flag = ''
-        selfflag = '  [loopback self-echo]' if name and d['real'] == 0 and d['echo'] else ''
-        print(f"   from {name:<12} echo={d['echo']:<6} ({echo_rate:5.1f}/min) "
-              f"real={d['real']:<6} uniq~{uniq:<5} {rate:6.1f}/min{flag}{selfflag}")
+        total = d['dup1'] + d['resend'] + d['exp0'] + d['ahead']
+        if total == d['dup1'] and d['dup1']:
+            flag += '  [loopback self-echo]'
+        depth = ''
+        if d['depths']:
+            g = sorted(d['depths'])
+            depth = (f"  block med={g[len(g) // 2]} "
+                     f"p95={g[min(len(g) - 1, int(len(g) * 0.95))]} max={g[-1]}")
+        ahead = f" ahead={d['ahead']}" if d['ahead'] else ''
+        print(f"   from {name:<12} dup1={d['dup1']:<6}({dup1_rate:5.1f}/min) "
+              f"resend={d['resend']:<6}({(d['resend'] / dur if dur else 0):5.1f}/min) "
+              f"exp0={d['exp0']:<6}({(d['exp0'] / dur if dur else 0):5.1f}/min)"
+              f"{ahead}{depth}{flag}")
+    grand = sum(totals[k] for k in ('dup1', 'resend', 'exp0', 'ahead'))
+    if grand:
+        parts = "  ".join(f"{k} {totals[k]} ({100.0 * totals[k] / grand:.0f}%)"
+                          for k in ('dup1', 'resend', 'exp0', 'ahead') if totals[k])
+        print(f"   {grand} discards total: {parts}")
+        print("   (none of these is loss — see TRY Sent below for that)")
     print_session_events(rep['events'], rep['dur_min'])
     print()
 

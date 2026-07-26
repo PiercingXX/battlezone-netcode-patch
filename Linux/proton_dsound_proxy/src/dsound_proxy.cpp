@@ -660,7 +660,7 @@ void flush_buffer_log_files() {
         char text[1024] = {0};
         int n = std::snprintf(text,
                               sizeof(text),
-                              "format=buffer_log_v1\\r\\nrecord_header_size=%u\\r\\npayload_bytes=%u\\r\\nrecord_stride=%u\\r\\nring_records=%u\\r\\nrecords_written=%u\\r\\ntotal_events_seen=%llu\\r\\n",
+                              "format=buffer_log_v1\r\nrecord_header_size=%u\r\npayload_bytes=%u\r\nrecord_stride=%u\r\nring_records=%u\r\nrecords_written=%u\r\ntotal_events_seen=%llu\r\n",
                               static_cast<unsigned>(sizeof(BufferLogRecordHeader)),
                               static_cast<unsigned>(g_buffer_payload_bytes),
                               static_cast<unsigned>(g_buffer_stride),

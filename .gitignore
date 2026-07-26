@@ -24,6 +24,8 @@ tests/send_pace_test
 test-logs/*BZLogger*.txt
 test-logs/*.log
 **/BZLogger*.txt
+# Tester log drops land here under arbitrary names (165MB for one session)
+new logs/
 
 # Generated logs and diagnostics
 *.log
