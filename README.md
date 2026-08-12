@@ -1,4 +1,4 @@
-# Battlezone 98 Redux Netcode Patch — V4.9 experimental
+# Battlezone 98 Redux Netcode Patch — V4.93 experimental
 
 > **This is the experimental branch.** It is for the test crew and it changes
 > under you. Stable players belong on
@@ -16,7 +16,7 @@ code is modified.
 per-machine, and every V4.9 DLL logs its own build id so a log can always
 answer "which build was that?".
 
-Current version: **V4.9 experimental** · [CHANGELOG](CHANGELOG.md)
+Current version: **V4.93 experimental** · [CHANGELOG](CHANGELOG.md)
 
 ---
 
@@ -188,7 +188,7 @@ Start the game once, quit, and open the proxy log next to the game exe
 (`dsound_proxy.log` or `winmm_proxy.log`). The first lines carry the build id:
 
 ```
-proxy build: V4.9-experimental 9e8655e12f4a 2026-07-28T21:20:14Z
+proxy build: V4.93-experimental 7a106a52ce6e 2026-08-12T01:56:29Z
 ```
 
 No proxy log at all means the DLL never loaded — on Linux that is almost
@@ -228,6 +228,11 @@ with the log.
 - **Automatic bundle upload to Discord** — see the install steps above;
   details in [upload/README.md](upload/README.md).
 - **Uninstallers for both platforms**, and a build id stamped into every DLL.
+- **The send damper** (`BZ_SEND_DAMPEN`, V4.93, off by default) — BZRNet
+  retries every reliable message on a ~10 ms timer against a 56–91 ms RTT, so
+  each one ships 6–9 times; the damper drops the redundant in-window copies on
+  the send path. Off until it passes a live-match validation; details in each
+  proxy README.
 
 ## What it does
 
