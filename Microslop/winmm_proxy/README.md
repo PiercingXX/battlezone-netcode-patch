@@ -125,8 +125,8 @@ written.
 | `BZ_NET_TUNE` | `1` | — | — | `0` restores the game's stock governor behaviour |
 | `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | also the value copied into the live send rate at session setup |
 | `BZ_NET_MAXBANDWIDTH` | `320000` | MaxBandwidth | 16000 | the governor is closed-loop, so a high ceiling is not itself a risk |
-| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | stock ramps +10 bytes per ~3 s: a short match never escapes the opening trickle |
-| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | |
+| `BZ_NET_UPCOUNT` | `50` | UpCount | 10 | stock ramps +10 bytes per ~3 s: UpCount 50 = a gentler ramp; the governor climbs less aggressively so a spike does not overshoot (T3, reconciled 2026-08-11) |
+| `BZ_NET_DOWNCOUNT` | `200` | DownCount | 5 | bytes removed from the send budget per adjustment while over MaxPing (the governor's back-off step, not a receive budget) |
 | `BZ_NET_MAXPING` | `450` | MaxPing | 300 | stock turns a jitter spike into a rate cut into more warping into more spike |
 | `BZ_NET_MAXPINGSLOST` | leave | MaxPingsLost | 20 | no evidence a change helps |
 | `BZ_AUTOKICK_RELAX` | `1` | — | — | `0` restores stock kicking |
@@ -157,6 +157,30 @@ can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates th
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
 
+### Duplicate suppressor (`BZ_SEND_DAMPEN`, off by default)
+
+BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an
+RTT the game itself reports as 56–91 ms, so every reliable message goes out
+6–9 times before an acknowledgement can physically return (see
+`resources/CAMERAPOD_STORM.md`).  The damper drops the redundant in-window
+copies on the send path: only a 2nd-or-later copy of a `(peer, sequence)`
+already sent inside its window is ever suppressed — a first transmission, a
+distinct sequence, and anything too small to carry a sequence number always
+go.  A suppressed send looks to the game like a successful one (a UDP send
+promises handoff, not delivery), is still counted by the burst measurement,
+and is never duplicated by `BZ_SEND_DUP`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BZ_SEND_DAMPEN` | `0` | `1` suppresses redundant in-window reliable retransmits; off pending live-match validation |
+
+The suppression window starts at a 60 ms floor and doubles on each genuine
+loss-recovery retransmit, capped at 400 ms.  A peer restart is detected
+in-band (a sequence below the ring's oldest retained entry), and the
+socket-close path purges every peer explicitly, so a reconnecting peer is
+never suppressed.  Counters appear at teardown as a `session end: dampen:`
+line.
+
 ### Windows overlapped/IOCP receives (`BZ_IOCP_*`, off by default)
 
 On real Windows the game receives through overlapped/IOCP calls, which the
@@ -186,7 +210,7 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 
 | Variable | Default | Notes |
 |-----------|---------|-------|
-| BZ_REORDER | 1 | Set to `0` to disable reordering entirely |
+| BZ_REORDER | **0** | Off since V4.8, and V4.9 found the structural reason: the protocol's sequence number counts *messages*, not datagrams, so there is no per-datagram key to reorder by. See `resources/BZ_P2P_HEADER.md`. `1` still enables it; the rows below only matter if you do |
 | BZ_REORDER_WINDOW_MS | 100 | Max (ceiling) hold time before forced delivery (clamp 5–200) |
 | BZ_REORDER_MIN_MS | 5 | Adaptive window floor; `0` = deliver immediately unless reordering seen |
 | BZ_REORDER_ADAPT | 1 | Set to `0` for a fixed window equal to BZ_REORDER_WINDOW_MS |
@@ -197,7 +221,9 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | BZ_REORDER_PEERS | 16 | Max distinct IPv4 sources (max 16) |
 | BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128). The drain also stops early whenever a peer queue is full, so this is an upper bound, not a target |
 | BZ_SEND_DUP | 0 | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
-| BZ_GOV_START | 0 | **Opt-in.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched). `0` = disabled. Targets the first-60-seconds drop clusters; sender-side |
+| BZ_GOV_START | **40000** | **On by default since V4.8.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched). `0` = disabled. Targets the first-60-seconds drop clusters; sender-side |
+| BZ_GOV_VERIFY_MS | 10000 | V4.9 read-back: how long after the cold-start poke to re-read the global and declare it held. A `POKE DID NOT HOLD` line means something rewrote the value and the session is not a valid BZ_GOV_START sample — this happened in one of the two V4.8 matches and took hand-correlating the game's own log to notice |
+| BZ_GOV_TRACE_MS | 15000 | V4.9 read-back: interval of the periodic `governor_trace:` line reporting the live send rate with its min/max since the last one, which is what makes the ramp rate visible. `0` silences it |
 | BZ_GOV_SCAN | 0 | Diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches |
 | BZ_DUP_DELAY_MS | 25 | Delay before the duplicate is transmitted (max 500). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
 | BZ_DUP_MAX_PPS | 40 | Cap on duplicates per second (max 2000). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |

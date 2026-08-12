@@ -1,4 +1,8 @@
-# Battlezone 98 Redux Netcode Patch
+# Battlezone 98 Redux Netcode Patch — V4.9 experimental
+
+> **This is the experimental branch.** It is for the test crew and it changes
+> under you. Stable players belong on
+> [master (V4.8)](https://github.com/PiercingXX/battlezone-netcode-patch/tree/master).
 
 Battlezone caps every player's send rate at **16,000 B/s** and opens each match
 at a 4,000 B/s trickle. Lifting both took measured matches to 82,000+ B/s and
@@ -8,53 +12,190 @@ The patch is a DLL proxy that writes the game's own network tuning into memory,
 enlarges the socket buffers, and marks your traffic for router priority. No game
 code is modified.
 
-**Everyone in the lobby should install it** — the tuning is per-machine, so your
-install fixes your rate and your buffers, nobody else's.
+**Everyone in a test lobby should run the same build** — the tuning is
+per-machine, and every V4.9 DLL logs its own build id so a log can always
+answer "which build was that?".
 
-Current version: **V4.8** · [CHANGELOG](CHANGELOG.md)
+Current version: **V4.9 experimental** · [CHANGELOG](CHANGELOG.md)
 
 ---
 
-## Install
+## Windows
 
-### Windows
+**Test crew:** use the install command pinned in the private Discord channel —
+it is this one with the webhook already in it, so everything below happens
+automatically and nothing prompts you.
+
+**1. Run one command — in PowerShell** (press Start, type `powershell`,
+Enter; the blue window, not Command Prompt):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_windows.ps1 | iex
 ```
 
-That's it. No launch options — just start the game.
+The script installs this branch on its own — no `$env:` prefix needed. (The
+old command wrapped this in `powershell -Command "..."` for pasting into
+Command Prompt; pasted into PowerShell instead, the outer shell ate the
+`$env:` variables and the installer silently fell back to `master`. The
+pinned test-crew command adds only the webhook in front, and must also be
+pasted into PowerShell.)
+
+Installs the prebuilt `winmm.dll` (verified against its SHA256 sidecar), the
+tuning mod, and — with the pinned command — the log uploader, fully
+configured. No questions asked.
+
+**2. Paste this into the Steam launch options** (Steam → Battlezone 98 Redux →
+Properties → Launch Options):
+
+```text
+cmd /c ""%LOCALAPPDATA%\bz-netcode\bz_wrap.bat" %command%"
+```
+
+That's it. Same line on every Windows machine — nothing to edit. Copy it
+exactly: **the doubled quotes at each end are required.** `cmd` only preserves
+quotes when there are exactly two on the line, and `%command%` already brings
+its own pair, so without the outer pair `cmd` strips the wrong ones and the
+game never starts — no splash, no log, no error. A console window stays open
+while the game runs; that is the wrapper waiting to bundle your logs on exit.
+Closing it kills the upload, not the game.
+
+Installed from the plain command above instead of the pinned one? Then there
+is no uploader and step 2 does not apply — the patch itself still works.
 
 <details>
-<summary>If Defender quarantines <code>winmm.dll</code></summary>
+<summary>If Windows blocks it ("potentially malicious/unwanted app", or
+<code>winmm.dll</code> disappears)</summary>
 
-Some users see it flagged as `Program:Win32/Contebrew.A!ml`, a heuristic
-detection common for unsigned DLL proxies. Restore it from Protection History
-and add an exception for that one file in the game folder. Don't disable AV
-globally.
+`winmm.dll` is an unsigned, MinGW-built proxy that hooks the game's
+networking — exactly the shape antivirus heuristics flag, commonly as
+`Program:Win32/Contebrew.A!ml`. It shows up two ways:
+
+- **The install command fails** with *"the file contains a virus or
+  potentially unwanted software"* — real-time protection blocked the
+  download.
+- **The game runs unpatched, or `winmm.dll` vanishes from the game folder**
+  — Defender quarantined it moments after install. The installer now
+  detects this and tells you.
+
+Fix, keeping Defender on (never disable AV globally):
+
+1. Windows Security → Virus & threat protection → **Protection history**
+2. Find the block → **Actions → Allow** (or Restore)
+3. Or allow just this one file from an admin PowerShell:
+   `Add-MpPreference -ExclusionPath "C:\...\Battlezone 98 Redux\winmm.dll"`
+4. Re-run the install command.
+
+Why allowing it is reasonable: the installer verifies the DLL's SHA256
+against the sidecar published in this repo, so what you allow is
+bit-for-bit the build whose source you can read here — and you can build it
+from that source yourself instead of using the prebuilt at all.
+
+**Third-party antivirus (Bitdefender, etc.):** same idea, different UI —
+the `Add-MpPreference` command only configures Windows Defender, and if a
+third-party AV is installed, Defender usually isn't even the one blocking.
+Add two exceptions in that product's own settings (Bitdefender: Protection →
+Antivirus → Settings → Manage Exceptions): the game folder (for
+`winmm.dll`) and `%LOCALAPPDATA%\bz-netcode` (for the uploader), and restore
+anything already quarantined. In Bitdefender, also add the game to
+Advanced Threat Defense's exceptions — it watches running programs, and a
+DLL that hooks the game's networking is exactly what it likes to kill
+mid-match.
+
+**What an AV-blocked uploader actually looks like** (field-verified against
+Bitdefender): the install output shows `WARNING: Upload wrapper setup
+failed: Access to the path '...\bz_wrap.ps1' is denied` and a red "THE LOG
+UPLOADER DID NOT INSTALL" block — and then still ends with a green "Install
+complete", because that last line is about the DLL, which installed fine.
+It is easy to scroll past. The tell from the outside: bundles never arrive
+and `%LOCALAPPDATA%\bz-netcode\bz_wrap.log` does not exist, no matter how
+many times the install command is re-run — every run hits the same wall and
+leaves whatever wrapper was already there. Worse, a blocked run can delete
+the old `bz_wrap.ps1` before the denied write, so the Steam launch option
+now points at a wrapper that cannot run and the game will not start through
+it. Recovery, in order:
+
+1. Clear the Steam launch options — the game and patch work fine unwrapped.
+2. Add the two folder exceptions above in the AV's own UI and restore
+   anything it quarantined.
+3. In PowerShell: `Remove-Item -Recurse -Force "$env:LOCALAPPDATA\bz-netcode"`
+   — clears the locked or ACL-broken leftovers the AV created.
+4. Re-run the pinned install command. Success prints
+   *"Automatic log upload configured for …"* and no red block.
+5. Put the launch option back. To double-check the wrapper is current:
+   `Select-String wrapper_version= "$env:LOCALAPPDATA\bz-netcode\bz_wrap.ps1"`
+   — the line it prints is the installed generation; compare it against the
+   latest one named in `CHANGELOG.md` (currently `V4.92-arms-20260803`)
+   should return a match, and `bz_wrap.log` appears in that folder after the
+   next launch.
 </details>
 
-### Linux / Proton
+## Linux / Proton
+
+**Test crew:** use the install command pinned in the private Discord channel —
+it is this one with the webhook already in it, so the uploader configures
+itself and nothing prompts you.
+
+**1. Run one command** (builds `dsound.dll` from this branch's source on your
+machine, installing the MinGW cross-compiler first if it is missing):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_linux.sh | bash
 ```
 
-Then set Steam launch options for Battlezone 98 Redux:
+**2. Paste this into the Steam launch options** — on Linux this step is **not
+optional**: without `WINEDLLOVERRIDES` the DLL sits in the game folder and
+never loads, because Wine has its own dsound. The installer prints the exact
+line; with the uploader it is:
+
+```text
+WINEDLLOVERRIDES=dsound=n,b "${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode/bz_wrap.sh" %command% -nointro
+```
+
+Same line for native and Flatpak Steam — the installer copies `bz_wrap.sh`
+and `upload.conf` into the Flatpak sandbox itself. **Snap Steam is the
+exception**: its sandbox cannot read the host's dot-dirs, so with the line
+above the wrapper path resolves to nothing and the game never launches. The
+installer detects a Snap install and prints this line instead:
+
+```text
+WINEDLLOVERRIDES=dsound=n,b "$SNAP_USER_COMMON/.local/share/bz-netcode/bz_wrap.sh" %command% -nointro
+```
+
+**Each Steam client keeps its own launch-options field**: if you run more
+than one install (native, Flatpak, Snap), set it in each client. If you skip
+the uploader, the launch options are still required, just shorter:
 
 ```text
 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
-Without that second step the DLL is never loaded.
+Prefer to do it all by hand? [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md)
 
-Prefer to do it by hand? [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md)
+---
+
+> **Privacy — read this once.** Battlezone's own logs record the public IP of
+> every player in the lobby; that is how a peer-to-peer game works, and it is
+> why the upload wrapper only ever posts to a **private** channel, is strictly
+> opt-in (no wrapper in your launch options, nothing ever uploads), and skips
+> sessions where no multiplayer game was launched. Don't paste bundles or
+> `BZLogger.txt` anywhere public.
 
 ---
 
 ## Check it worked
 
-Play one multiplayer match, quit, then run:
+Start the game once, quit, and open the proxy log next to the game exe
+(`dsound_proxy.log` or `winmm_proxy.log`). The first lines carry the build id:
+
+```
+proxy build: V4.9-experimental 9e8655e12f4a 2026-07-28T21:20:14Z
+```
+
+No proxy log at all means the DLL never loaded — on Linux that is almost
+always the launch-options line missing from the Steam client you actually
+launched from.
+
+After a multiplayer match, run the verifier:
 
 ```bash
 Linux/verify_net_patch.sh          # from the game folder
@@ -63,22 +204,36 @@ Linux/verify_net_patch.sh          # from the game folder
 .\Microslop\verify_windows.ps1
 ```
 
-Expect `VERIFY RESULT: PASS`.
+Expect `VERIFY RESULT: PASS`. In the log itself, the line to care about is the
+governor verdict: `poke held` is good; `POKE DID NOT HOLD` is exactly the
+failure V4.9 exists to catch — report it with the log.
 
-To eyeball it instead, open the proxy log next to the game exe
-(`dsound_proxy.log` or `winmm_proxy.log`) and look for `net_patch: version
-confirmed`.
-
-`reorder: DISABLED` is expected — that buffer ships off by default.
-`net_patch: … VETOED` means the game updated and the patch safely fell back to
-stock behaviour; open an issue with the log.
+`reorder: DISABLED` is expected — that buffer ships off by default, and V4.9
+established it has to stay off (see below). `net_patch: … VETOED` means the
+game updated and the patch safely fell back to stock behaviour; open an issue
+with the log.
 
 ---
+
+## What V4.9 adds over V4.8
+
+- **The packet header is settled by ground truth** — sequence is u32 big-endian
+  at offset 10; the V4.8 duplication/loss figures are withdrawn (they were read
+  from the ack field). Derivation: [resources/BZ_P2P_HEADER.md](resources/BZ_P2P_HEADER.md).
+- **The governor reports whether its own poke landed** — one verdict per match
+  in the proxy log, instead of hand-correlating two machines' logs.
+- **Logging you can trust** — torn-line fix, crash-capturable sessions,
+  per-peer capture filtering (`BZ_BUFFER_LOG_PEER`), analyzers that survive
+  crash-cut logs.
+- **Automatic bundle upload to Discord** — see the install steps above;
+  details in [upload/README.md](upload/README.md).
+- **Uninstallers for both platforms**, and a build id stamped into every DLL.
 
 ## What it does
 
 - **Lifts the send governor.** `MaxBandwidth` 16,000 → 320,000, and each match
-  opens at 40,000 B/s instead of the stock 4,000 trickle.
+  opens at 40,000 B/s instead of the stock 4,000 trickle — and V4.9 verifies
+  the write actually held, every match.
 - **Bigger socket buffers.** 4 MB receive / 512 KB send, re-forced so the game
   can't shrink them back.
 - **Relaxes auto-kick** (host only). A connection has to stay bad for 60 s
@@ -100,23 +255,58 @@ The defaults are meant to be what you want. The few worth knowing:
 | `BZ_NET_TUNE` | `1` | `0` restores the game's stock governor behaviour |
 | `BZ_AUTOKICK_RELAX` | `1` | `0` restores stock auto-kicking |
 | `BZ_GOV_START` | `40000` | opening send rate; `0` restores the stock 4000 |
-| `BZ_REORDER` | `0` | `1` enables inbound reordering |
+| `BZ_REORDER` | `0` | `1` enables inbound reordering (leave off — see below) |
+| `BZ_BUFFER_LOG_PEER` | unset | capture only these peer IPs (comma-separated) |
 
 Full tables: [Linux proxy](Linux/proton_dsound_proxy/README.md) ·
 [Windows proxy](Microslop/winmm_proxy/README.md)
 
 ---
 
+## Uninstall / revert to stable
+
+```bash
+# Linux
+./install/uninstall_linux.sh          # add --purge-logs to delete captures too
+```
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -File install\uninstall_windows.ps1
+```
+
+The uninstallers only remove a DLL carrying this patch's own marker — another
+mod's `dsound.dll`/`winmm.dll` (DSOAL, say) is left alone. Session logs are
+kept by default: they are research data.
+
+To drop back to stable instead, run the
+[master installer](https://github.com/PiercingXX/battlezone-netcode-patch/tree/master#install) —
+it overwrites the experimental DLL with V4.8. If you added the upload wrapper,
+also take it out of your launch options (on Linux the plain
+`WINEDLLOVERRIDES` line stays).
+
+---
+
 ## Good to know
 
+- **Multiplayer button says "Not Ready"?** The game could not get a session
+  ticket from Steam. Running two Steam clients on one account (native +
+  Flatpak) does this: whichever connected last holds the session. Close one
+  client fully, restart the other. `BZLogger.txt` shows
+  `RequestEncryptedAppTicket ... k_EResultNoConnection`.
 - **A workshop mod shipping its own `net.ini` overrides the patch's.**
-  Unsubscribe — disabling it in-game isn't enough.
+  Unsubscribe — disabling it in-game isn't enough. Check `BZLogger.txt` for
+  `MOD FOUND net.ini at ...`. The `[Net]` memory poke is unaffected either way.
+- **A bundle never arrived in the channel?** It parked — `bz_wrap.sh --status`
+  shows what is waiting, `bz_wrap.sh --retry` sends it now, and the outbox
+  flushes automatically before every wrapped launch.
 - **The addresses are pinned to one game build.** If Rebellion patches the game
   you get stock behaviour, not a crash.
 - **It fixes tuning, not loss.** A saturated uplink on the *sending* peer's end
   is theirs to fix.
-- **The inbound reorder buffer is off by default** as of 2026-07-26. Measurement
-  showed it never ran, and that there was almost nothing to reorder.
+- **The inbound reorder buffer is off by default, and stays off for a
+  structural reason**: the protocol's sequence number counts messages, not
+  datagrams, so there is no per-datagram key to reorder by.
+  See [resources/BZ_P2P_HEADER.md](resources/BZ_P2P_HEADER.md).
 
 ---
 

@@ -198,6 +198,76 @@ function Start-Session {
     Write-Host "Launch options saved to: $(Join-Path $sessionDir 'launch_options.txt')"
 }
 
+# Did the capture actually run with the settings we asked for?
+#
+# The one successful capture of 2026-07-26 asked for BZ_BUFFER_LOG_RING=500000
+# and ran with 65,536 -- the default -- discarding 48% of its events including
+# the entire match start. Nothing said so, and it took reading two files side
+# by side days later to notice. The proxy now records what it was asked for in
+# the meta file; this compares that against the request and refuses to be quiet
+# about a mismatch, while the tester can still re-run it.
+function Test-Capture {
+    param([string]$SessionDir)
+
+    $meta = Join-Path $SessionDir "bz_buffer_log.meta.txt"
+    $report = Join-Path $SessionDir "capture_verify.txt"
+    $lines = @()
+    $ok = $true
+
+    if (-not (Test-Path $meta) -or (Get-Item $meta).Length -eq 0) {
+        $lines += "meta=MISSING"
+        $lines += "The game did not flush the ring. An unclean exit never writes it."
+        $ok = $false
+    } else {
+        $kv = @{}
+        foreach ($line in (Get-Content $meta)) {
+            if ($line -match '^\s*([^=]+)=(.*)$') { $kv[$Matches[1].Trim()] = $Matches[2].Trim() }
+        }
+        $wantRing  = (Get-Content (Join-Path $SessionDir "ring_records.txt") -Raw).Trim()
+        $wantBytes = (Get-Content (Join-Path $SessionDir "payload_bytes.txt") -Raw).Trim()
+        $gotRing   = $kv["ring_records"]
+        $gotBytes  = $kv["payload_bytes"]
+
+        $lines += "requested_ring=$wantRing effective_ring=$gotRing"
+        $lines += "requested_payload=$wantBytes effective_payload=$gotBytes"
+        if ($kv.ContainsKey("ring_env")) { $lines += "ring_env=$($kv['ring_env'])" }
+
+        if ($wantRing -and $gotRing -and $wantRing -ne $gotRing) {
+            $lines += "MISMATCH: ring"; $ok = $false
+        }
+        if ($wantBytes -and $gotBytes -and $wantBytes -ne $gotBytes) {
+            $lines += "MISMATCH: payload"; $ok = $false
+        }
+        $seen  = 0; $wrote = 0
+        [void][int]::TryParse($kv["total_events_seen"], [ref]$seen)
+        [void][int]::TryParse($kv["records_written"], [ref]$wrote)
+        if ($seen -gt 0 -and $wrote -gt 0 -and $seen -gt $wrote) {
+            $pct = [int](($seen - $wrote) * 100 / $seen)
+            $lines += "ring wrapped: $seen events seen, last $wrote kept ($pct% discarded)"
+            $ok = $false
+        }
+    }
+    $lines += "ok=$ok"
+    $lines | Out-File -FilePath $report -Encoding utf8
+
+    Write-Host ""
+    if ($ok) {
+        Write-Host "  capture verified: ran with the settings you asked for, ring did not wrap"
+        return
+    }
+    Write-Host "  ####################################################################" -ForegroundColor Red
+    Write-Host "  #  CAPTURE IS NOT CLEAN - read it before you rely on it            #" -ForegroundColor Red
+    Write-Host "  ####################################################################" -ForegroundColor Red
+    $lines | ForEach-Object { Write-Host "    $_" }
+    Write-Host ""
+    Write-Host "    A ring that wrapped, or settings that did not take, means the"
+    Write-Host "    capture is missing events - most likely the earliest ones, which"
+    Write-Host "    is where the match start lives."
+    Write-Host "    If ring_env says NOT SET, the game was launched before the launch"
+    Write-Host "    options were pasted. Close the game, paste them, run this again."
+    Write-Host ""
+}
+
 function Stop-Session {
     if (-not (Test-Path $currentFile)) {
         Write-Host "ERROR: no active Windows buffer logging session found." -ForegroundColor Red
@@ -220,6 +290,8 @@ function Stop-Session {
     Collect-File -Source (Join-Path $gamePathResolved "bz_buffer_log.bin") -DestinationDir $sessionDir -StatusFile $statusFile
     Collect-File -Source (Join-Path $gamePathResolved "bz_buffer_log.meta.txt") -DestinationDir $sessionDir -StatusFile $statusFile
     Collect-File -Source (Join-Path $gamePathResolved "multi.ini") -DestinationDir $sessionDir -StatusFile $statusFile
+
+    Test-Capture -SessionDir $sessionDir
 
     $zipPath = "$sessionDir.zip"
     if (Test-Path $zipPath) { Remove-Item -Force $zipPath }

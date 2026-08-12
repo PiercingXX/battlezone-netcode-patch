@@ -61,6 +61,30 @@ struct NetGlobal {
 //
 // Sanity ranges are wide enough to admit both the stock default and our own
 // written value, and narrow enough to reject a pointer, a zero, or garbage.
+// ABOUT THE `stock` COLUMN — it is phase-dependent, and the first live
+// values-as-found reads (2026-08-03, identical on a Windows host and a Linux
+// client, taken at the MENU before our first write) prove it:
+//
+//   key            stock below   as found at menu
+//   MinBandwidth   4000          1000
+//   MaxBandwidth   16000         4000
+//   UpCount        10            10    (match)
+//   DownCount      5             5     (match)
+//   MaxPing        300           700
+//   MaxPingsLost   20            20    (match)
+//   AutoKickStart  10000         10000 (match)
+//   AutoKickPing   750           1000
+//   AutoKickLoss   25            50
+//   AutoKickTime   15000         10000
+//
+// The two are not in contradiction for MaxBandwidth: 16000 was READ LIVE
+// mid-match on 2026-07-26 (the revert that built the governor read-back), so
+// session init rewrites at least that global from its menu-time 4000.  For
+// MaxPing and the AutoKick trio the `stock` numbers are from static RE and no
+// in-match unpatched read exists yet — the menu reads may be pre-init values
+// or the real ones.  Treat `stock` as "documented, unverified in-match" until
+// an unpatched in-match values-as-found read settles it.  The sanity ranges
+// below span both candidates in every case, so the veto gate is unaffected.
 inline void net_globals_defaults(NetGlobal *t) {
     size_t i = 0;
 
@@ -133,8 +157,9 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
              // no longer write it by default.  BZ_NET_MINBANDWIDTH still forces
              // a value for anyone re-testing it.
     320000,  // MaxBandwidth
-    100,     // UpCount
-    50,      // DownCount
+    50,      // UpCount — slower ramp, so the governor climbs less aggressively
+    200,     // DownCount — bytes removed from the send budget per adjustment while
+             // over MaxPing (the governor's back-off step, not a receive budget).
     450,     // MaxPing
     0,       // MaxPingsLost — no evidence a change helps; leave the game's
     0, 0, 0, 0,  // auto-kick group has its own preset (BZ_AUTOKICK_RELAX)

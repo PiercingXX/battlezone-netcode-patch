@@ -17,6 +17,19 @@ OUT_DIR := build
 # ../../shared holds reorder_core.h, shared verbatim with the Linux proxy.
 SHARED_DIR := ../../shared
 
+# ── Build identity (V4.9) ────────────────────────────────────────────────────
+# Neither DLL logged a build id, and the shipped Windows prebuilt was
+# deliberately a different vintage from the source, so a tester's log could not
+# tell you which build produced it. Every "which build was that?" thread came
+# from this. BZ_VERSION is set by hand at release; the commit and date come
+# from git, with fallbacks so a source tarball with no .git still builds.
+BZ_VERSION  ?= V4.93-experimental
+BZ_COMMIT   ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BZ_DIRTY    := $(shell git diff --quiet 2>/dev/null || echo +dirty)
+# SOURCE_DATE_EPOCH keeps this reproducible when a build system sets it.
+BZ_DATE     ?= $(shell date -u -d "@$${SOURCE_DATE_EPOCH:-$$(date +%s)}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+BZ_BUILD_ID := $(BZ_VERSION) $(BZ_COMMIT)$(BZ_DIRTY) $(BZ_DATE)
+
 TARGET  := $(OUT_DIR)/winmm.dll
 
 SRCS := \
@@ -39,11 +52,18 @@ CXXFLAGS := \
     -DUNICODE \
     -D_UNICODE \
     -I$(SRC_DIR) \
-    -I$(SHARED_DIR)
+    -I$(SHARED_DIR) \
+    -DBZ_BUILD_ID='"$(BZ_BUILD_ID)"'
 
+# -static folds libwinpthread into the DLL alongside libgcc/libstdc++.
+# Without it the V4.9 threading code made the DLL import libwinpthread-1.dll,
+# which exists on no normal Windows machine — the game then failed to load
+# winmm.dll at all ("fine on V4.8, errors on V4.9", first Windows tester).
+# The import libs (ws2_32, winmm) are stubs either way; nothing else changes.
 LDFLAGS := \
     -m32 \
     -shared \
+    -static \
     -static-libgcc \
     -static-libstdc++ \
     -Wl,--enable-stdcall-fixup \
@@ -66,7 +86,12 @@ $(TARGET): $(OBJS)
 	@echo "Copy build/winmm.dll to the game folder:"
 	@echo "  steamapps/common/Battlezone 98 Redux/"
 
-$(OUT_DIR)/%.o: $(SRC_DIR)/%.cpp $(SHARED_DIR)/reorder_core.h | $(OUT_DIR)
+# Every shared header, not just the first one.  Under-declaring this meant an
+# edit to net_globals.h or send_pace.h did not trigger a rebuild, so a stale
+# DLL could ship carrying none of the change you just made.
+SHARED_HDRS := $(wildcard $(SHARED_DIR)/*.h)
+
+$(OUT_DIR)/%.o: $(SRC_DIR)/%.cpp $(SHARED_HDRS) | $(OUT_DIR)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 clean:

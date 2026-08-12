@@ -48,7 +48,8 @@ for script in install/install_windows.ps1 install/install_linux.sh; do
     path="$REPO_ROOT/$script"
     [[ -f "$path" ]] || continue
     # Ignore comment lines: the rationale text mentions hashes by name.
-    literal="$(grep -vE '^\s*(#)' "$path" | grep -oE '[0-9a-f]{64}' | head -1 || true)"
+    # -i: an uppercase literal is exactly as broken and used to slip through.
+    literal="$(grep -vE '^\s*(#)' "$path" | grep -oiE '[0-9a-f]{64}' | head -1 || true)"
     if [[ -n "$literal" ]]; then
         fail "$script hardcodes a SHA256 ($literal)
   A refresh of the prebuilt will strand anyone running a cached copy of this

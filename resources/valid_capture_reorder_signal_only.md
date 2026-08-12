@@ -1,15 +1,19 @@
 # Signal-Only Reorder Events
 
-> **SUPERSEDED — 2026-07-26.** This analysis derived the reorder sequence field
-> as u32 little-endian at payload offset 13, and the "backward" class below from
-> it. A live 65,536-datagram capture on 2026-07-26 showed that field is not the
-> packet counter: two datagrams with different sequence numbers read back
-> identical under it, because byte 16 is the counter's high byte landing as the
-> most significant byte of that little-endian u32. The real field is **u16
-> big-endian at offset 16** (`shared/reorder_core.h`). Re-measured with the
-> correct field, out-of-order arrivals are **0.0-0.2%**, not the rate implied
-> here — so the "backward" events counted below are an artifact of reading the
-> wrong bytes. Kept for provenance; do not re-derive an offset from it.
+> **SUPERSEDED TWICE — last revised 2026-07-27 (V4.9).** This analysis derived
+> the sequence field as u32 little-endian at payload offset 13 and the
+> "backward" class below from it. V4.8 replaced that with u16 big-endian at
+> offset 16. **Both were wrong.** The header is now known exactly, from
+> BZLogger's own logged ordinals rather than from monotonicity scoring: the
+> sequence is **u32 big-endian at offset 10**, and offset 16 is the low half of
+> the *acknowledgement* field at offset 14. See `resources/BZ_P2P_HEADER.md`
+> and `tools/seq_crossmatch.py`.
+>
+> Everything below counts events derived from the wrong bytes, and so does the
+> "0.0-0.2% out-of-order" figure that the V4.8 banner replaced it with. On the
+> correct field the same capture shows 28 first-arrival inversions in 1,021
+> message sequences, needing an 883 ms hold window to repair. Kept for
+> provenance only; do not re-derive anything from it.
 
 
 - Source: /media/Working-Storage/GitHub/Battlezone Netcode Patch/resources/valid_capture_reorder_events.csv

@@ -2,9 +2,13 @@
 set -euo pipefail
 
 REPO_SLUG="PiercingXX/battlezone-netcode-patch"
-REF="${BZNET_REF:-master}"
+# Baked per branch (see the Windows installer for the incident that made
+# this explicit): this copy lives on experimental/v4.9, so running it with
+# no BZNET_REF installs the branch it came from, not master.
+REF="${BZNET_REF:-experimental/v4.9}"
 GAME_PATH="${BZNET_GAME_PATH:-}"
 ARCHIVE_URL="${BZNET_ARCHIVE_URL:-https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz}"
+# BZNET_REF is validated after validate_ref is defined; see below.
 ASSUME_YES="${BZNET_ASSUME_YES:-0}"
 PACKAGE_MANAGER=""
 SUDO_CMD=""
@@ -84,6 +88,79 @@ detect_package_manager() {
     echo "Unsupported Linux distribution: could not find apt-get, pacman, or dnf." >&2
     exit 1
 }
+
+# A git ref goes straight into a URL, so it has to look like a git ref.  An
+# unvalidated value here is a URL-injection hole in a script people paste from
+# a chat message and run with sudo available.
+validate_ref() {
+    local ref="$1"
+    if [[ -z "$ref" ]]; then
+        echo "Empty git ref." >&2
+        exit 1
+    fi
+    if [[ ! "$ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+        echo "Refusing ref '$ref': only letters, digits, dot, underscore," >&2
+        echo "slash and dash are allowed in a git ref." >&2
+        exit 1
+    fi
+    case "$ref" in
+        -*|*..*|*//*|*/) echo "Refusing malformed git ref '$ref'." >&2; exit 1 ;;
+    esac
+}
+
+# The Windows installer verifies the SHA256 of what it downloads against a
+# sidecar; this side downloaded a source tarball with no integrity check at
+# all.  It builds from that tarball, so a corrupted or substituted archive is
+# executed, not merely unpacked.
+#
+# The sidecar lives beside the archive on the same host, so this is an
+# integrity check and not a trust anchor -- it catches a truncated download or
+# a mangled proxy, not a compromised github.com.  Say so rather than implying
+# more.  BZNET_ARCHIVE_SHA256 pins it properly for anyone who wants that.
+verify_archive() {
+    local file="$1"
+    local expected="${BZNET_ARCHIVE_SHA256:-}"
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if [[ -n "$expected" ]]; then
+            echo "BZNET_ARCHIVE_SHA256 is set but sha256sum is not available;" >&2
+            echo "refusing to build unverified when an explicit pin was asked for." >&2
+            exit 1
+        fi
+        echo "sha256sum not found; skipping the archive hash check." >&2
+        expected=""
+    else
+        local actual
+        actual="$(sha256sum "$file" | awk '{print $1}')"
+        echo "Source archive SHA256: $actual"
+    fi
+
+    if [[ -n "$expected" ]]; then
+        expected="$(printf '%s' "$expected" | tr 'A-Z' 'a-z')"
+        if [[ "$actual" != "$expected" ]]; then
+            echo "Archive SHA256 mismatch." >&2
+            echo "  expected: $expected" >&2
+            echo "  actual:   $actual" >&2
+            echo "Refusing to build from it." >&2
+            exit 1
+        fi
+        echo "Archive matches BZNET_ARCHIVE_SHA256."
+        return 0
+    fi
+
+    # No pin given: at least prove the archive is a well-formed tarball before
+    # we extract and build from it.  A truncated download fails here instead of
+    # halfway through a compile with a baffling error.
+    if ! tar -tzf "$file" >/dev/null 2>&1; then
+        echo "Downloaded archive is not a readable gzip tarball -- the download" >&2
+        echo "was truncated or intercepted. Refusing to build from it." >&2
+        exit 1
+    fi
+    echo "(Set BZNET_ARCHIVE_SHA256 to pin this exactly.)"
+}
+
+# BZNET_REF arrives from the environment and lands in a URL just the same.
+validate_ref "$REF"
 
 download_to() {
     local source_path="$1"
@@ -272,6 +349,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             REF="$2"
+            validate_ref "$REF"
             ARCHIVE_URL="https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz"
             shift 2
             ;;
@@ -310,6 +388,7 @@ trap 'rm -rf "$temp_dir"' EXIT
 
 echo "Downloading source archive from $ARCHIVE_URL"
 download_to "$ARCHIVE_URL" "$archive_file"
+verify_archive "$archive_file"
 
 echo "Extracting source archive"
 tar -xzf "$archive_file" -C "$temp_dir"
@@ -373,16 +452,136 @@ if [[ -x "$exu_repair_script" ]]; then
     fi
 fi
 
+# ── Automatic log upload (test crew) ─────────────────────────────────────────
+# Zero prompts by design: the tester's whole job is to run one command and
+# paste one launch line.  The webhook rides in on BZNET_WEBHOOK, which is
+# baked into the install command pinned in the private channel - so the
+# credential lives in that channel, never in this public repo.  No
+# BZNET_WEBHOOK (i.e. a normal player) means no uploader and no questions.
+wrapper_ready=0
+wrapper_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode"
+conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/bz-netcode"
+if [[ -n "${BZNET_WEBHOOK:-}" && -f "$source_root/upload/bz_wrap.sh" ]]; then
+    if [[ "$BZNET_WEBHOOK" != https://discord.com/api/webhooks/* \
+       && "$BZNET_WEBHOOK" != https://discordapp.com/api/webhooks/* ]]; then
+        echo "Warning: BZNET_WEBHOOK is not a Discord webhook URL; skipping upload setup." >&2
+    else
+        mkdir -p "$wrapper_dir" "$conf_dir"
+        command cp -f "$source_root/upload/bz_wrap.sh" "$wrapper_dir/bz_wrap.sh"
+        chmod +x "$wrapper_dir/bz_wrap.sh"
+        (
+            umask 077
+            cat >"$conf_dir/upload.conf" <<EOF
+# Written by install_linux.sh. Do not commit this file.
+BZ_WEBHOOK='$BZNET_WEBHOOK'
+BZ_PLAYER='${BZNET_PLAYER:-}'
+BZ_INCLUDE_PROTON=0
+EOF
+        )
+        chmod 600 "$conf_dir/upload.conf"
+
+        # Sandboxed Steam cannot read the host copy above: Flatpak remaps
+        # XDG_DATA_HOME into ~/.var/app, and snapd's home interface excludes
+        # dot-dirs outright — which is why the wrapper line used to abort the
+        # launch on Snap: the exec target simply did not exist inside the
+        # sandbox. Mirror the wrapper into every sandbox that has a Steam,
+        # with the conf as a sibling: bz_wrap.sh prefers a sibling
+        # upload.conf, so each copy is self-contained.
+        for sandbox_dir in \
+            "$HOME/snap/steam/common/.local/share/bz-netcode" \
+            "$HOME/.var/app/com.valvesoftware.Steam/data/bz-netcode"; do
+            [[ -d "${sandbox_dir%/bz-netcode}/Steam" ]] || continue
+            mkdir -p "$sandbox_dir"
+            command cp -f "$source_root/upload/bz_wrap.sh" "$sandbox_dir/bz_wrap.sh"
+            chmod +x "$sandbox_dir/bz_wrap.sh"
+            command cp -f "$conf_dir/upload.conf" "$sandbox_dir/upload.conf"
+            chmod 600 "$sandbox_dir/upload.conf"
+            echo "Mirrored the uploader into $sandbox_dir (sandboxed Steam)."
+
+            # The Steam snap's runtime has neither curl nor python3, so the
+            # post-exit upload can only ever park bundles — and the next
+            # wrapped launch runs inside the same toolless sandbox, so
+            # nothing in there will ever send them. A host-side user timer
+            # drains the outbox with host tools instead.
+            if [[ "$sandbox_dir" == "$HOME/snap/steam/"* ]] \
+               && command -v systemctl >/dev/null 2>&1; then
+                unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+                mkdir -p "$unit_dir"
+                cat >"$unit_dir/bz-netcode-retry.service" <<UNIT
+[Unit]
+Description=Send parked Battlezone netcode session bundles
+
+[Service]
+Type=oneshot
+ExecStart="$sandbox_dir/bz_wrap.sh" --retry
+UNIT
+                cat >"$unit_dir/bz-netcode-retry.timer" <<UNIT
+[Unit]
+Description=Drain the Battlezone netcode outbox the snap sandbox cannot send from
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+UNIT
+                if systemctl --user daemon-reload 2>/dev/null \
+                   && systemctl --user enable --now bz-netcode-retry.timer 2>/dev/null; then
+                    echo "Enabled bz-netcode-retry.timer: Snap-parked bundles are sent every 10 minutes."
+                else
+                    echo "Could not enable the retry timer; send parked bundles by hand with:"
+                    echo "  \"$sandbox_dir/bz_wrap.sh\" --retry"
+                fi
+            fi
+        done
+
+        # Empty BZ_PLAYER = the wrapper reads the in-game player name from
+        # BZLogger at upload time; the OS account name is not who
+        # anyone is on Steam.
+        echo "Automatic log upload configured for '${BZNET_PLAYER:-your in-game name (read at upload time)}'."
+        wrapper_ready=1
+    fi
+fi
+
+if [[ "$wrapper_ready" == "1" ]]; then
+    if [[ "$GAME_PATH" == "$HOME/snap/steam/"* ]]; then
+        # Snap remaps HOME and blocks the host's dot-dirs, so the XDG line
+        # can never resolve there; $SNAP_USER_COMMON is guaranteed by snapd
+        # inside the sandbox and points at ~/snap/steam/common.
+        launch_line='WINEDLLOVERRIDES=dsound=n,b "$SNAP_USER_COMMON/.local/share/bz-netcode/bz_wrap.sh" %command% -nointro'
+    else
+        launch_line='WINEDLLOVERRIDES=dsound=n,b "${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode/bz_wrap.sh" %command% -nointro'
+    fi
+else
+    launch_line='WINEDLLOVERRIDES=dsound=n,b %command% -nointro'
+fi
+
+# State both outcomes on the final lines, where the eye actually lands — a
+# skipped or failed uploader setup higher up scrolls away (field-proven on
+# Windows, 2026-08-02).
+if [[ "$wrapper_ready" == "1" ]]; then
+    uploader_status="Log uploader: OK"
+elif [[ -n "${BZNET_WEBHOOK:-}" ]]; then
+    uploader_status="LOG UPLOADER: NOT INSTALLED - scroll up for the reason"
+else
+    uploader_status="Log uploader: not requested (no BZNET_WEBHOOK - correct for normal players)"
+fi
+
 cat <<EOF
 
 Install complete.
+Patch DLL: OK    $uploader_status
 
 Steam launch options still need to be set once on Linux:
-WINEDLLOVERRIDES=dsound=n,b %command% -nointro
+$launch_line
 
-(That's all you need: reorder, bigger buffers, DSCP priority marking, and the
-host auto-kick relax are on by default; BZ_AUTOKICK_RELAX=0 restores stock
-kicking. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
+(That's all you need: bigger socket buffers, DSCP priority marking, the [Net]
+tuning poke, the governor cold-start fix and the host auto-kick relax are on by
+default; BZ_AUTOKICK_RELAX=0 restores stock kicking. The inbound reorder buffer
+is OFF - it has been since V4.8, and V4.9 found the structural reason: this
+protocol's sequence number counts messages, not datagrams, so there is no
+per-datagram key to reorder by. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
 showed outbound duplication does not help this game and degrades busy
 uplinks by doubling packet rate. Leave it off.)
 

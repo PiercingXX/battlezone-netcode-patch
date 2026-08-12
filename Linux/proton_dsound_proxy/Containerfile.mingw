@@ -1,0 +1,7 @@
+# Sandboxed 32-bit MinGW toolchain for cross-building the Proton DSOUND proxy
+# (build/dsound.dll). Rootless-podman friendly: no host toolchain, no sudo.
+# Build once with crossbuild.sh; the image is cached thereafter.
+FROM docker.io/library/debian:stable-slim
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq g++-mingw-w64-i686 make \
+ && rm -rf /var/lib/apt/lists/*

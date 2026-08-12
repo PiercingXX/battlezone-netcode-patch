@@ -181,6 +181,8 @@ void test_env_presets_and_overrides() {
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
     CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
+    CHECK_EQ(tbl[kNgUpCount].want, 50u);       // ramp is gentler than stock
+    CHECK_EQ(tbl[kNgDownCount].want, 200u);    // over-MaxPing back-off step
 
     // ...but anyone re-testing it can still force a value by env.
     setenv("BZ_NET_MINBANDWIDTH", "40000", 1);
@@ -222,6 +224,75 @@ void test_env_presets_and_overrides() {
     unsetenv("BZ_AUTOKICK_RELAX");
 }
 
+// DownCount is the governor's over-MaxPing back-off step (bytes removed from the
+// send budget per adjustment while over MaxPing), NOT a receive budget.  All
+// three tuning sources — net_globals.h, net-ini/net.ini, and both proxy READMEs
+// — must state the same reconciled value.  net-ini/net.ini mirrors this compiled
+// default; if either drifts, the mirror invariant below is what catches it.
+
+// Read one [Net] key from net-ini/net.ini (relative to the tests/ CWD that
+// `make -C tests run` uses). Returns -1 if absent/unparseable. This is what
+// makes the mirror invariant REAL: pinning kNetTunePreset alone never reads
+// net.ini, so a drift there stays green (2026-08-11 audit — the comment
+// claimed the invariant was covered; it was not).
+static long read_netini_key(const char *key) {
+    // Try both CWDs: tests/ (make -C tests run) and repo root (a manual run).
+    FILE *f = fopen("../net-ini/net.ini", "r");
+    if (!f) f = fopen("net-ini/net.ini", "r");
+    if (!f) return -1;
+    char line[256];
+    long val = -1;
+    bool in_net = false;
+    while (fgets(line, sizeof line, f)) {
+        char *h = line;
+        while (*h == ' ' || *h == '\t') ++h;
+        if (*h == '[') { in_net = (strncmp(h, "[Net]", 5) == 0); continue; }
+        if (!in_net) continue;
+        char k[64]; long v;
+        if (sscanf(h, "%63[^= \t] = %ld", k, &v) == 2 && strcmp(k, key) == 0) { val = v; break; }
+    }
+    fclose(f);
+    return val;
+}
+
+// The mirror invariant, ACTUALLY implemented: net.ini must equal the compiled
+// default for BOTH ramp knobs. Reverting either net.ini value now fails here
+// (2026-08-11 audit: the old test only pinned kNetTunePreset and never read
+// net.ini, so a drift stayed green — the exact vacuous-validator trap).
+void test_netini_mirrors_compiled_defaults() {
+    begin("net.ini UpCount/DownCount mirror the compiled preset defaults");
+    long ini_up = read_netini_key("UpCount");
+    long ini_down = read_netini_key("DownCount");
+    CHECK_EQ((unsigned)ini_up, kNetTunePreset[kNgUpCount]);
+    CHECK_EQ((unsigned)ini_down, kNetTunePreset[kNgDownCount]);
+    CHECK_EQ((unsigned)ini_up, 50u);
+    CHECK_EQ((unsigned)ini_down, 200u);
+}
+
+void test_downcount_reconciled() {
+    begin("DownCount is reconciled to 200 and net.ini mirrors the compiled default");
+    NetGlobal tbl[kNetGlobalCount];
+    net_globals_defaults(tbl);
+
+    // The reconciled value, pinned here so a drift in any source is a test fail.
+    CHECK_EQ(kNetTunePreset[kNgDownCount], 200u);
+
+    // The value must pass the sanity gate it will later be re-read through.
+    const NetGlobal &g = tbl[kNgDownCount];
+    check(kNetTunePreset[kNgDownCount] >= g.lo
+              && kNetTunePreset[kNgDownCount] <= g.hi,
+          "DownCount preset passes its own gate", kNetTunePreset[kNgDownCount],
+          (long long)g.hi);
+
+    // With the BZ_NET_TUNE preset on (default), the configured want is 200.
+    unsetenv("BZ_NET_TUNE");
+    unsetenv("BZ_AUTOKICK_RELAX");
+    unsetenv("BZ_NET_DOWNCOUNT");
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgDownCount].want, 200u);
+}
+
 // A wrong address must not take the rest of the table down with it.
 void test_veto_is_per_entry() {
     begin("one vetoed entry does not stop the others");
@@ -246,6 +317,8 @@ int main() {
     test_zero_want_leaves_value_alone();
     test_shipped_table_admits_stock_defaults();
     test_shipped_presets_pass_their_own_gate();
+    test_downcount_reconciled();
+    test_netini_mirrors_compiled_defaults();
     test_env_presets_and_overrides();
     test_veto_is_per_entry();
 

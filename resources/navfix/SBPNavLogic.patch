@@ -1,0 +1,87 @@
+--- a/SBPNavLogic.lua
++++ b/SBPNavLogic.lua
+@@ -71,6 +71,7 @@
+ 
+ 
+ 	function Start()
++		DisplayMessage("NAVFIX ACTIVE - patched SBPNavLogic loaded")
+ 		LocalPlayerTeam = GetTeamNum(GetPlayerHandle()) -- Using getplayerhandle directly can result in nil outputs.
+ 		TeleportObject = nil -- needed because launched armory objects start with 0 velocity on creation, I teleport it 1 frame after.
+ 		TeleportDestination = nil -- Target tracking variable, teleports armory items to a nav at specified height.
+@@ -131,6 +132,25 @@
+ 
+ 	end
+ 
++	-- NAVFIX2: rename a nav only when the name actually changed.
++	-- Rewriting an identical string still dirties the object, and the
++	-- composed name carries a live scrap count, so it churns constantly.
++	NavNameCache = NavNameCache or {}
++	function NavSetName(h, name)
++		-- ClearDeadNavs() nils entries inside NavManager, leaving holes, so
++		-- NavManager[x] can be nil here.  The original SetObjectiveName call
++		-- silently no-ops on a nil handle; a table lookup does not.
++		if h == nil then return end
++		if NavNameCache[h] ~= name then
++			NavNameCache[h] = name
++			if NAVFIX2_FIRED == nil then
++				DisplayMessage("NAVFIX2: rename guard active")
++				NAVFIX2_FIRED = true
++			end
++			SetObjectiveName(h, name)
++		end
++	end
++
+ 	-- Updates nav names to display useful info to player.
+ 	function UpdateNavInfo()
+ 		if GetPlayerHandle() ~= nil then
+@@ -257,7 +277,23 @@
+ 						-- Distance checks are 2-dimensional and do not take height into consideration, compare the Y values
+ 						-- and only operate if the powerup is actually on top of the nav.
+ 						if math.abs(GetPosition(NavManager[x]).y - GetPosition(p).y) < 4 and ValidForNavSnapping == true then
+-							SetPosition(p, GetPosition(NavManager[x]))
++							-- NAVFIX: land the item BESIDE the beacon, not inside it.
++							-- Identical coordinates make the two solids interpenetrate, and
++							-- collision response then never lets the beacon come to rest.  A
++							-- beacon that never rests has its full state re-sent on the
++							-- RELIABLE channel every frame for the rest of the match:
++							-- 2 packets for a beacon's whole life, 5779 after one delivery.
++							-- Lateral, not vertical -- an item above the beacon falls onto it.
++							local navPos = GetPosition(NavManager[x])
++							local snapPos = navPos + SetVector(3.0, 0, 0)
++							if Distance2D(GetPosition(p), snapPos) > 1.0 then
++								if NAVFIX_SNAPPED == nil then
++									DisplayMessage("NAVFIX: snap fired, item placed beside nav")
++									NAVFIX_SNAPPED = true
++								end
++								SetPosition(p, snapPos)
++								SetVelocity(p, SetVector(0, 0, 0))
++							end
+ 						end
+ 
+ 					end
+@@ -276,11 +312,11 @@
+ 					NavName_ScrapCount = "Scrp:(" .. tostring(ScrapCountA + ScrapCountB + ScrapCountC + ScrapCountD) .. ")"
+ 				end
+ 
+-				SetObjectiveName(NavManager[x], NavName_Direction .. NavName_Structure .. NavName_Powerup .. NavName_ScrapCount)
++				NavSetName(NavManager[x], NavName_Direction .. NavName_Structure .. NavName_Powerup .. NavName_ScrapCount)
+ 
+ 				-- IF NAV IS WHERE THE PLAYER FIRST SPAWNED, OVERRIDE NAV LABEL WITH SPAWN POINT.
+ 				if GetDistance(NavManager[x], SpawnPosition) < 20 then
+-					SetObjectiveName(NavManager[x], "SPAWN POINT")
++					NavSetName(NavManager[x], "SPAWN POINT")
+ 				end
+ 
+ 				-- Finally, if the nav is X meters above the ground, it should
+@@ -291,9 +327,9 @@
+ 				-- but when used directly it recognizes the function as just height somehow... I don't get it.
+ 				if GetPosition(NavManager[x]).y - GetTerrainHeightAndNormal(NavManager[x]) > 100 then
+ 					if GetArmoryHandle() ~= nil then
+-						SetObjectiveName(NavManager[x], "Nav: In Flight (dist: " .. math.floor(GetDistance(NavManager[x], GetArmoryHandle())) .. "m)")
++						NavSetName(NavManager[x], "Nav: In Flight (dist: " .. math.floor(GetDistance(NavManager[x], GetArmoryHandle())) .. "m)")
+ 					else
+-						SetObjectiveName(NavManager[x], "Nav: In Flight")
++						NavSetName(NavManager[x], "Nav: In Flight")
+ 					end
+ 				end
+ 			end

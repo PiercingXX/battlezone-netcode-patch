@@ -27,6 +27,100 @@ Notes:
 EOF
 }
 
+# Both committed bundles are named "unknown-host" because this used only
+# `hostname`, which is not installed by default on Arch (and several other
+# distros ship it only in net-tools). Every other source was right there.
+resolve_hostname() {
+  local h=""
+  if command -v hostnamectl >/dev/null 2>&1; then
+    h="$(hostnamectl --static 2>/dev/null || true)"
+  fi
+  if [[ -z "$h" ]] && command -v hostname >/dev/null 2>&1; then
+    h="$(hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "$h" && -r /etc/hostname ]]; then
+    h="$(tr -d '\n' </etc/hostname 2>/dev/null || true)"
+  fi
+  if [[ -z "$h" && -r /proc/sys/kernel/hostname ]]; then
+    h="$(tr -d '\n' </proc/sys/kernel/hostname 2>/dev/null || true)"
+  fi
+  [[ -z "$h" ]] && h="${HOSTNAME:-}"
+  [[ -z "$h" ]] && h="unknown-host"
+  # Keep it safe as a path component.
+  printf '%s' "$h" | tr -c 'A-Za-z0-9._-' '-'
+}
+
+# Did the capture actually run with the settings we asked for?
+#
+# The one successful capture of 2026-07-26 asked for BZ_BUFFER_LOG_RING=500000
+# and ran with 65,536 -- the default -- discarding 48% of its events including
+# the entire match start. Nothing said so, and it took reading two files side
+# by side days later to notice. The proxy now records what it was asked for in
+# the meta file; this compares that against what the tester requested and
+# refuses to be quiet about a mismatch, while they can still re-run it.
+verify_capture() {
+  local session_dir="$1"
+  local meta="$session_dir/bz_buffer_log.meta.txt"
+  local report="$session_dir/capture_verify.txt"
+  local ok=1
+
+  {
+    if [[ ! -s "$meta" ]]; then
+      echo "meta=MISSING"
+      echo "The game did not flush the ring. An unclean exit never writes it."
+      ok=0
+    else
+      # The proxy writes literal CRLF; normalise before matching.
+      local want_ring want_bytes got_ring got_bytes ring_env seen wrote
+      want_ring="$(cat "$session_dir/ring_records.txt" 2>/dev/null | tr -d '\r\n')"
+      want_bytes="$(cat "$session_dir/payload_bytes.txt" 2>/dev/null | tr -d '\r\n')"
+      got_ring="$(tr -d '\r' <"$meta" | sed -n 's/^ring_records=//p' | head -1)"
+      got_bytes="$(tr -d '\r' <"$meta" | sed -n 's/^payload_bytes=//p' | head -1)"
+      ring_env="$(tr -d '\r' <"$meta" | sed -n 's/^ring_env=//p' | head -1)"
+      seen="$(tr -d '\r' <"$meta" | sed -n 's/^total_events_seen=//p' | head -1)"
+      wrote="$(tr -d '\r' <"$meta" | sed -n 's/^records_written=//p' | head -1)"
+
+      echo "requested_ring=$want_ring effective_ring=${got_ring:-unknown}"
+      echo "requested_payload=$want_bytes effective_payload=${got_bytes:-unknown}"
+      [[ -n "$ring_env" ]] && echo "ring_env=$ring_env"
+
+      if [[ -n "$want_ring" && -n "$got_ring" && "$want_ring" != "$got_ring" ]]; then
+        echo "MISMATCH: ring"
+        ok=0
+      fi
+      if [[ -n "$want_bytes" && -n "$got_bytes" && "$want_bytes" != "$got_bytes" ]]; then
+        echo "MISMATCH: payload"
+        ok=0
+      fi
+      if [[ -n "$seen" && -n "$wrote" && "$seen" -gt "$wrote" ]]; then
+        echo "ring wrapped: $seen events seen, last $wrote kept ($(( (seen - wrote) * 100 / seen ))% discarded)"
+        ok=0
+      fi
+    fi
+    echo "ok=$ok"
+  } >"$report" 2>&1
+
+  if [[ "$ok" == "1" ]]; then
+    echo
+    echo "  capture verified: ran with the settings you asked for, ring did not wrap"
+    return 0
+  fi
+
+  echo
+  echo "  ####################################################################"
+  echo "  #  CAPTURE IS NOT CLEAN - read it before you rely on it            #"
+  echo "  ####################################################################"
+  sed 's/^/    /' "$report"
+  echo
+  echo "    A ring that wrapped, or settings that did not take, means the"
+  echo "    capture is missing events - most likely the earliest ones, which"
+  echo "    is where the match start lives."
+  echo "    If ring_env says NOT SET, the game was launched before the launch"
+  echo "    options were pasted. Close the game, paste them, run this again."
+  echo
+  return 0
+}
+
 write_launch_options() {
   local out_file="$1"
   local payload_bytes="$2"
@@ -80,7 +174,7 @@ start_session() {
   fi
 
   local host utc_stamp session_dir
-  host="$(hostname 2>/dev/null || echo unknown-host)"
+  host="$(resolve_hostname)"
   utc_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   session_dir="$REPO_ROOT/test_bundles/buffer_linux_${host}_${utc_stamp}"
   mkdir -p "$session_dir"
@@ -146,6 +240,8 @@ stop_session() {
   collect_file "$game_root/bz_buffer_log.bin" "$session_dir" "$status_file"
   collect_file "$game_root/bz_buffer_log.meta.txt" "$session_dir" "$status_file"
   collect_file "$game_root/multi.ini" "$session_dir" "$status_file"
+
+  verify_capture "$session_dir"
 
   archive_path="$session_dir.tar.gz"
   tar -czf "$archive_path" -C "$(dirname "$session_dir")" "$(basename "$session_dir")"

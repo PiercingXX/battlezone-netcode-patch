@@ -116,8 +116,8 @@ written.
 | `BZ_NET_TUNE` | `1` | — | — | `0` restores the game's stock governor behaviour |
 | `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | also the value copied into the live send rate at session setup |
 | `BZ_NET_MAXBANDWIDTH` | `320000` | MaxBandwidth | 16000 | the governor is closed-loop, so a high ceiling is not itself a risk |
-| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | stock ramps +10 bytes per ~3 s: a short match never escapes the opening trickle |
-| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | |
+| `BZ_NET_UPCOUNT` | `50` | UpCount | 10 | stock ramps +10 bytes per ~3 s: UpCount 50 = a gentler ramp; the governor climbs less aggressively so a spike does not overshoot (T3, reconciled 2026-08-11) |
+| `BZ_NET_DOWNCOUNT` | `200` | DownCount | 5 | bytes removed from the send budget per adjustment while over MaxPing (the governor's back-off step, not a receive budget) |
 | `BZ_NET_MAXPING` | `450` | MaxPing | 300 | stock turns a jitter spike into a rate cut into more warping into more spike |
 | `BZ_NET_MAXPINGSLOST` | leave | MaxPingsLost | 20 | no evidence a change helps |
 | `BZ_AUTOKICK_RELAX` | `1` | — | — | `0` restores stock kicking |
@@ -147,6 +147,30 @@ small to carry a sequence number (the ping exchange the auto-kick measures).  It
 can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates the
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
+
+### Duplicate suppressor (`BZ_SEND_DAMPEN`, off by default)
+
+BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an
+RTT the game itself reports as 56–91 ms, so every reliable message goes out
+6–9 times before an acknowledgement can physically return (see
+`resources/CAMERAPOD_STORM.md`).  The damper drops the redundant in-window
+copies on the send path: only a 2nd-or-later copy of a `(peer, sequence)`
+already sent inside its window is ever suppressed — a first transmission, a
+distinct sequence, and anything too small to carry a sequence number always
+go.  A suppressed send looks to the game like a successful one (a UDP send
+promises handoff, not delivery), is still counted by the burst measurement,
+and is never duplicated by `BZ_SEND_DUP`.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BZ_SEND_DAMPEN` | `0` | `1` suppresses redundant in-window reliable retransmits; off pending live-match validation |
+
+The suppression window starts at a 60 ms floor and doubles on each genuine
+loss-recovery retransmit, capped at 400 ms.  A peer restart is detected
+in-band (a sequence below the ring's oldest retained entry), and the
+socket-close path purges every peer explicitly, so a reconnecting peer is
+never suppressed.  Counters appear at teardown as a `session end: dampen:`
+line.
 
 | Variable | Default | Description |
 |---|---|---|

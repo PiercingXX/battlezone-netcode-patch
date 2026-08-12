@@ -21,6 +21,9 @@
 // block, also shared verbatim with the Linux proxy.
 #include "net_globals.h"
 #include "send_pace.h"
+#include "send_dampen.h"
+#include "gov_trace.h"
+#include "buffer_filter.h"
 
 using namespace bznet;
 
@@ -29,6 +32,8 @@ using namespace bznet;
 // applies SO_SNDBUF / SO_RCVBUF to every UDP socket created, and enables
 // per-peer OOO packet reordering via WSARecvFrom hook with drain-and-deliver.
 void InstallNetcodeHooks();
+// True once the hooks that carry the patch's behaviour are in place.
+bool NetcodeHooksComplete();
 
 // Called from DllMain during DLL_PROCESS_DETACH.
 // Flushes binary packet logs if enabled and releases hook-owned resources.

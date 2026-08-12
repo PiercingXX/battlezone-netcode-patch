@@ -286,11 +286,46 @@ while (`$true) {
     New-Item -ItemType Directory -Path $dumpDir -Force | Out-Null
     if ($procdumpCandidates.Count -gt 0) {
         $procdumpExe = $procdumpCandidates[0]
-        $procdumpProc = Start-Process -FilePath $procdumpExe -ArgumentList @("-accepteula", "-ma", "-e", "-w", $GameExeName, $dumpDir) -WindowStyle Hidden -PassThru
+        # -e alone only fires on an unhandled exception.  Both hard stops in the
+        # repo end mid-teardown with no exception at all -- a normal match end,
+        # an observer.mesh error flood, then the log simply stops.  -e would
+        # have caught neither, which is why no committed bundle contains a dump.
+        # -t adds a dump on process termination, so *any* exit is captured.
+        $procdumpProc = Start-Process -FilePath $procdumpExe -ArgumentList @("-accepteula", "-ma", "-e", "-t", "-w", $GameExeName, $dumpDir) -WindowStyle Hidden -PassThru
         "procdump_path=$procdumpExe" | Out-File -FilePath (Join-Path $sessionDir "procdump_status.txt") -Encoding utf8
+        "procdump_args=-ma -e -t -w" | Add-Content -Path (Join-Path $sessionDir "procdump_status.txt")
     } else {
         "procdump_path=not_found" | Out-File -FilePath (Join-Path $sessionDir "procdump_status.txt") -Encoding utf8
     }
+
+    # Say so now, loudly, while the tester can still fix it.  Finding out days
+    # later that a crash left no dump is how both hard stops became
+    # unanalysable.
+    Write-Host ""
+    if ($procdumpCandidates.Count -gt 0) {
+        Write-Host "  crash capture: READY (procdump at $($procdumpCandidates[0]), dumps -> $dumpDir)"
+        Write-Host "    a full -ma dump of this game is roughly 1-2 GB; keep the space free"
+    } else {
+        Write-Host "  ####################################################################"
+        Write-Host "  #  crash capture: NOT READY - procdump.exe was not found.         #"
+        Write-Host "  #  A crash this session will leave no dump, exactly as happened   #"
+        Write-Host "  #  to both hard stops already in the repo.                        #"
+        Write-Host "  ####################################################################"
+        Write-Host "    fix: download Procdump from https://learn.microsoft.com/sysinternals/downloads/procdump"
+        Write-Host "         and put procdump.exe on PATH or in C:\Sysinternals\, then re-run start"
+    }
+    Write-Host ""
+
+    # Clock offset: the testers' wall clocks differ by up to an hour and no
+    # bundle records the offset, which turns cross-host correlation into
+    # archaeology.
+    @(
+        "utc=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))"
+        "local=$((Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz'))"
+        "tz=$((Get-TimeZone).Id)"
+        "utc_offset_seconds=$([int](Get-Date).Subtract((Get-Date).ToUniversalTime()).TotalSeconds)"
+        "hostname=$env:COMPUTERNAME"
+    ) | Out-File -FilePath (Join-Path $sessionDir "clock_offset.txt") -Encoding utf8
 
     try {
         netsh trace start capture=yes report=yes persistent=no maxsize=512 tracefile="$(Join-Path $sessionDir 'nettrace.etl')" | Out-Null

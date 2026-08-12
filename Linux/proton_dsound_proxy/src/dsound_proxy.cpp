@@ -13,14 +13,31 @@
 #include "reorder_core.h"
 #include "net_globals.h"
 #include "send_pace.h"
+#include "send_dampen.h"
+#include "gov_trace.h"
+#include "buffer_filter.h"
 
 namespace {
 
 using namespace bznet;
 
+// Injected by the Makefile.  A tester's log could not previously say which
+// build produced it, which mattered most exactly when it was hardest to check:
+// the shipped Windows prebuilt was deliberately a different vintage from the
+// source it sat beside.
+#ifndef BZ_BUILD_ID
+#define BZ_BUILD_ID "unknown (built without -DBZ_BUILD_ID)"
+#endif
+constexpr char kBuildId[] = BZ_BUILD_ID;
+
 constexpr wchar_t kLogFileName[] = L"dsound_proxy.log";
 wchar_t g_log_path[MAX_PATH] = L"dsound_proxy.log";
 bool g_log_path_ready = false;
+
+// Serialises log_line.  Initialised at DLL_PROCESS_ATTACH before any of our
+// threads exist, and deliberately never deleted — see ShutdownProxy.
+CRITICAL_SECTION g_log_cs = {};
+volatile LONG    g_log_cs_ready = 0;
 
 constexpr wchar_t kBufferBinName[] = L"bz_buffer_log.bin";
 constexpr wchar_t kBufferMetaName[] = L"bz_buffer_log.meta.txt";
@@ -118,6 +135,9 @@ bool g_buffer_log_initialized = false;
 bool g_buffer_log_enabled = false;
 uint32_t g_buffer_payload_bytes = kDefaultPayloadBytes;
 uint32_t g_buffer_ring_records = kDefaultRingRecords;
+PeerFilter g_buffer_peer_filter = {};
+EnvOutcome g_buffer_ring_outcome = kEnvUsed;
+EnvOutcome g_buffer_bytes_outcome = kEnvUsed;
 uint32_t g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + kDefaultPayloadBytes);
 uint32_t g_buffer_head = 0;
 uint32_t g_buffer_count = 0;
@@ -155,6 +175,11 @@ constexpr uint64_t       kReorderStatsMs    = 10000;
 // false; they exist so a clean shutdown does not get a second, duplicate line.
 static bool              g_reorder_stats_logged = false;
 static bool              g_send_stats_logged    = false;
+static bool              g_dampen_stats_logged  = false;
+// Last pace/dampen lines emitted, for suppressing byte-identical repeats when
+// teardown closes several sockets in a row (guarded by g_pace_cs).
+static char              g_last_pace_line[512]   = "";
+static char              g_last_dampen_line[512] = "";
 
 // Wake helper: the reorder hook drains the kernel socket, so a game thread
 // sleeping in select()/WSAEventSelect() never sees the socket readable while
@@ -239,6 +264,21 @@ static bool              g_pace_cs_ready    = false;
 static volatile LONG     g_pace_stop        = 0;
 static uint32_t          g_pace_rate        = 0;   // 0 = measure only
 static uint32_t          g_pace_max_ms      = kPaceMaxDelayDef;
+
+// Outbound duplicate suppressor (shared/send_dampen.h).  Off by default
+// (BZ_SEND_DAMPEN=1 enables): every reliable message goes out 6-9 times before
+// an ack can physically return, and this drops the redundant in-window copies
+// on the send path.  The peer table is per-destination; dampen_purge_peer is the
+// explicit reset the proxy fires on the disconnect path so a real reconnect is
+// signalled rather than inferred.  Guarded by g_pace_cs, not a lock of its own:
+// the damper decides before the pacer takes ownership, and one lock keeps that
+// ordering obvious.
+static DampenCtx         g_dampen;
+// The socket whose close ends the dampened session, mirroring g_reorder_sock:
+// set on the dampened send path, checked by dampen_close_ends_session in the
+// closesocket hook so an unrelated socket close (lobby/discovery, stats
+// upload) cannot wipe the peer ring mid-match.  Guarded by g_pace_cs.
+static SOCKET            g_dampen_sock      = INVALID_SOCKET;
 
 // The game's whole [Net] tunable block, written directly into .data.  Table,
 // addresses, presets and the sanity gate live in shared/net_globals.h; this is
@@ -560,9 +600,22 @@ void init_buffer_log_if_needed() {
         return;
     }
 
-    g_buffer_payload_bytes = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_BYTES", kDefaultPayloadBytes), kMinPayloadBytes, kMaxPayloadBytes);
-    g_buffer_ring_records = clamp_u32(parse_env_u32("BZ_BUFFER_LOG_RING", kDefaultRingRecords), kMinRingRecords, kMaxRingRecords);
+    // Report what we were ASKED for next to what we used.  The one successful
+    // capture asked for ring=500000 and ran with the 65536 default, losing 48%
+    // of its events including the whole match start, and nothing in the bundle
+    // said so — the variable was simply absent because the game was launched
+    // before the launch options were pasted.
+    const char *raw_bytes = std::getenv("BZ_BUFFER_LOG_BYTES");
+    const char *raw_ring  = std::getenv("BZ_BUFFER_LOG_RING");
+    const uint32_t want_bytes = parse_env_u32("BZ_BUFFER_LOG_BYTES", kDefaultPayloadBytes);
+    const uint32_t want_ring  = parse_env_u32("BZ_BUFFER_LOG_RING", kDefaultRingRecords);
+    g_buffer_payload_bytes = clamp_u32(want_bytes, kMinPayloadBytes, kMaxPayloadBytes);
+    g_buffer_ring_records = clamp_u32(want_ring, kMinRingRecords, kMaxRingRecords);
+    g_buffer_ring_outcome = env_outcome(raw_ring, want_ring, g_buffer_ring_records);
+    g_buffer_bytes_outcome = env_outcome(raw_bytes, want_bytes, g_buffer_payload_bytes);
     g_buffer_stride = static_cast<uint32_t>(sizeof(BufferLogRecordHeader) + g_buffer_payload_bytes);
+
+    peer_filter_parse(&g_buffer_peer_filter, std::getenv("BZ_BUFFER_LOG_PEER"));
 
     size_t total = static_cast<size_t>(g_buffer_stride) * static_cast<size_t>(g_buffer_ring_records);
     g_buffer_ring = reinterpret_cast<uint8_t *>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, total));
@@ -573,6 +626,28 @@ void init_buffer_log_if_needed() {
 
     g_buffer_log_enabled = true;
     log_line("buffer_log: enabled payload=%u ring=%u stride=%u", g_buffer_payload_bytes, g_buffer_ring_records, g_buffer_stride);
+    if (g_buffer_ring_outcome != kEnvUsed) {
+        log_line("buffer_log: WARNING BZ_BUFFER_LOG_RING is %s - running with %u"
+                 " records. If you asked for more, the launch options did not"
+                 " reach this process; close the game, set them, relaunch.",
+                 env_outcome_name(g_buffer_ring_outcome),
+                 static_cast<unsigned>(g_buffer_ring_records));
+    }
+    if (g_buffer_bytes_outcome != kEnvUsed) {
+        log_line("buffer_log: WARNING BZ_BUFFER_LOG_BYTES is %s - running with %u",
+                 env_outcome_name(g_buffer_bytes_outcome),
+                 static_cast<unsigned>(g_buffer_payload_bytes));
+    }
+    if (g_buffer_peer_filter.count > 0) {
+        log_line("buffer_log: BZ_BUFFER_LOG_PEER active, recording %u peer address(es)"
+                 " only (%u entries rejected as unparseable)",
+                 static_cast<unsigned>(g_buffer_peer_filter.count),
+                 static_cast<unsigned>(g_buffer_peer_filter.rejected));
+    } else if (g_buffer_peer_filter.rejected > 0) {
+        log_line("buffer_log: WARNING BZ_BUFFER_LOG_PEER had %u unparseable entries"
+                 " and no valid ones - recording ALL peers",
+                 static_cast<unsigned>(g_buffer_peer_filter.rejected));
+    }
 }
 
 void buffer_log_event(uint32_t event_type,
@@ -598,6 +673,12 @@ void buffer_log_event(uint32_t event_type,
         const sockaddr_in *in = reinterpret_cast<const sockaddr_in *>(src);
         src_ipv4 = static_cast<uint32_t>(in->sin_addr.S_un.S_addr);
         src_port = ntohs(in->sin_port);
+    }
+
+    // BZ_BUFFER_LOG_PEER: keep only the peers the tester asked for, so the
+    // ring covers the whole match instead of overflowing on lobby chatter.
+    if (!peer_filter_accepts(&g_buffer_peer_filter, src_ipv4)) {
+        return;
     }
 
     int sid = get_socket_id(s, true);
@@ -668,13 +749,22 @@ void flush_buffer_log_files() {
         char text[1024] = {0};
         int n = std::snprintf(text,
                               sizeof(text),
-                              "format=buffer_log_v1\r\nrecord_header_size=%u\r\npayload_bytes=%u\r\nrecord_stride=%u\r\nring_records=%u\r\nrecords_written=%u\r\ntotal_events_seen=%llu\r\n",
+                              "format=buffer_log_v1\r\nrecord_header_size=%u\r\npayload_bytes=%u\r\nrecord_stride=%u\r\nring_records=%u\r\nring_env=%s\r\npayload_env=%s\r\npeer_filter=%u\r\nrecords_written=%u\r\ntotal_events_seen=%llu\r\n"
+                              // wrapped: the ring discarded the oldest events; the capture is
+                              // the session TAIL, not the session (bit the 2026-08-02 capture:
+                              // 65536 kept of 126715 seen, match starts lost). Stated here so
+                              // nobody has to compare two counters to notice.
+                              "wrapped=%u\r\n",
                               static_cast<unsigned>(sizeof(BufferLogRecordHeader)),
                               static_cast<unsigned>(g_buffer_payload_bytes),
                               static_cast<unsigned>(g_buffer_stride),
                               static_cast<unsigned>(g_buffer_ring_records),
+                              env_outcome_name(g_buffer_ring_outcome),
+                              env_outcome_name(g_buffer_bytes_outcome),
+                              static_cast<unsigned>(g_buffer_peer_filter.count),
                               static_cast<unsigned>(g_buffer_count),
-                              static_cast<unsigned long long>(g_buffer_total_events));
+                              static_cast<unsigned long long>(g_buffer_total_events),
+                              static_cast<unsigned>(g_buffer_total_events > g_buffer_count ? 1 : 0));
         if (n > 0) {
             DWORD written = 0;
             WriteFile(meta, text, static_cast<DWORD>(n), &written, nullptr);
@@ -818,20 +908,29 @@ bool module_is_ws2_32(HMODULE mod) {
     return _wcsicmp(base, L"ws2_32.dll") == 0;
 }
 
+// Serialised, one write per line.
+//
+// Two committed logs contain torn lines — `2026-07-26_crash_dsound_proxy.log`
+// line 145 lost its leading `[2`, and the 183650Z bundle's log line 128 is two
+// lines concatenated — because this function had no lock and issued *two*
+// WriteFile calls per line, body then CRLF. Several threads log concurrently
+// (the wake thread, the governor thread, the net-patch thread, the pacer, and
+// every hooked call), so another thread could land its own append between the
+// two. A torn line is silently unparseable by every tool downstream.
+//
+// Now: format the whole line including CRLF into one buffer, then take
+// g_log_cs for exactly one WriteFile. The lock also covers open/close, which
+// keeps the append offset consistent under Wine.
 void log_line(const char *fmt, ...) {
     init_log_path();
-
-    HANDLE h = CreateFileW(g_log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return;
-    }
 
     SYSTEMTIME st = {};
     GetLocalTime(&st);
 
-    char buf[768] = {0};
+    // +2 for the CRLF appended below.
+    char buf[770] = {0};
     DWORD pid = GetCurrentProcessId();
-    int n = std::snprintf(buf, sizeof(buf), "[%04u-%02u-%02u %02u:%02u:%02u.%03u][pid=%lu] ",
+    int n = std::snprintf(buf, sizeof(buf) - 2, "[%04u-%02u-%02u %02u:%02u:%02u.%03u][pid=%lu] ",
                           static_cast<unsigned>(st.wYear),
                           static_cast<unsigned>(st.wMonth),
                           static_cast<unsigned>(st.wDay),
@@ -840,25 +939,34 @@ void log_line(const char *fmt, ...) {
                           static_cast<unsigned>(st.wSecond),
                           static_cast<unsigned>(st.wMilliseconds),
                           static_cast<unsigned long>(pid));
-    if (n < 0) {
-        CloseHandle(h);
+    if (n < 0 || static_cast<size_t>(n) >= sizeof(buf) - 2) {
         return;
     }
 
     va_list args;
     va_start(args, fmt);
-    int m = std::vsnprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), fmt, args);
+    int m = std::vsnprintf(buf + n, sizeof(buf) - 2 - static_cast<size_t>(n), fmt, args);
     va_end(args);
     if (m < 0) {
-        CloseHandle(h);
         return;
     }
 
-    const char *newline = "\r\n";
-    DWORD written = 0;
-    WriteFile(h, buf, static_cast<DWORD>(std::strlen(buf)), &written, nullptr);
-    WriteFile(h, newline, 2, &written, nullptr);
-    CloseHandle(h);
+    size_t len = std::strlen(buf);
+    buf[len++] = '\r';
+    buf[len++] = '\n';
+
+    if (!g_log_cs_ready) {
+        return;
+    }
+    EnterCriticalSection(&g_log_cs);
+    HANDLE h = CreateFileW(g_log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(h, buf, static_cast<DWORD>(len), &written, nullptr);
+        CloseHandle(h);
+    }
+    LeaveCriticalSection(&g_log_cs);
 }
 
 int WSAAPI hooked_setsockopt(SOCKET s, int level, int optname, const char *optval, int optlen) {
@@ -1037,18 +1145,67 @@ int WSAAPI hooked_closesocket(SOCKET s) {
     dup_purge_socket(s);
     if (g_pace_cs_ready) {
         char pline[512];
-        bool have_pace = false;
+        char dline[512];
+        bool have_pace   = false;
+        bool have_dampen = false;
         EnterCriticalSection(&g_pace_cs);
         pace_flush_locked();                    // do not strand the game's tail
         pace_purge_socket(&g_tx, static_cast<uintptr_t>(s));
+        // Explicit dampen reset: the game uses one UDP socket for all P2P, so
+        // closing it ends the session and any peer that reconnects is a fresh
+        // epoch.  dampen_purge_peer is the PRIMARY reset signal — a real
+        // restart is signalled here rather than inferred by the in-band epoch
+        // heuristic.  Purge ONLY when the closing socket is the tracked P2P
+        // socket (dampen_close_ends_session, mirroring the reorder block's
+        // was_reorder_sock guard): closing an unrelated socket — lobby,
+        // discovery, stats upload, or anything before the P2P socket is even
+        // known — must leave the peer ring intact, or it collapses suppression
+        // mid-match.  Cumulative stats survive the purge; dump them below with
+        // the same repeat-suppression as the pace line — the counters are
+        // process-wide and teardown closes several sockets back to back.
+        if (dampen_close_ends_session(
+                static_cast<unsigned long long>(s),
+                (g_dampen_sock == INVALID_SOCKET)
+                    ? kDampenInvalidSock
+                    : static_cast<unsigned long long>(g_dampen_sock))) {
+            for (uint32_t i = 0; i < kDampenPeers; ++i) {
+                if (g_dampen.peers[i].addr != 0) {
+                    dampen_purge_peer(&g_dampen, g_dampen.peers[i].addr);
+                }
+            }
+            g_dampen_sock = INVALID_SOCKET;
+        }
+        if (g_reorder_stats) {
+            have_dampen = dampen_format_stats(&g_dampen, dline, sizeof(dline)) > 0;
+            if (have_dampen && std::strcmp(dline, g_last_dampen_line) == 0) {
+                have_dampen = false;
+            } else if (have_dampen) {
+                std::snprintf(g_last_dampen_line, sizeof(g_last_dampen_line), "%s", dline);
+            }
+        }
         if (g_reorder_stats) {
             pace_tick(&g_tx, GetTickCount64());
             have_pace = pace_format_stats(&g_tx, pline, sizeof(pline)) > 0;
+            // Teardown closes several sockets back to back, and unlike the
+            // reorder line above the pace counters are process-wide, so every
+            // close re-logged the identical send_stats line (twice, 100 ms
+            // apart, in both 2026-08-02 Linux logs — doubling counters for
+            // anything that greps naively).  Same counters = nothing new
+            // happened = say nothing.
+            if (have_pace && std::strcmp(pline, g_last_pace_line) == 0) {
+                have_pace = false;
+            } else if (have_pace) {
+                std::snprintf(g_last_pace_line, sizeof(g_last_pace_line), "%s", pline);
+            }
         }
         LeaveCriticalSection(&g_pace_cs);
         if (have_pace) {
             log_line("session end: %s", pline);
             g_send_stats_logged = true;
+        }
+        if (have_dampen) {
+            log_line("session end: %s", dline);
+            g_dampen_stats_logged = true;
         }
     }
     return rc;
@@ -1072,7 +1229,7 @@ static void emit_session_stats_at_exit() {
     if (!g_reorder_stats) {
         return;                                 // BZ_REORDER_STATS=0
     }
-    if (g_reorder_stats_logged && g_send_stats_logged) {
+    if (g_reorder_stats_logged && g_send_stats_logged && g_dampen_stats_logged) {
         return;                                 // clean shutdown already did it
     }
 
@@ -1119,6 +1276,23 @@ static void emit_session_stats_at_exit() {
             g_send_stats_logged = true;
         }
     }
+
+    if (!g_dampen_stats_logged && g_pace_cs_ready) {
+        char dline[512];
+        bool have_dampen = false;
+        if (TryEnterCriticalSection(&g_pace_cs)) {
+            have_dampen = dampen_format_stats(&g_dampen, dline, sizeof(dline)) > 0;
+            LeaveCriticalSection(&g_pace_cs);
+        } else {
+            note();
+            log_line("session end: pace lock held at exit, dampen stats lost");
+        }
+        if (have_dampen) {
+            note();
+            log_line("session end: %s", dline);
+            g_dampen_stats_logged = true;
+        }
+    }
 }
 
 // ── Reorder buffer helpers ────────────────────────────────────────────────────
@@ -1152,8 +1326,15 @@ static int deliver_to_caller(SOCKET s,
                              const sockaddr_in &src,
                              const uint8_t *data, uint32_t len) {
     uint32_t copied = scatter_copy(buffers, buffer_count, data, len);
+    // A datagram that does not fit the caller's buffers is TRUNCATED, and the
+    // rest of it is gone.  Reporting success with a short byte count hands the
+    // game a silently corrupt datagram — half a packet that parses as a whole
+    // one.  Stock winsock fails the call with WSAEMSGSIZE and sets
+    // MSG_PARTIAL; so do we.  Only reachable with BZ_REORDER=1, but the kind
+    // of wrong that would burn a week of some future debugging session.
+    const bool truncated = (copied < len);
     if (bytes_received != nullptr) *bytes_received = copied;
-    if (inout_flags != nullptr) *inout_flags = 0;
+    if (inout_flags != nullptr) *inout_flags = truncated ? MSG_PARTIAL : 0;
     if (from != nullptr && fromlen != nullptr) {
         int sa = (*fromlen < static_cast<int>(sizeof(src)))
                  ? *fromlen : static_cast<int>(sizeof(src));
@@ -1174,6 +1355,11 @@ static int deliver_to_caller(SOCKET s,
                          0, requested, copied, 0u, pay, pay_len);
     }
 
+    if (truncated) {
+        g_rx.stats.truncated++;
+        WSASetLastError(WSAEMSGSIZE);
+        return SOCKET_ERROR;
+    }
     WSASetLastError(0);
     return 0;
 }
@@ -1408,6 +1594,19 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
             return deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
                                      from, fromlen, evicted.from, evicted.data, evicted.len);
         }
+
+        if (reorder_must_pass_through(ins)) {
+            // Defect E: this datagram carries a sequence we have already
+            // delivered.  Because the field counts messages rather than
+            // datagrams, that describes ~98% of real inbound traffic — it is
+            // ordinary payload, not a duplicate to discard.
+            if (drained > g_rx.stats.max_drain_depth) {
+                g_rx.stats.max_drain_depth = drained;
+            }
+            LeaveCriticalSection(&g_reorder_cs);
+            return deliver_to_caller(s, buffers, buffer_count, bytes_received, inout_flags,
+                                     from, fromlen, drain_src, drain_buf, drain_bytes);
+        }
     }
 
     if (drained > g_rx.stats.max_drain_depth) {
@@ -1516,6 +1715,40 @@ int WSAAPI hooked_sendto(SOCKET s, const char *buf, int len, int flags, const so
         return SOCKET_ERROR;
     }
 
+    // Duplicate suppressor: drop a redundant in-window retransmit of a
+    // (peer, seq) already sent.  It runs before the pacer so a suppressed copy
+    // is never queued, and a suppressed send looks to the game exactly like a
+    // successful one — the same contract pace_take relies on: a UDP sendto
+    // promises handoff, not delivery.  The burst measurement must still see
+    // every datagram, including suppressed ones, so pace_observe runs for the
+    // copies that never reach pace_take.  Loopback is the game talking to
+    // itself and is skipped, matching the send_dup rule.  Gate on enabled
+    // BEFORE taking the lock: with the damper off this path must cost nothing
+    // (enabled is written once at init and never changes afterwards).
+    if (g_dampen.enabled && flags == 0 && len > 0 && g_pace_cs_ready
+        && buf != nullptr && to != nullptr && to->sa_family == AF_INET
+        && !dup_is_loopback(to)) {
+        const sockaddr_in *in4 = reinterpret_cast<const sockaddr_in *>(to);
+        const uint64_t now = GetTickCount64();
+        bool dampened;
+        EnterCriticalSection(&g_pace_cs);
+        dampened = (dampen_admit(&g_dampen, in4->sin_addr.s_addr,
+                                 reinterpret_cast<const uint8_t *>(buf),
+                                 static_cast<uint32_t>(len), now)
+                    == kDampenSuppress);
+        // This socket demonstrably carries dampened P2P traffic: it is the
+        // one whose close ends the session.  Mirror g_reorder_sock.
+        g_dampen_sock = s;
+        if (dampened) {
+            pace_observe(&g_tx, static_cast<uint32_t>(len), now);
+        }
+        LeaveCriticalSection(&g_pace_cs);
+        if (dampened) {
+            WSASetLastError(0);
+            return len;
+        }
+    }
+
     // Measure (always) and optionally pace.  When the pacer takes ownership the
     // game is told the send succeeded, which is what a UDP send means anyway:
     // handed off, no delivery promise.
@@ -1570,7 +1803,8 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
     // mistake that froze the game on the receive side in V4.1.
     int rc  = 0;
     int wsa = 0;
-    bool paced = false;
+    bool paced    = false;
+    bool dampened = false;
     if (overlapped == nullptr && completion_routine == nullptr && flags == 0
         && to != nullptr && buffers != nullptr && buffer_count > 0) {
         uint8_t  flat[kReorderMaxPktBytes];
@@ -1587,7 +1821,37 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
             std::memcpy(flat + total, buffers[i].buf, buffers[i].len);
             total += buffers[i].len;
         }
-        if (fits && total > 0 && pace_take(s, flat, total, to, tolen)) {
+        // Duplicate suppressor: drop a redundant in-window retransmit of a
+        // (peer, seq) already sent.  It runs before the pacer so a suppressed
+        // copy is never queued; a suppressed send looks to the game exactly
+        // like a successful one.  The burst measurement must still see every
+        // datagram, including suppressed ones, so pace_observe runs for the
+        // copies that never reach pace_take.  The peer key is the destination
+        // address, matching the dampen peer table; loopback is the game
+        // talking to itself and is skipped, matching the send_dup rule.  Gate
+        // on enabled BEFORE taking the lock: with the damper off this path
+        // must cost nothing (enabled is written once at init).
+        if (g_dampen.enabled && fits && total > 0 && g_pace_cs_ready
+            && to->sa_family == AF_INET && !dup_is_loopback(to)) {
+            const sockaddr_in *in4 = reinterpret_cast<const sockaddr_in *>(to);
+            const uint32_t peer_addr = in4->sin_addr.s_addr;
+            const uint64_t now = GetTickCount64();
+            EnterCriticalSection(&g_pace_cs);
+            dampened = (dampen_admit(&g_dampen, peer_addr, flat, total, now)
+                        == kDampenSuppress);
+            // This socket demonstrably carries dampened P2P traffic: it is
+            // the one whose close ends the session.  Mirror g_reorder_sock.
+            g_dampen_sock = s;
+            if (dampened) {
+                pace_observe(&g_tx, total, now);
+            }
+            LeaveCriticalSection(&g_pace_cs);
+        }
+        if (dampened) {
+            if (bytes_sent != nullptr) {
+                *bytes_sent = total;
+            }
+        } else if (fits && total > 0 && pace_take(s, flat, total, to, tolen)) {
             if (bytes_sent != nullptr) {
                 *bytes_sent = total;
             }
@@ -1595,7 +1859,7 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
         }
     }
 
-    if (!paced) {
+    if (!paced && !dampened) {
         rc = g_real_wsasendto(s, buffers, buffer_count, bytes_sent, flags, to, tolen, overlapped, completion_routine);
         wsa = static_cast<int>(WSAGetLastError());
     }
@@ -1604,7 +1868,12 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
     // field.  The duplicate is a separate synchronous send from a flat copy,
     // which keeps it safe for overlapped originals too: the caller's buffers
     // are only guaranteed valid for the duration of this call.
-    if (g_send_dup && to != nullptr && to->sa_family == AF_INET
+    // Skip it when the pacer owns the packet (the original has not left yet,
+    // so a copy sent now would arrive first and be seen as a reorder — the
+    // same rule the sendto hook already applies) and when the damper just
+    // suppressed it: duplicating a copy judged redundant would be absurd.
+    if (g_send_dup && !paced && !dampened
+        && to != nullptr && to->sa_family == AF_INET
         && !dup_is_loopback(to)
         && buffers != nullptr && buffer_count > 0
         && (rc == 0 || (rc == SOCKET_ERROR && wsa == WSA_IO_PENDING))) {
@@ -2243,21 +2512,93 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
              static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kGovRateAddr)),
              static_cast<unsigned>(kGovColdStart), static_cast<unsigned>(g_gov_start));
 
-    unsigned long bumps = 0;
+    // Read-back instrumentation (V4.9).  The poke was seen to not stick in one
+    // of the two V4.8 matches, and it took hand-correlating the game's own log
+    // to notice.  Now the proxy log says so itself.
+    GovTraceCfg  gtc;
+    GovTraceState gts;
+    gov_trace_cfg_defaults(&gtc, g_gov_start, kGovColdStart);
+    gtc.verify_ms = clamp_u32(parse_env_u32("BZ_GOV_VERIFY_MS", kGovVerifyMsDef), 0, 120000);
+    gtc.trace_ms  = clamp_u32(parse_env_u32("BZ_GOV_TRACE_MS", kGovTraceMsDef), 0, 600000);
+    gov_trace_init(&gts, GetTickCount64());
+    log_line("governor_patch: read-back on (verify=%u ms, trace=%u ms; "
+             "BZ_GOV_TRACE_MS=0 silences the periodic line)",
+             static_cast<unsigned>(gtc.verify_ms), static_cast<unsigned>(gtc.trace_ms));
+    // As-found value, unconditional: a session with no cold-start line after
+    // this one means the 4000 sentinel never appeared at this address, which
+    // is itself a finding (observed on the 2026-08-02 Snap client).
+    log_line("governor_patch: send-rate reads %u at attach (cold-start sentinel "
+             "is %u; a match start with no line after this one means the "
+             "sentinel never appeared)",
+             static_cast<unsigned>(*kGovRateAddr),
+             static_cast<unsigned>(kGovColdStart));
+
     while (InterlockedCompareExchange(&g_gov_stop, 0, 0) == 0) {
-        // Aligned 32-bit read/write: torn access is impossible on x86.
-        if (*kGovRateAddr == kGovColdStart) {
-            *kGovRateAddr = g_gov_start;
-            if (bumps == 0) {
-                log_line("governor_patch: cold-start caught, send-rate %u -> %u "
-                         "(match started)", static_cast<unsigned>(kGovColdStart),
+        // Aligned 32-bit read/write: torn access is impossible on x86.  One
+        // read per poll, so the value we act on is the value we report.
+        const uint32_t live = *kGovRateAddr;
+        const uint64_t now  = GetTickCount64();
+
+        switch (gov_trace_step(&gtc, &gts, live, now)) {
+            case kGovBumped:
+                *kGovRateAddr = g_gov_start;
+                if (gts.bumps == 1) {
+                    log_line("governor_patch: cold-start caught, send-rate %u -> %u "
+                             "(match started)", static_cast<unsigned>(kGovColdStart),
+                             static_cast<unsigned>(g_gov_start));
+                }
+                break;
+            case kGovClamped:
+                log_line("governor_patch: POKE DID NOT HOLD — wrote %u, reads %u "
+                         "%llu ms later — reverted to the stock floor (%u). "
+                         "Something rewrote the global. This session is not a "
+                         "valid BZ_GOV_START=%u sample.",
+                         static_cast<unsigned>(g_gov_start),
+                         static_cast<unsigned>(gts.observed),
+                         static_cast<unsigned long long>(gts.since_bump_ms),
+                         static_cast<unsigned>(gtc.clamp_floor),
                          static_cast<unsigned>(g_gov_start));
+                break;
+            case kGovHeld:
+                // Below-target here means DownCount steps, not a failure —
+                // the 2026-08-02 evening's eight false POKE DID NOT HOLD
+                // verdicts were exactly this. Say so in the line itself so
+                // nobody re-reads a working poke as a broken one.
+                if (gts.observed >= g_gov_start) {
+                    log_line("governor_patch: poke held — %llu ms after the bump "
+                             "the send-rate reads %u",
+                             static_cast<unsigned long long>(gts.since_bump_ms),
+                             static_cast<unsigned>(gts.observed));
+                } else {
+                    log_line("governor_patch: poke held — %llu ms after the bump "
+                             "the send-rate reads %u (governor already adjusting "
+                             "off the %u baseline; this is the poke working)",
+                             static_cast<unsigned long long>(gts.since_bump_ms),
+                             static_cast<unsigned>(gts.observed),
+                             static_cast<unsigned>(g_gov_start));
+                }
+                break;
+            case kGovTrace: {
+                uint32_t lo = 0, hi = 0, n = 0;
+                gov_trace_window(&gts, &lo, &hi, &n);
+                log_line("governor_trace: send-rate now=%u (window min=%u max=%u "
+                         "over %u samples, session peak=%u)",
+                         static_cast<unsigned>(gts.observed),
+                         static_cast<unsigned>(lo), static_cast<unsigned>(hi),
+                         static_cast<unsigned>(n), static_cast<unsigned>(gts.peak));
+                break;
             }
-            ++bumps;
+            case kGovNone:
+            default:
+                break;
         }
         Sleep(kGovPollMs);
     }
-    log_line("governor_patch: stopping after %lu cold-start bump(s)", bumps);
+    log_line("governor_patch: stopping after %llu cold-start bump(s), "
+             "%llu clamp report(s), last send-rate %u, session peak %u",
+             static_cast<unsigned long long>(gts.bumps),
+             static_cast<unsigned long long>(gts.clamps),
+             static_cast<unsigned>(gts.last_seen), static_cast<unsigned>(gts.peak));
     return 0;
 }
 
@@ -2307,6 +2648,25 @@ DWORD WINAPI net_patch_thread(LPVOID) {
     log_line("net_patch: version confirmed; asserting [Net] globals every %ums "
              "(re-applied at every match start; auto-kick entries are host-enforced)",
              static_cast<unsigned>(kGovPollMs));
+
+    // One unconditional line stating every watched global AS FOUND, before the
+    // first write.  A value already at target produces no change line, so the
+    // 2026-08-02 Snap log was completely silent here and "the poke worked
+    // silently" could not be told apart from "the proxy never looked".
+    {
+        char found[512];
+        int off = std::snprintf(found, sizeof(found), "net_patch: values as found:");
+        for (size_t i = 0; i < kNetGlobalCount; ++i) {
+            if (off < 0 || off >= static_cast<int>(sizeof(found))) break;
+            const NetGlobal &g = g_net_tbl[i];
+            off += std::snprintf(found + off, sizeof(found) - off, " %s=%u",
+                                 g.ini_key,
+                                 static_cast<unsigned>(
+                                     *reinterpret_cast<uint32_t *>(g.va)));
+        }
+        log_line("%s (already-at-target means net.ini or an earlier patch set it)",
+                 found);
+    }
 
     while (InterlockedCompareExchange(&g_net_stop, 0, 0) == 0) {
         if (net_globals_apply(g_net_tbl, kNetGlobalCount) > 0) {
@@ -2454,6 +2814,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
 
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
+        // First, before anything can log: log_line is a no-op until this is
+        // ready, and every other init below logs.
+        if (InterlockedCompareExchange(&g_log_cs_ready, 0, 0) == 0) {
+            InitializeCriticalSection(&g_log_cs);
+            InterlockedExchange(&g_log_cs_ready, 1);
+        }
         if (!g_track_lock_ready) {
             InitializeCriticalSection(&g_track_lock);
             g_track_lock_ready = true;
@@ -2535,6 +2901,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             // read send_stats before raising either knob.
             g_pace_rate   = clamp_u32(parse_env_u32("BZ_SEND_PACE", 0), 0, 10000000);
             g_pace_max_ms = clamp_u32(parse_env_u32("BZ_SEND_PACE_MAX_MS", kPaceMaxDelayDef), 0, 200);
+            // Duplicate suppressor.  Off by default: it is a behavioural change
+            // to the send path and needs a live-match validation before it is
+            // trusted (see contracts/epoch-refix.md, deferred in-game step).
+            // BZ_SEND_DAMPEN=1 enables.
+            dampen_init(&g_dampen, env_truthy(std::getenv("BZ_SEND_DAMPEN")),
+                        GetTickCount64());
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
             // Governor cold-start rate.  ON by default since V4.7: the game
             // hardcodes a 4000 B/s start for every match (a 2026-07-19 session
@@ -2558,6 +2930,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             net_globals_defaults(g_net_tbl);
             net_globals_configure(g_net_tbl, kNetGlobalCount);
         }
+        log_line("proxy build: %s", kBuildId);
         log_line("DllMain: DLL_PROCESS_ATTACH");
         log_line("governor_patch: %s (BZ_GOV_START=%u; 0=disabled)",
                  g_gov_start ? "enabled" : "disabled", static_cast<unsigned>(g_gov_start));
@@ -2585,6 +2958,14 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                  static_cast<unsigned>(g_dup_delay_ms),
                  static_cast<unsigned>(g_dup_max_pps),
                  static_cast<unsigned>(g_dscp));
+        log_line("send_dampen: %s floor_ms=%u max_ms=%u peers=%u slots=%u"
+                 " (BZ_SEND_DAMPEN=1 to suppress redundant in-window reliable"
+                 " retransmits; purge-on-disconnect is the explicit reset)",
+                 g_dampen.enabled ? "enabled" : "disabled",
+                 static_cast<unsigned>(kDampenFloorMs),
+                 static_cast<unsigned>(kDampenMaxMs),
+                 static_cast<unsigned>(kDampenPeers),
+                 static_cast<unsigned>(kDampenSlots));
         log_line("reorder: %s max_window_ms=%u min_window_ms=%u max_hold_ms=%u adapt=%d wake=%d"
                  " stats=%d depth=%u peers=%u drain=%u seq_offset=%u",
                  g_reorder_enabled ? "enabled" : "DISABLED",
@@ -2671,39 +3052,40 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         InterlockedExchange(&g_gov_stop, 1);
         InterlockedExchange(&g_net_stop, 1);
         InterlockedExchange(&g_pace_stop, 1);
-        if (g_wake_sender != INVALID_SOCKET && g_real_closesocket != nullptr) {
-            g_real_closesocket(g_wake_sender);
-            g_wake_sender = INVALID_SOCKET;
-        }
-        // Before anything below tears the critical sections down: a game that
-        // exited without closing its P2P socket has not written its counters
-        // yet, and this is the last place they can be recovered.
+        // V4.9: g_wake_sender used to be closed here.  The wake thread is
+        // signalled and *not* joined — joining under the loader lock deadlocks
+        // — so it can be inside g_real_sendto on that very handle right now,
+        // and the number is free to be reissued to another thread's socket().
+        // Leave it open; the OS closes it when the process exits.
+
+        // A game that exited without closing its P2P socket has not written
+        // its counters yet, and this is the last place they can be recovered.
         emit_session_stats_at_exit();
         flush_buffer_log_files();
-        if (g_buffer_ring != nullptr) {
-            HeapFree(GetProcessHeap(), 0, g_buffer_ring);
-            g_buffer_ring = nullptr;
-        }
+
+        // Stop new events entering the ring, under the lock that guards it,
+        // and leave the ring allocated.  buffer_log_event checked
+        // g_buffer_ring for null *outside* the lock, so a thread could pass
+        // that check and then write into memory HeapFree had already returned.
         if (g_buffer_lock_ready) {
-            DeleteCriticalSection(&g_buffer_lock);
-            g_buffer_lock_ready = false;
+            EnterCriticalSection(&g_buffer_lock);
+            g_buffer_log_enabled = false;
+            LeaveCriticalSection(&g_buffer_lock);
+        } else {
+            g_buffer_log_enabled = false;
         }
-        if (g_track_lock_ready) {
-            DeleteCriticalSection(&g_track_lock);
-            g_track_lock_ready = false;
-        }
-        if (g_reorder_cs_ready) {
-            DeleteCriticalSection(&g_reorder_cs);
-            g_reorder_cs_ready = false;
-        }
-        if (g_dup_cs_ready) {
-            DeleteCriticalSection(&g_dup_cs);
-            g_dup_cs_ready = false;
-        }
-        if (g_pace_cs_ready) {
-            DeleteCriticalSection(&g_pace_cs);
-            g_pace_cs_ready = false;
-        }
+
+        // V4.9: no critical section is deleted here and the ring is not freed.
+        // Every worker thread above is signalled and not joined, so any of
+        // them may be inside one of these sections at this moment, or blocked
+        // entering it.  DeleteCriticalSection on a section another thread
+        // holds is undefined behaviour, and freeing the ring under a writer
+        // corrupts the heap on the way out.
+        //
+        // The process is exiting.  Leaking five CRITICAL_SECTIONs and one heap
+        // block costs nothing and removes a class of exit-path crash — and an
+        // exit-path crash is exactly what loses the session counters that V4.8
+        // spent a release recovering.
     }
 
     return TRUE;

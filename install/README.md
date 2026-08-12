@@ -47,3 +47,19 @@ The expected hash is read from `prebuilt/windows/winmm.dll.sha256` at run time r
 ```powershell
 $env:BZNET_WINMM_SHA256='<64 hex>'
 ```
+## Uninstalling
+
+```bash
+# Linux
+./install/uninstall_linux.sh                 # add --purge-logs to delete captures too
+
+# Windows
+powershell -ExecutionPolicy Bypass -File install\uninstall_windows.ps1
+```
+
+Removes the proxy DLL and the `net.ini` tuning mod, and offers to remove
+`/etc/sysctl.d/99-battlezone-netcode.conf` on Linux. Logs and captures are
+**kept** unless you pass `--purge-logs` / `-PurgeLogs` — they are research data,
+and an uninstaller should not quietly delete someone's session logs.
+
+Neither script can clear your Steam launch options; do that by hand.
