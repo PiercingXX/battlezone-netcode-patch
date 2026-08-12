@@ -215,6 +215,38 @@ with the log.
 
 ---
 
+## What changed in V4.93
+
+If you were on V4.92: nothing behaves differently by default — update anyway,
+because a test lobby only produces usable data when everyone runs the same
+build. What the update carries:
+
+- **The retransmit storm has its cause.** A mod object replicates on BZRNet's
+  reliable channel, whose retry timer is a fixed ~10 ms with no backoff
+  against a 56–91 ms RTT — so every reliable message ships 6–9 times, and one
+  misbehaving object turns that into an unplayable match. The fix is written
+  and handed to the mod's author, but until it ships, nothing has changed for
+  anyone actually playing. Full derivation:
+  [resources/CAMERAPOD_STORM.md](resources/CAMERAPOD_STORM.md).
+- **The send damper** (`BZ_SEND_DAMPEN`, **off by default**) — the mitigation
+  this project controls: it drops the redundant in-window copies of a reliable
+  message on the send path, in both proxies. Only a 2nd-or-later copy of a
+  `(peer, sequence)` already sent is ever suppressed; if in doubt, it sends.
+  It stays off until it passes a live-match validation — the crew evening that
+  flips it on is the next milestone. Details in each proxy README.
+- **Two new log lines** you will see either way: a `send_dampen:` config line
+  at startup and a `session end: dampen:` counter line at teardown. With the
+  damper off they just record that it was off.
+- **Hardening under the hood** — six defects an external review found in the
+  V4.92 build are fixed with reproducing tests, the damper's session-reset
+  logic survived two adversarial audits (restart-vs-retransmit, and a purge
+  that used to fire on the wrong socket close), and the repo has CI for the
+  first time: every push builds both proxies at the shipped 32-bit ABI and
+  runs the full test suite.
+
+The blow-by-blow, including what each audit caught, is in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## What V4.9 adds over V4.8
 
 - **The packet header is settled by ground truth** — sequence is u32 big-endian
@@ -228,11 +260,6 @@ with the log.
 - **Automatic bundle upload to Discord** — see the install steps above;
   details in [upload/README.md](upload/README.md).
 - **Uninstallers for both platforms**, and a build id stamped into every DLL.
-- **The send damper** (`BZ_SEND_DAMPEN`, V4.93, off by default) — BZRNet
-  retries every reliable message on a ~10 ms timer against a 56–91 ms RTT, so
-  each one ships 6–9 times; the damper drops the redundant in-window copies on
-  the send path. Off until it passes a live-match validation; details in each
-  proxy README.
 
 ## What it does
 
