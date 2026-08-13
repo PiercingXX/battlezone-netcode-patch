@@ -467,8 +467,25 @@ if [[ -n "${BZNET_WEBHOOK:-}" && -f "$source_root/upload/bz_wrap.sh" ]]; then
         echo "Warning: BZNET_WEBHOOK is not a Discord webhook URL; skipping upload setup." >&2
     else
         mkdir -p "$wrapper_dir" "$conf_dir"
+        # Say what is being replaced with what. A tester ran V4.91-harvest for
+        # over a week against a repo shipping V4.92-arms and nobody noticed
+        # until a bundle's meta.txt was read after the fact (2026-08-12) — the
+        # install printed nothing about versions, so "did you re-run the
+        # installer?" had no observable answer.
+        wrapper_ver_of() {
+            [[ -f "$1" ]] || { echo "none"; return; }
+            sed -n 's/^WRAPPER_VERSION="\(.*\)"$/\1/p' "$1" | head -1 \
+                | grep . || echo "pre-V4.94 (unversioned)"
+        }
+        old_wrapper_ver="$(wrapper_ver_of "$wrapper_dir/bz_wrap.sh")"
+        new_wrapper_ver="$(wrapper_ver_of "$source_root/upload/bz_wrap.sh")"
         command cp -f "$source_root/upload/bz_wrap.sh" "$wrapper_dir/bz_wrap.sh"
         chmod +x "$wrapper_dir/bz_wrap.sh"
+        if [[ "$old_wrapper_ver" == "$new_wrapper_ver" ]]; then
+            echo "Uploader wrapper: $new_wrapper_ver (already current)."
+        else
+            echo "Uploader wrapper: $old_wrapper_ver -> $new_wrapper_ver."
+        fi
         (
             umask 077
             cat >"$conf_dir/upload.conf" <<EOF
@@ -501,12 +518,35 @@ EOF
             # The Steam snap's runtime has neither curl nor python3, so the
             # post-exit upload can only ever park bundles — and the next
             # wrapped launch runs inside the same toolless sandbox, so
-            # nothing in there will ever send them. A host-side user timer
+            # nothing in there will ever send them. A host-side user unit
             # drains the outbox with host tools instead.
+            #
+            # That drain used to be a 10-minute timer, which meant every snap
+            # tester's bundle arrived 0–10 minutes late at random. On
+            # 2026-08-12 one took 4½ minutes and was reported as "the logs
+            # didn't send" — the upload was never broken, it was queued behind
+            # the poll. A path unit fires on the bundle appearing instead:
+            # measured at 53 ms from park to drain.
+            #
+            # PathChanged on the directory, NOT PathExistsGlob on the bundles.
+            # PathExistsGlob stays satisfied for as long as the file is there,
+            # so a bundle that FAILS to upload re-triggers the service back to
+            # back until systemd's start limiter trips — and the limiter fails
+            # the path unit itself, silently ending all watching. Verified:
+            # PathExistsGlob went to `failed (start-limit-hit)` within seconds
+            # of a bundle that was not removed. PathChanged fires once per
+            # arrival and stays active with a stuck bundle sitting in place.
+            #
+            # The timer stays as the backstop for what a change-watcher cannot
+            # see: bundles already parked before this login, and retries of a
+            # bundle whose upload failed (no further change event is coming).
             if [[ "$sandbox_dir" == "$HOME/snap/steam/"* ]] \
                && command -v systemctl >/dev/null 2>&1; then
                 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
                 mkdir -p "$unit_dir"
+                # The path unit needs the directory to exist before it can
+                # watch it; snapd will not create it until the first park.
+                mkdir -p "$sandbox_dir/outbox"
                 cat >"$unit_dir/bz-netcode-retry.service" <<UNIT
 [Unit]
 Description=Send parked Battlezone netcode session bundles
@@ -515,9 +555,20 @@ Description=Send parked Battlezone netcode session bundles
 Type=oneshot
 ExecStart="$sandbox_dir/bz_wrap.sh" --retry
 UNIT
+                cat >"$unit_dir/bz-netcode-retry.path" <<UNIT
+[Unit]
+Description=Watch the Battlezone netcode outbox the snap sandbox cannot send from
+
+[Path]
+PathChanged=$sandbox_dir/outbox
+Unit=bz-netcode-retry.service
+
+[Install]
+WantedBy=paths.target
+UNIT
                 cat >"$unit_dir/bz-netcode-retry.timer" <<UNIT
 [Unit]
-Description=Drain the Battlezone netcode outbox the snap sandbox cannot send from
+Description=Backstop drain for the Battlezone netcode outbox
 
 [Timer]
 OnBootSec=2min
@@ -526,11 +577,15 @@ OnUnitActiveSec=10min
 [Install]
 WantedBy=timers.target
 UNIT
-                if systemctl --user daemon-reload 2>/dev/null \
-                   && systemctl --user enable --now bz-netcode-retry.timer 2>/dev/null; then
-                    echo "Enabled bz-netcode-retry.timer: Snap-parked bundles are sent every 10 minutes."
+                systemctl --user daemon-reload 2>/dev/null || true
+                drain_ok=0
+                systemctl --user enable --now bz-netcode-retry.path 2>/dev/null && drain_ok=1
+                systemctl --user enable --now bz-netcode-retry.timer 2>/dev/null || true
+                if [[ "$drain_ok" == "1" ]]; then
+                    echo "Enabled bz-netcode-retry.path: Snap-parked bundles are sent within seconds."
+                    echo "  (bz-netcode-retry.timer remains as a 10-minute backstop.)"
                 else
-                    echo "Could not enable the retry timer; send parked bundles by hand with:"
+                    echo "Could not enable the drain units; send parked bundles by hand with:"
                     echo "  \"$sandbox_dir/bz_wrap.sh\" --retry"
                 fi
             fi

@@ -52,11 +52,54 @@ else
 fi
 CONF_FILE="$CONF_DIR/upload.conf"
 
+# One definition, used by meta.txt, --status and the installer's staleness
+# check.  It was previously inlined in the meta.txt heredoc only, which is why
+# a tester running V4.91-harvest against a V4.92-arms repo went unnoticed until
+# somebody read a bundle's meta.txt after the fact (2026-08-12).
+WRAPPER_VERSION="V4.94-drain-20260812"
+
 # Discord's webhook attachment cap is ~10 MB for an unboosted server. Stay
 # under it with room for the multipart envelope.
 MAX_PART_BYTES=$((9 * 1024 * 1024))
 
-log() { printf '[bz_wrap] %s\n' "$*" >&2; }
+# Where the wrapper's own account of itself goes.
+#
+# log() used to write to stderr and nowhere else.  Under a sandboxed Steam that
+# stderr is unreachable, so on 2026-08-12 the question "why did his logs take
+# five minutes?" could not be answered from anything the tester was able to
+# hand over — the bundle does not carry it and no file existed.  The answer
+# turned out to be ordinary (the snap runtime has no curl or python3, so the
+# wrapper parked and a 10-minute timer drained it), but nothing on that
+# machine could say so.  Now it can.
+LOG_FILE="$CONF_DIR/bz_wrap.log"
+LOG_MAX_BYTES=$((256 * 1024))
+
+log() {
+    printf '[bz_wrap] %s\n' "$*" >&2
+    # Best effort, always: a wrapper that dies because it could not write its
+    # own log would be worse than one that logs nothing.  CONF_DIR may not
+    # exist yet on the very first run.
+    {
+        # Only reach for mkdir when the directory is genuinely absent. In the
+        # sandbox layout CONF_DIR is the wrapper's own directory and always
+        # exists, and the environments where logging matters most are exactly
+        # the toolless ones — needing a binary to record that no binaries are
+        # available is how this stays undiagnosable.
+        [[ -d "$CONF_DIR" ]] || mkdir -p "$CONF_DIR" 2>/dev/null || return 0
+        # Single-file rotation, so an unattended machine cannot fill its disk
+        # with retry chatter. Best-effort for the same reason as above: if wc
+        # or mv is absent the log keeps growing, which beats not writing it.
+        if [[ -f "$LOG_FILE" ]]; then
+            local sz
+            sz="$(wc -c <"$LOG_FILE" 2>/dev/null || echo 0)"
+            if [[ "$sz" =~ ^[0-9]+$ ]] && (( sz > LOG_MAX_BYTES )); then
+                mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+            fi
+        fi
+        printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+               "$$" "$*" >>"$LOG_FILE" 2>/dev/null || true
+    } 2>/dev/null || true
+}
 
 usage() {
     cat <<'EOF'
@@ -192,6 +235,10 @@ EOF
 
 do_status() {
     load_conf
+    # First line, because "which version is this tester on?" is the question
+    # that has to be answerable before any of the others mean anything.
+    echo "wrapper     : $WRAPPER_VERSION"
+    echo "             $(readlink -f -- "${BASH_SOURCE[0]}")"
     echo "config file : $CONF_FILE $( [[ -f "$CONF_FILE" ]] && echo '(present)' || echo '(MISSING - run --setup)')"
     echo "webhook     : $( [[ -n "$BZ_WEBHOOK" ]] && echo 'configured' || echo 'NOT SET')"
     echo "player      : ${BZ_PLAYER:-<auto: in-game name, read from BZLogger at upload time>}"
@@ -203,6 +250,14 @@ do_status() {
         echo "              $n bundle(s) waiting"
     else
         echo "              empty"
+    fi
+    echo "uploader    : $(command -v curl >/dev/null 2>&1 && echo 'curl' \
+                          || { command -v python3 >/dev/null 2>&1 && echo 'python3 (stdlib)'; } \
+                          || echo 'NONE here - bundles park for the host-side drain')"
+    echo "log         : $LOG_FILE $( [[ -f "$LOG_FILE" ]] && echo '(present)' || echo '(nothing logged yet)')"
+    if [[ -f "$LOG_FILE" ]]; then
+        echo "last lines  :"
+        tail -n 5 "$LOG_FILE" 2>/dev/null | sed 's/^/              /'
     fi
 }
 
@@ -370,15 +425,26 @@ post_file() {
     fi
     local payload
     payload="{\"content\": \"$(json_escape "$message")\"}"
+    # Which uploader ran, and how long it took, are the two facts every upload
+    # question so far has turned on.  Record them before and after, so a
+    # timeout leaves the "starting" line behind even when nothing returns.
+    local t0 rc
+    t0="$(date +%s 2>/dev/null || echo 0)"
+    local sz
+    sz="$(wc -c <"$file" 2>/dev/null || echo '?')"
     if command -v curl >/dev/null 2>&1; then
+        log "upload: curl, $(basename "$file") ($sz bytes)"
         # --fail so a 4xx is an error rather than a silently discarded body.
         clean_env curl --fail --silent --show-error --max-time 300 \
              -F "payload_json=$payload" \
              -F "file1=@$file" \
              "$BZ_WEBHOOK" >/dev/null
-        return $?
+        rc=$?
+        log "upload: curl finished rc=$rc after $(( $(date +%s 2>/dev/null || echo 0) - t0 ))s"
+        return $rc
     fi
     if command -v python3 >/dev/null 2>&1; then
+        log "upload: python3 stdlib, $(basename "$file") ($sz bytes)"
         BZW_URL="$BZ_WEBHOOK" BZW_FILE="$file" BZW_PAYLOAD="$payload" \
         clean_env python3 - <<'PYEOF'
 import os, sys, uuid, urllib.request
@@ -409,11 +475,15 @@ except Exception as e:
     print('[bz_wrap] python3 upload failed: %s' % e, file=sys.stderr)
     sys.exit(1)
 PYEOF
-        return $?
+        rc=$?
+        log "upload: python3 finished rc=$rc after $(( $(date +%s 2>/dev/null || echo 0) - t0 ))s"
+        return $rc
     fi
-    log "neither curl nor python3 is available in this environment; cannot upload"
-    log "the bundle will be parked — run this script with --retry from a normal"
-    log "terminal (outside Steam) to send it"
+    # The Steam snap's runtime is exactly this case, every single time. It is
+    # not a failure and must not read like one: the bundle parks and the
+    # host-side drain unit sends it. See install_linux.sh.
+    log "no curl and no python3 in this environment (the Steam snap runtime has"
+    log "neither) — parking the bundle for the host-side drain to send"
     return 1
 }
 
@@ -479,7 +549,7 @@ collect_and_upload() {
         echo "game_dir=$game_dir"
         echo "command=${GAME_CMDLINE:-}"
         echo "platform=linux-proton"
-        echo "wrapper_version=V4.92-arms-20260803"
+        echo "wrapper_version=$WRAPPER_VERSION"
     } >"$bundle/meta.txt"
 
     # The pre-launch snapshot is the whole point: this is game N-1's log,
