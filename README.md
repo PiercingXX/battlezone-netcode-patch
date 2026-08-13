@@ -1,4 +1,4 @@
-# Battlezone 98 Redux Netcode Patch — V4.93 experimental
+# Battlezone 98 Redux Netcode Patch — V4.94 experimental
 
 > **This is the experimental branch.** It is for the test crew and it changes
 > under you. Stable players belong on
@@ -16,7 +16,7 @@ code is modified.
 per-machine, and every V4.9 DLL logs its own build id so a log can always
 answer "which build was that?".
 
-Current version: **V4.93 experimental** · [CHANGELOG](CHANGELOG.md)
+Current version: **V4.94 experimental** · [CHANGELOG](CHANGELOG.md)
 
 ---
 
@@ -188,7 +188,7 @@ Start the game once, quit, and open the proxy log next to the game exe
 (`dsound_proxy.log` or `winmm_proxy.log`). The first lines carry the build id:
 
 ```
-proxy build: V4.93-experimental 7a106a52ce6e 2026-08-12T01:56:29Z
+proxy build: V4.94-experimental 0f2a1b3c4d5e 2026-08-13T01:19:46Z
 ```
 
 No proxy log at all means the DLL never loaded — on Linux that is almost
@@ -208,12 +208,71 @@ Expect `VERIFY RESULT: PASS`. In the log itself, the line to care about is the
 governor verdict: `poke held` is good; `POKE DID NOT HOLD` is exactly the
 failure V4.9 exists to catch — report it with the log.
 
+`FLOOR RESCUE` (new in V4.94) is also worth reporting. It means the send rate
+collapsed all the way to the bottom mid-match — something was saturating the
+link — and the patch lifted it back. It is not a fault in the patch, but the
+log around it says what caused the collapse.
+
 `reorder: DISABLED` is expected — that buffer ships off by default, and V4.9
 established it has to stay off (see below). `net_patch: … VETOED` means the
 game updated and the patch safely fell back to stock behaviour; open an issue
 with the log.
 
 ---
+
+## What changed in V4.94
+
+**This one changes how the patch behaves by default.** V4.93 shipped the send
+damper switched off; V4.94 turns it on, and changes three governor settings.
+Everyone in a test lobby needs this build, including whoever hosts.
+
+It all comes out of one logged event. On the evening of 2026-08-12, two minutes
+of a match went bad in a way the logs explain completely:
+
+- **Four repair-kit pickups got stuck moving** and would not stop. Each one sent
+  about 17 position updates a second on the channel that guarantees delivery,
+  and the game sends each of those 3–4 times over. Between them they put
+  **30,691 packets / 2.64 MB** on the wire in 140 seconds — at the peak, **11×
+  more than the whole bandwidth budget for everything else in the match**.
+  Player positions and shots queued up behind repair kits.
+- **The bandwidth governor then collapsed.** It cut the send rate 54 times in a
+  row without once letting it back up: 25,900 → 4,150 B/s over 107 seconds, and
+  the match spent its worst two minutes there. It only recovered because a bug
+  in this patch accidentally rescued it.
+
+Four changes, in the order they matter:
+
+- **The send damper is now on by default** (`BZ_SEND_DAMPEN=0` turns it off).
+  It drops the redundant copies of a reliable message — the ones the engine
+  sends before any reply could physically arrive. Replaying that evening's
+  actual traffic through it removes **64–69% of the flood**. It does not fix
+  stuck repair kits; it stops them costing four times what they should.
+- **The governor now recovers twice as fast as it cuts**, which is what the
+  game's own stock settings do. The shipped tuning had it cutting *four* times
+  faster than it recovered — measured, that made a 2-minute collapse take 9
+  minutes to undo, so in a real fight it never recovered at all. Host and
+  client were also running different values; both are now the same.
+- **The send rate has a floor again** (16,000 B/s). It collapsed to 4,150 —
+  the game's stock floor — because the value that was supposed to stop that
+  was never being written. **This one is an experiment**: if the next collapse
+  bottoms out at 16,000 instead of ~4,000, it works. Please report the log
+  either way.
+- **A real bug is fixed.** The patch watches for the value `4000` to spot a
+  match starting, then boosts the rate. A collapsing governor walks down onto
+  4000 too — so mid-fight, the patch jumped the rate 10× believing a new match
+  had begun. It also meant the tools counted 32 "matches" in an evening with
+  three in it, which quietly poisoned every measurement taken from them.
+  Collapses are now told apart from match starts and logged as
+  `FLOOR RESCUE`, and the rate is still raised.
+
+**If you see `FLOOR RESCUE` in your proxy log, that is worth reporting** — it
+means something saturated the link hard enough to bottom out the governor, and
+the log will say what.
+
+The root cause — pickups that never stop moving — is in the game or the map
+mod, not in anything this patch can reach. It has been written up for the map's
+author. Full derivation and the numbers behind every claim above:
+[contracts/lag-collapse-20260812.md](contracts/lag-collapse-20260812.md).
 
 ## What changed in V4.93
 

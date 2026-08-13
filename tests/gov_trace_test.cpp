@@ -46,7 +46,7 @@ struct Governor {
     uint32_t      live = 0;
 
     // Counters standing in for the proxy's log lines.
-    int bumped = 0, clamped = 0, held = 0, traced = 0;
+    int bumped = 0, clamped = 0, held = 0, traced = 0, rescued = 0;
     uint32_t last_clamp_observed = 0;
     uint64_t last_clamp_age = 0;
 
@@ -59,6 +59,9 @@ struct Governor {
         live = value;
         switch (gov_trace_step(&cfg, &st, live, now)) {
             case kGovBumped:  live = cfg.target; ++bumped; break;
+            // The proxy writes the target here too — the difference is that it
+            // logs a floor rescue and does not count a match.
+            case kGovFloorRescue: live = cfg.target; ++rescued; break;
             case kGovClamped: ++clamped;
                               last_clamp_observed = st.observed;
                               last_clamp_age = st.since_bump_ms;
@@ -80,6 +83,15 @@ struct Governor {
         for (uint64_t t = 0; t < ms; t += 100) {
             poll(value);
         }
+    }
+
+    // The governor walking down: one step every `hold_ms`, polled every 100 ms,
+    // which is the shape the 2026-08-12 collapse was logged in.
+    void descend(uint32_t from, uint32_t to, uint32_t step, uint64_t hold_ms = 2000) {
+        for (uint32_t v = from; v > to; v -= step) {
+            steady(v, hold_ms);
+        }
+        steady(to, hold_ms);
     }
 };
 
@@ -332,6 +344,114 @@ void test_trace_can_be_silenced() {
     CHECK_EQ(g.held, 1);
 }
 
+// ── The 2026-08-12 collapse (V4.94) ──────────────────────────────────────────
+//
+// xxMonke1.bzn match, two players.  Four runaway repair-kit objects
+// flooded the reliable channel with ~30,000 retransmitted datagrams; ping went
+// past MaxPing and the governor took 54 consecutive DownCount steps over 107
+// seconds — 25,900 -> 4,150 -> the floor — with no up-step in between.  It then
+// landed on exactly 4000, and the host's proxy read that as a match start:
+// `poke held ... reads 38000` at 20:36:03 means a bump at 20:35:53, thirteen
+// minutes into a match that started at 20:22:41.
+//
+// Before the fix this case counts two matches and reports no collapse.
+void test_midmatch_floor_hit_is_not_a_match_start() {
+    begin("2026-08-12: the governor walking onto 4000 mid-match is not a match start");
+    Governor g(40000);
+    g.steady(1500, 1000);            // lobby, at the value the proxy reads at attach
+    g.poll(4000);                    // the one real match start
+    CHECK_EQ(g.bumped, 1);
+    CHECK_EQ(g.live, 40000u);
+    g.steady(40000, 11000);
+    CHECK_EQ(g.held, 1);
+
+    // 54 steps of -400 every 2 s, exactly as logged.
+    g.descend(25900, 4300, 400);
+    CHECK_EQ(g.bumped, 1);           // nothing about the descent is a match
+    CHECK_EQ(g.rescued, 0);          // and it has not reached the floor yet
+
+    g.poll(4000);                    // ...and now it lands on the sentinel
+    CHECK_EQ(g.bumped, 1);           // <-- 2 before the fix
+    CHECK_EQ(g.rescued, 1);
+    CHECK_EQ(g.st.bumps, 1u);        // the match count stays honest
+    CHECK_EQ(g.st.floor_rescues, 1u);
+    CHECK_EQ(g.live, 40000u);        // and the rate is still rescued
+}
+
+// A governor parked on the floor is polled ten times a second.  Reporting each
+// one would bury the finding in its own repetitions — the same reasoning that
+// gives a clamp one verdict per bump.
+void test_floor_rescue_is_rate_limited() {
+    begin("a governor parked on the floor reports once per window, not per poll");
+    Governor g(40000);
+    g.steady(1500, 1000);
+    g.poll(4000);
+    g.steady(40000, 11000);
+    g.descend(9000, 4300, 400);
+    g.steady(4000, 20000);           // 200 polls sitting on the sentinel
+    CHECK_EQ(g.rescued, 1);
+    CHECK_EQ(g.bumped, 1);
+    // Past the cooldown, a governor still on the floor is worth saying again.
+    g.steady(4000, 20000);
+    CHECK_EQ(g.rescued, 2);
+    CHECK_EQ(g.bumped, 1);
+}
+
+// The known limit, held to its stated bound: a match that ENDS near the floor
+// leaves a parting value inside descent_band, but the lobby then holds it still.
+// That stillness is the whole discriminator, so the next match must still bump.
+void test_match_start_after_a_low_parting_rate_still_bumps() {
+    begin("a match ending near the floor does not cost the next match its poke");
+    Governor g(40000);
+    g.steady(1500, 1000);
+    g.poll(4000);
+    g.steady(40000, 11000);
+    g.descend(5500, 4300, 400);      // the previous match limps to its end...
+    CHECK_EQ(g.rescued, 0);
+    g.steady(4300, 60000);           // ...and the lobby holds that value for a minute
+    g.poll(4000);                    // the next match starts
+    CHECK_EQ(g.bumped, 2);           // which is a real match start
+    CHECK_EQ(g.rescued, 0);
+    CHECK_EQ(g.live, 40000u);
+}
+
+// The suppressed rescue must fall through rather than return early, or a
+// governor stuck on the floor would go silent in the periodic trace too —
+// losing the only running record of the collapse it is sitting in.
+void test_trace_keeps_running_while_parked_on_the_floor() {
+    begin("the periodic trace keeps reporting while the rescue is rate-limited");
+    Governor g(40000);
+    g.steady(1500, 1000);
+    g.poll(4000);
+    g.steady(40000, 11000);
+    g.descend(9000, 4300, 400);
+    const int before = g.traced;
+    g.steady(4000, 20000);           // inside the rescue cooldown the whole time
+    CHECK_EQ(g.rescued, 1);
+    CHECK(g.traced > before);
+}
+
+// A sentinel read while a bump is still awaiting its verdict is a poke that did
+// not stick, and belongs to the clamp check — not to the floor rescue, however
+// the value got there.  This is test_poke_never_sticks approached by descent.
+void test_descent_onto_the_sentinel_while_armed_is_still_a_clamp() {
+    begin("a descent onto the sentinel with a bump in flight is a clamp, not a rescue");
+    Governor g(40000);
+    g.steady(1500, 1000);
+    g.poll(4000);
+    CHECK_EQ(g.bumped, 1);
+    // A gradual descent cannot reach here — it crosses the clamp floor first and
+    // is convicted at 4300.  The armed guard is reachable only when the global
+    // collapses faster than the 100 ms poll: one read at 4300, which merely arms
+    // low_seen, and then the sentinel itself on the very next sample.
+    g.poll(4300);
+    CHECK_EQ(g.clamped, 0);
+    g.poll(4000);
+    CHECK_EQ(g.rescued, 0);          // the bump in flight owns this read
+    CHECK_EQ(g.clamped, 1);
+    CHECK_EQ(g.last_clamp_observed, 4000u);
+}
+
 }  // namespace
 
 int main() {
@@ -350,6 +470,11 @@ int main() {
     test_client_rejoin_single_low_read_is_not_a_clamp();
     test_two_consecutive_low_reads_still_convict();
     test_timeout_with_reverted_read_is_a_clamp();
+    test_midmatch_floor_hit_is_not_a_match_start();
+    test_floor_rescue_is_rate_limited();
+    test_match_start_after_a_low_parting_rate_still_bumps();
+    test_trace_keeps_running_while_parked_on_the_floor();
+    test_descent_onto_the_sentinel_while_armed_is_still_a_clamp();
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

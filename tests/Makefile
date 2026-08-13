@@ -14,7 +14,7 @@ all: $(BINS)
 reorder_test: reorder_test.cpp ../shared/reorder_core.h
 	$(CXX) $(CXXFLAGS) -o $@ reorder_test.cpp
 
-net_globals_test: net_globals_test.cpp ../shared/net_globals.h
+net_globals_test: net_globals_test.cpp ../shared/net_globals.h ../shared/gov_trace.h
 	$(CXX) $(CXXFLAGS) -o $@ net_globals_test.cpp
 
 send_pace_test: send_pace_test.cpp ../shared/send_pace.h ../shared/reorder_core.h

@@ -227,9 +227,10 @@ static HANDLE            g_gov_thread          = nullptr;
 // the opening world-state burst.  Rewriting the 4000 immediate in .text works
 // mechanically but SteamStub's runtime integrity check then kills the process,
 // so we do NOT touch code.  Instead we watch the governor's live send-rate
-// DATA global and rewrite the 4000 cold-start sentinel to g_gov_start (the
-// ramp and the MinBandwidth floor move it off 4000 immediately and never
-// return to exactly 4000).  A 32-bit aligned store is atomic on x86 and .data
+// DATA global and rewrite the 4000 cold-start sentinel to g_gov_start.  The
+// sentinel is not unique to match setup -- a collapsing governor walks down
+// onto it too -- so gov_trace.h classifies it by arrival; see kGovFloorRescue
+// there.  A 32-bit aligned store is atomic on x86 and .data
 // carries no integrity check, so the DRM is untouched.  Verified end-to-end
 // under Proton; the addresses are identical on real Windows (fixed base
 // 0x400000, no ASLR).  Sender-side: improves how our packets reach every peer.
@@ -238,7 +239,7 @@ static volatile LONG     g_gov_stop            = 0;
 static HANDLE            g_gov_patch_thread     = nullptr;
 constexpr DWORD          kGovPollMs            = 100;
 static uint32_t *const   kGovRateAddr          = reinterpret_cast<uint32_t *>(0x008e8d14);
-constexpr uint32_t       kGovColdStart         = 4000;
+constexpr uint32_t       kGovColdStart         = kGovColdStartSentinel;
 // Unique version fingerprint: push 4000; push 1000; push -3000.
 static const uint8_t     kGovSig[15] = {
     0x68, 0xA0, 0x0F, 0x00, 0x00,
@@ -268,8 +269,8 @@ static HANDLE            g_pace_thread         = nullptr;
 static uint32_t          g_pace_rate           = 0;   // 0 = measure only
 static uint32_t          g_pace_max_ms         = kPaceMaxDelayDef;
 
-// Outbound duplicate suppressor (shared/send_dampen.h).  Off by default
-// (BZ_SEND_DAMPEN=1 enables): every reliable message goes out 6-9 times before
+// Outbound duplicate suppressor (shared/send_dampen.h).  ON by default since
+// V4.94 (BZ_SEND_DAMPEN=0 disables): every reliable message goes out 6-9 times before
 // an ack can physically return, and this drops the redundant in-window copies
 // on the send path.  The peer table is per-destination; dampen_purge_peer is the
 // explicit reset the proxy fires on the disconnect path so a real reconnect is
@@ -2259,6 +2260,22 @@ static DWORD WINAPI GovernorPatchThread(LPVOID)
                              (unsigned)kGovColdStart, (unsigned)g_gov_start);
                 }
                 break;
+            case kGovFloorRescue:
+                // The sentinel reached by descent, not written: the governor
+                // collapsed onto its floor mid-match (2026-08-12, 20:35:53,
+                // thirteen minutes into the xxMonke1.bzn match). We still raise the
+                // rate - the alternative is a match that spends the rest of its
+                // life at 4 kB/s - but this is NOT a match start, is not
+                // counted as one, and is not a BZ_GOV_START sample.
+                *kGovRateAddr = g_gov_start;
+                ProxyLog("governor_patch: FLOOR RESCUE - the send-rate walked down "
+                         "onto the %u floor mid-match and was raised to %u. This is "
+                         "a collapse, not a match start: something is saturating "
+                         "the link (check the retransmit share). Rescue #%llu this "
+                         "session.",
+                         (unsigned)kGovColdStart, (unsigned)g_gov_start,
+                         (unsigned long long)gts.floor_rescues);
+                break;
             case kGovClamped:
                 ProxyLog("governor_patch: POKE DID NOT HOLD - wrote %u, reads %u "
                          "%llu ms later - reverted to the stock floor (%u). "
@@ -2301,8 +2318,10 @@ static DWORD WINAPI GovernorPatchThread(LPVOID)
         Sleep(kGovPollMs);
     }
     ProxyLog("governor_patch: stopping after %llu cold-start bump(s), "
-             "%llu clamp report(s), last send-rate %u, session peak %u",
-             (unsigned long long)gts.bumps, (unsigned long long)gts.clamps,
+             "%llu floor rescue(s), %llu clamp report(s), last send-rate %u, "
+             "session peak %u",
+             (unsigned long long)gts.bumps, (unsigned long long)gts.floor_rescues,
+             (unsigned long long)gts.clamps,
              (unsigned)gts.last_seen, (unsigned)gts.peak);
     return 0;
 }
@@ -2656,11 +2675,21 @@ void InstallNetcodeHooks()
         // raising either knob.
         g_pace_rate   = clamp_u32(parse_env_u32("BZ_SEND_PACE", 0), 0, 10000000);
         g_pace_max_ms = clamp_u32(parse_env_u32("BZ_SEND_PACE_MAX_MS", kPaceMaxDelayDef), 0, 200);
-        // Duplicate suppressor.  Off by default: it is a behavioural change
-        // to the send path and needs a live-match validation before it is
-        // trusted (see contracts/epoch-refix.md, deferred in-game step).
-        // BZ_SEND_DAMPEN=1 enables.
-        dampen_init(&g_dampen, env_truthy(std::getenv("BZ_SEND_DAMPEN")),
+        // Duplicate suppressor.  ON by default since V4.94.  It shipped off in
+        // V4.93 pending a live-match validation; the 2026-08-12 xxMonke1.bzn match
+        // supplied one, from the wrong side.  Four runaway repair-kit objects
+        // put 30,691 retransmitted datagrams / 2.64 MB on the wire in 140
+        // seconds - 52.9 kB/s against a governor budget that had collapsed to
+        // 4.5 kB/s - and the damper was not running to stop any of it.
+        // Replaying that logged send stream through dampen_admit() suppresses
+        // 63.9% of the datagrams at the 60 ms floor window and 69.0% at a
+        // realistic 1.2*RTT window, which is the whole of the redundancy: 3.22
+        // copies per message down to one.
+        // BZ_SEND_DAMPEN=0 restores the old off-by-default behaviour.
+        const char *dampen_env = std::getenv("BZ_SEND_DAMPEN");
+        dampen_init(&g_dampen,
+                    (dampen_env == nullptr || *dampen_env == '\0')
+                        ? true : env_truthy(dampen_env),
                     GetTickCount64());
         // IOCP receive path.  The scan is read-only and safe; the reorder path
         // is off by default and has never run against real Windows.
@@ -2967,8 +2996,9 @@ void InstallNetcodeHooks()
                  " (burst measurement is always on; BZ_SEND_PACE=<bytes/sec> to smooth)",
                  g_pace_rate ? "enabled" : "measure-only", g_pace_rate, g_pace_max_ms);
         ProxyLog("send_dampen: %s floor_ms=%u max_ms=%u peers=%u slots=%u"
-                 " (BZ_SEND_DAMPEN=1 to suppress redundant in-window reliable"
-                 " retransmits; purge-on-disconnect is the explicit reset)",
+                 " (on by default since V4.94; BZ_SEND_DAMPEN=0 disables."
+                 " Suppresses redundant in-window reliable retransmits;"
+                 " purge-on-disconnect is the explicit reset)",
                  g_dampen.enabled ? "enabled" : "disabled",
                  (unsigned)kDampenFloorMs, (unsigned)kDampenMaxMs,
                  (unsigned)kDampenPeers, (unsigned)kDampenSlots);

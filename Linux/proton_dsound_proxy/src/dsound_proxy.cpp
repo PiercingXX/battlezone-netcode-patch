@@ -265,8 +265,8 @@ static volatile LONG     g_pace_stop        = 0;
 static uint32_t          g_pace_rate        = 0;   // 0 = measure only
 static uint32_t          g_pace_max_ms      = kPaceMaxDelayDef;
 
-// Outbound duplicate suppressor (shared/send_dampen.h).  Off by default
-// (BZ_SEND_DAMPEN=1 enables): every reliable message goes out 6-9 times before
+// Outbound duplicate suppressor (shared/send_dampen.h).  ON by default since
+// V4.94 (BZ_SEND_DAMPEN=0 disables): every reliable message goes out 6-9 times before
 // an ack can physically return, and this drops the redundant in-window copies
 // on the send path.  The peer table is per-destination; dampen_purge_peer is the
 // explicit reset the proxy fires on the disconnect path so a real reconnect is
@@ -2465,10 +2465,9 @@ DWORD WINAPI governor_scan_thread(LPVOID) {
 // to apply cleanly (4000 -> 16000, correct unique site) but SteamStub's
 // runtime code-integrity check then kills the process.  So we do NOT touch
 // .text.  Instead we watch the governor's live send-rate DATA global
-// (kGovRateAddr) and, whenever it reads the hardcoded cold-start sentinel
-// 4000 (which only occurs at the instant a match's governor is set up — the
-// ramp and the MinBandwidth floor move it off 4000 immediately and never
-// return to exactly 4000), overwrite it with g_gov_start.  A 32-bit aligned
+// (kGovRateAddr) and, when it reads the hardcoded cold-start sentinel 4000 at
+// the instant a match's governor is set up, overwrite it with g_gov_start.  A
+// 32-bit aligned
 // store is atomic on x86, and .data carries no integrity check, so the DRM is
 // untouched.  We still signature-scan .text once (read-only) to confirm the
 // game version, which is what ties the fixed data address and the 4000
@@ -2479,7 +2478,7 @@ DWORD WINAPI governor_scan_thread(LPVOID) {
 // (fixed base 0x400000, no ASLR).  Logged by the game as
 // "Net: Bandwidth usage now set to %d".
 static uint32_t *const kGovRateAddr = reinterpret_cast<uint32_t *>(0x008e8d14);
-constexpr uint32_t      kGovColdStart = 4000;
+constexpr uint32_t      kGovColdStart = kGovColdStartSentinel;
 
 DWORD WINAPI governor_patch_thread(LPVOID) {
     if (!is_target_main_module() || g_gov_start == 0) {
@@ -2512,7 +2511,11 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
              static_cast<unsigned long>(reinterpret_cast<uintptr_t>(kGovRateAddr)),
              static_cast<unsigned>(kGovColdStart), static_cast<unsigned>(g_gov_start));
 
-    // Read-back instrumentation (V4.9).  The poke was seen to not stick in one
+    // Read-back instrumentation (V4.9).  V4.94 also classifies the sentinel by
+    // arrival: a collapsing governor walks down onto 4000 mid-match, which this
+    // read as a match start until 2026-08-12.  See kGovFloorRescue in
+    // shared/gov_trace.h.
+    // The poke was seen to not stick in one
     // of the two V4.8 matches, and it took hand-correlating the game's own log
     // to notice.  Now the proxy log says so itself.
     GovTraceCfg  gtc;
@@ -2547,6 +2550,23 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
                              "(match started)", static_cast<unsigned>(kGovColdStart),
                              static_cast<unsigned>(g_gov_start));
                 }
+                break;
+            case kGovFloorRescue:
+                // The sentinel reached by descent, not written: the governor
+                // collapsed onto its floor mid-match (2026-08-12, 20:35:53,
+                // thirteen minutes into the xxMonke1.bzn match).  We still raise the
+                // rate — the alternative is a match that spends the rest of its
+                // life at 4 kB/s — but this is NOT a match start, is not
+                // counted as one, and is not a BZ_GOV_START sample.
+                *kGovRateAddr = g_gov_start;
+                log_line("governor_patch: FLOOR RESCUE — the send-rate walked "
+                         "down onto the %u floor mid-match and was raised to %u. "
+                         "This is a collapse, not a match start: something is "
+                         "saturating the link (check the retransmit share). "
+                         "Rescue #%llu this session.",
+                         static_cast<unsigned>(kGovColdStart),
+                         static_cast<unsigned>(g_gov_start),
+                         static_cast<unsigned long long>(gts.floor_rescues));
                 break;
             case kGovClamped:
                 log_line("governor_patch: POKE DID NOT HOLD — wrote %u, reads %u "
@@ -2595,8 +2615,10 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
         Sleep(kGovPollMs);
     }
     log_line("governor_patch: stopping after %llu cold-start bump(s), "
-             "%llu clamp report(s), last send-rate %u, session peak %u",
+             "%llu floor rescue(s), %llu clamp report(s), last send-rate %u, "
+             "session peak %u",
              static_cast<unsigned long long>(gts.bumps),
+             static_cast<unsigned long long>(gts.floor_rescues),
              static_cast<unsigned long long>(gts.clamps),
              static_cast<unsigned>(gts.last_seen), static_cast<unsigned>(gts.peak));
     return 0;
@@ -2901,11 +2923,21 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             // read send_stats before raising either knob.
             g_pace_rate   = clamp_u32(parse_env_u32("BZ_SEND_PACE", 0), 0, 10000000);
             g_pace_max_ms = clamp_u32(parse_env_u32("BZ_SEND_PACE_MAX_MS", kPaceMaxDelayDef), 0, 200);
-            // Duplicate suppressor.  Off by default: it is a behavioural change
-            // to the send path and needs a live-match validation before it is
-            // trusted (see contracts/epoch-refix.md, deferred in-game step).
-            // BZ_SEND_DAMPEN=1 enables.
-            dampen_init(&g_dampen, env_truthy(std::getenv("BZ_SEND_DAMPEN")),
+            // Duplicate suppressor.  ON by default since V4.94.  It shipped off
+            // in V4.93 pending a live-match validation; the 2026-08-12 monkey
+            // match supplied one, from the wrong side.  Four runaway repair-kit
+            // objects put 30,691 retransmitted datagrams / 2.64 MB on the wire
+            // in 140 seconds — 52.9 kB/s against a governor budget that had
+            // collapsed to 4.5 kB/s — and the damper was not running to stop
+            // any of it.  Replaying that logged send stream through
+            // dampen_admit() suppresses 63.9% of the datagrams at the 60 ms
+            // floor window and 69.0% at a realistic 1.2*RTT window, which is
+            // the whole of the redundancy: 3.22 copies per message down to one.
+            // BZ_SEND_DAMPEN=0 restores the old off-by-default behaviour.
+            const char *dampen_env = std::getenv("BZ_SEND_DAMPEN");
+            dampen_init(&g_dampen,
+                        (dampen_env == nullptr || *dampen_env == '\0')
+                            ? true : env_truthy(dampen_env),
                         GetTickCount64());
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
             // Governor cold-start rate.  ON by default since V4.7: the game
@@ -2959,8 +2991,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                  static_cast<unsigned>(g_dup_max_pps),
                  static_cast<unsigned>(g_dscp));
         log_line("send_dampen: %s floor_ms=%u max_ms=%u peers=%u slots=%u"
-                 " (BZ_SEND_DAMPEN=1 to suppress redundant in-window reliable"
-                 " retransmits; purge-on-disconnect is the explicit reset)",
+                 " (on by default since V4.94; BZ_SEND_DAMPEN=0 disables."
+                 " Suppresses redundant in-window reliable retransmits;"
+                 " purge-on-disconnect is the explicit reset)",
                  g_dampen.enabled ? "enabled" : "disabled",
                  static_cast<unsigned>(kDampenFloorMs),
                  static_cast<unsigned>(kDampenMaxMs),

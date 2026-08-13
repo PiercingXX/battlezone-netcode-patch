@@ -123,10 +123,10 @@ written.
 | Variable | Default | net.ini key | Stock | Notes |
 |---|---|---|---|---|
 | `BZ_NET_TUNE` | `1` | — | — | `0` restores the game's stock governor behaviour |
-| `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | also the value copied into the live send rate at session setup |
+| `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | the collapse floor. On since V4.94: a 2026-08-12 collapse bottomed out at the stock 4,150 B/s and the match spent two minutes there. `0` reverts to leaving the game's value alone |
 | `BZ_NET_MAXBANDWIDTH` | `320000` | MaxBandwidth | 16000 | the governor is closed-loop, so a high ceiling is not itself a risk |
-| `BZ_NET_UPCOUNT` | `50` | UpCount | 10 | stock ramps +10 bytes per ~3 s: UpCount 50 = a gentler ramp; the governor climbs less aggressively so a spike does not overshoot (T3, reconciled 2026-08-11) |
-| `BZ_NET_DOWNCOUNT` | `200` | DownCount | 5 | bytes removed from the send budget per adjustment while over MaxPing (the governor's back-off step, not a receive budget) |
+| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | recovery step, twice DownCount as stock intends. Reconciled 2026-08-12: the old 50/200 pairing cut 5x faster than it recovered (measured -203 vs +40.5 B/s per second), so a two-minute collapse needed nine minutes to undo |
+| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | bytes removed from the send budget per adjustment while over MaxPing (the governor's back-off step, not a receive budget) |
 | `BZ_NET_MAXPING` | `450` | MaxPing | 300 | stock turns a jitter spike into a rate cut into more warping into more spike |
 | `BZ_NET_MAXPINGSLOST` | leave | MaxPingsLost | 20 | no evidence a change helps |
 | `BZ_AUTOKICK_RELAX` | `1` | — | — | `0` restores stock kicking |
@@ -157,7 +157,7 @@ can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates th
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
 
-### Duplicate suppressor (`BZ_SEND_DAMPEN`, off by default)
+### Duplicate suppressor (`BZ_SEND_DAMPEN`, on by default since V4.94)
 
 BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an
 RTT the game itself reports as 56–91 ms, so every reliable message goes out
@@ -172,7 +172,7 @@ and is never duplicated by `BZ_SEND_DUP`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BZ_SEND_DAMPEN` | `0` | `1` suppresses redundant in-window reliable retransmits; off pending live-match validation |
+| `BZ_SEND_DAMPEN` | `1` | suppresses redundant in-window reliable retransmits; `0` disables. On by default since V4.94 — replaying the 2026-08-12 storm's logged send stream through it suppresses 63.9% of the datagrams at the 60 ms floor window and 69.0% at a realistic 1.2xRTT window |
 
 The suppression window starts at a 60 ms floor and doubles on each genuine
 loss-recovery retransmit, capped at 400 ms.  A peer restart is detected

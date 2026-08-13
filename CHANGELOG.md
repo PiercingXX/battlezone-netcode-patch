@@ -1,5 +1,130 @@
 # Changelog
 
+## V4.94 (experimental branch)
+
+**The first build whose defaults change on the strength of a measured field
+event. The 2026-08-12 `xxMonke1.bzn` match produced a two-minute bandwidth
+collapse that the logs explain end to end: four runaway mod objects, a governor that
+cut five times faster than it recovered, a floor that was never being written,
+and — reading the sentinel that the governor collapsed onto — a bug in this
+patch that mistook the collapse for a match start. All four are addressed;
+the damper ships on.**
+
+Full derivation, with every number reproducible from the bundled logs:
+`contracts/lag-collapse-20260812.md`.
+
+### What the session showed
+
+Between 20:34:09 and 20:36:23, the client put **30,691 retransmitted datagrams
+/ 2.64 MB** on the wire. Decoding the payload bodies, **30,007 of them (97.8%)
+are four objects** — `apamorep804/805/806/807_repairkit` — each emitting ~2,000
+*distinct* position updates on the reliable channel over two minutes, at BZ's
+3.22 proactive copies per message. Peak 52.9 kB/s against a governor budget
+that had by then collapsed to 4.5 kB/s: **11× over**, because retransmits are
+not subject to the budget. They stop in one datagram batch at 20:36:22.888, two
+seconds after the client's ship is destroyed. `apamorep798`, spawned 21 seconds
+earlier, appears exactly once — that is what a normal pickup costs.
+
+The root cause is a game or map-mod behaviour (workshop 3781900699). No proxy
+can stop the engine queueing *distinct* reliable messages; it can only suppress
+duplicate copies of them, which is what changes below.
+
+### The send damper is on by default
+
+`BZ_SEND_DAMPEN` shipped off in V4.93 pending a live-match validation. The
+2026-08-12 session supplied one from the wrong side: the damper was not running
+while 2.64 MB of redundant traffic went out. Replaying that logged send stream
+through `dampen_admit()` unchanged suppresses **63.9% of the datagrams at the
+60 ms floor window and 69.0% at a realistic 1.2×RTT window** — the plateau is
+the copies-per-message ratio itself, 3.22 collapsing to 1.0. Peak offered load
+52.9 → ~16 kB/s.
+
+Both proxies now use the `BZ_REORDER`-style "env absent = default" idiom, so
+`BZ_SEND_DAMPEN=0` restores the old behaviour exactly.
+
+### The cold-start sentinel is classified by arrival (`kGovFloorRescue`)
+
+`gov_trace_step()` fired `kGovBumped` on any read of exactly 4000, on the
+assumption — written into both proxy banners — that the ramp "moves it off 4000
+immediately and never returns to exactly 4000". The host's proxy logged
+`poke held … reads 38000` at 20:36:03, which means a bump at 20:35:53:
+**thirteen minutes into a match that started at 20:22:41**. The governor had
+walked *down* onto the sentinel, and the patch read it as a match start and
+raised the rate 10× with nobody asking.
+
+The sentinel is now told apart by how it was arrived at. A match start writes
+4000 over a value that has been sitting still for the length of a lobby; a
+collapse arrives from within `descent_band` (2000 B/s) above it, off a value
+that lasted one governor step. The latter is `kGovFloorRescue`: it still writes
+the target — with the game's floor at 4000 the alternative is a match that
+spends the rest of its life at 4 kB/s — but it is logged as `FLOOR RESCUE`,
+rate-limited to one report per `descent_ms` (30 s), and **counted apart from
+real match starts**.
+
+That last part is not cosmetic. Every mid-match floor hit was being counted as a
+match: `analyze_drops.py` reported **32 "matches verified held" for an evening
+with three matches in it**, and 126 on the host. A sample set counted that way
+cannot score an A/B, and several were.
+
+The known limit is stated rather than hidden: a match ending near the floor
+followed by a lobby shorter than 30 s would miss one poke, opening at the stock
+4000 and saying so in the log. That is the benign direction to fail in.
+
+### The governor recovers faster than it cuts again
+
+Measured off the collapse: down **−203 B/s per second** (25,900 → 4,150 in
+107 s, 54 consecutive steps, no up-step in between), up **+40.5 B/s per second**
+(23,900 → 29,450 over 137 s). Five to one — a two-minute collapse needs nine
+minutes to undo, so in a sustained fight the governor never recovers before the
+next spike and the rate just ratchets down.
+
+Stock is `UpCount=10 / DownCount=5`: up twice as fast as down. The shipped
+preset was `50 / 200`, an **8× inversion of the stock bias** in exactly the
+direction that turns a traffic spike into a collapse. Reconciled to
+`100 / 50` — stock's 2:1 recovery bias, keeping the 10× scale-up that is the
+point of tuning these at all — across `shared/net_globals.h`,
+`net-ini/net.ini` and both proxy READMEs, with the 2:1 invariant pinned in
+`net_globals_test`.
+
+The host and client were also on *different* pairings (100/50 vs 50/200)
+throughout the evening, which is its own reason to pin one value.
+
+### MinBandwidth is written again, as the collapse floor
+
+`kNetTunePreset` left MinBandwidth at 0 because a 2026-07-26 A/B disproved it as
+the *opening* send rate. That result stands, and it answers a different
+question: no session in that set had ever collapsed to the floor, so nothing in
+it could observe whether the value acts as one. 2026-08-12 collapsed, and
+bottomed out at **4,150 → 4,000 B/s — the stock floor**, not the 16000 that
+`net-ini/net.ini` has documented all along.
+
+The preset is now 16000. A floor there also puts the governor out of the 4000
+sentinel's reach, which makes the fix above the backstop rather than the
+mechanism — an invariant now pinned in `net_globals_test` against
+`kGovColdStartSentinel + kGovDescentBandDef`, so the two headers cannot drift
+into overlapping. The sanity gate narrows from `[500, 2000000]` to
+`[500, 100000]` now the as-found values are known and consistent across a
+Windows host and a Linux client (1000 at the menu, 4000 at cold start).
+
+**This one is an experiment on an address that is identified but not
+confirmed**, and it is written to say so. `BZ_NET_MINBANDWIDTH=0` reverts.
+One collapse observed with this on settles it: if the governor bottoms out at
+16,000 instead of 4,150, the address is what we think it is. The number to read
+is the proxy's `governor_trace` window minimum, which is where the 4,150 was
+seen.
+
+### Known, not fixed
+
+`tools/analyze_drops.py` cross-contaminates its retransmit-share denominator
+when two bundles are passed on one command line: both reports used the client's
+proxy byte counter (pid 828 / 24.60 MB) instead of the host's own (pid 628 /
+31.35 MB). Small here (0.5% → 0.4%) but it will distort the A/B that scores
+this release. Run one bundle per invocation until it is fixed.
+
+The per-step B/s figures behind the ramp reconciliation are what the governor
+did at 50/200. That they scale linearly with the knobs is inferred from the step
+sizes in the log, not separately measured.
+
 ## V4.93 (experimental branch)
 
 **The retransmit storm has a named cause, a fix handed upstream, and — new in
