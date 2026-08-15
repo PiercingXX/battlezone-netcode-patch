@@ -99,7 +99,8 @@ session's logs bundled and uploaded automatically to the private channel:
 ```text
 # Windows
 cmd /c ""%LOCALAPPDATA%\bz-netcode\bz_wrap.bat" %command%"
-
+```
+```
 # Linux
 WINEDLLOVERRIDES=dsound=n,b "${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode/bz_wrap.sh" %command% -nointro
 ```
