@@ -66,9 +66,12 @@ prompt_yes_no() {
     [[ "$answer" == "y" || "$answer" == "Y" ]]
 }
 
-detect_game_path() {
-    # Keep this list a superset of install_linux.sh's detect_game_path: the
-    # uninstaller must find every install the installer can create.
+GAME_PATHS=()
+detect_game_paths() {
+    # Keep this list a superset of install_linux.sh's detect_game_paths: the
+    # uninstaller must find every install the installer can create.  Every
+    # match is cleaned, mirroring the installer's patch-all-installs rule
+    # (2026-08-15: first-match-wins left a Flatpak copy stale).
     local candidates=(
         "$HOME/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
         "$HOME/.steam/steam/steamapps/common/Battlezone 98 Redux"
@@ -77,29 +80,40 @@ detect_game_path() {
         "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
         "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
     )
-    local c
+    local c seen
     for c in "${candidates[@]}"; do
         if [[ -f "$c/battlezone98redux.exe" ]]; then
-            printf '%s' "$c"
-            return 0
+            # ~/.steam/steam is usually a symlink to ~/.local/share/Steam;
+            # resolve before deduplicating or the same install is listed twice.
+            local real; real="$(readlink -f "$c")"
+            for seen in "${GAME_PATHS[@]}"; do
+                [[ "$(readlink -f "$seen")" == "$real" ]] && continue 2
+            done
+            GAME_PATHS+=("$c")
         fi
     done
-    return 1
 }
 
-if [[ -z "$GAME_PATH" ]]; then
-    if ! GAME_PATH="$(detect_game_path)"; then
-        echo "Could not find the game. Pass --game-path." >&2
-        exit 1
-    fi
+if [[ -n "$GAME_PATH" ]]; then
+    GAME_PATHS=("$GAME_PATH")
+else
+    detect_game_paths
 fi
 
-if [[ ! -f "$GAME_PATH/battlezone98redux.exe" ]]; then
-    echo "Game executable not found in: $GAME_PATH" >&2
+if [[ ${#GAME_PATHS[@]} -eq 0 ]]; then
+    echo "Could not find the game. Pass --game-path." >&2
     exit 1
 fi
 
-echo "Game folder: $GAME_PATH"
+for gp in "${GAME_PATHS[@]}"; do
+    if [[ ! -f "$gp/battlezone98redux.exe" ]]; then
+        echo "Game executable not found in: $gp" >&2
+        exit 1
+    fi
+done
+
+echo "Game folder(s):"
+printf '  %s\n' "${GAME_PATHS[@]}"
 echo
 
 removed=0
@@ -116,21 +130,23 @@ remove_file() {
 }
 
 echo "Removing patch files:"
-# Other mods ship a dsound.dll too (DSOAL, for one). Only delete a DLL that
-# carries this patch's own marker string; anything else is not ours to remove.
-if [[ -f "$GAME_PATH/dsound.dll" ]] && ! grep -aq 'BZ_GOV_START' "$GAME_PATH/dsound.dll"; then
-    echo "  KEEPING $GAME_PATH/dsound.dll: it does not look like this patch's"
-    echo "  proxy (no BZ_GOV_START marker) — another mod's DLL? Remove it by"
-    echo "  hand if you are certain."
-else
-    remove_file "$GAME_PATH/dsound.dll"
-fi
-remove_file "$GAME_PATH/packaged_mods/9990001/net.ini"
-# Only if the installer's own directory is now empty; never recursive.
-if [[ -d "$GAME_PATH/packaged_mods/9990001" ]]; then
-    rmdir "$GAME_PATH/packaged_mods/9990001" 2>/dev/null \
-        && echo "  removed empty $GAME_PATH/packaged_mods/9990001" || true
-fi
+for GAME_PATH in "${GAME_PATHS[@]}"; do
+    # Other mods ship a dsound.dll too (DSOAL, for one). Only delete a DLL that
+    # carries this patch's own marker string; anything else is not ours to remove.
+    if [[ -f "$GAME_PATH/dsound.dll" ]] && ! grep -aq 'BZ_GOV_START' "$GAME_PATH/dsound.dll"; then
+        echo "  KEEPING $GAME_PATH/dsound.dll: it does not look like this patch's"
+        echo "  proxy (no BZ_GOV_START marker) — another mod's DLL? Remove it by"
+        echo "  hand if you are certain."
+    else
+        remove_file "$GAME_PATH/dsound.dll"
+    fi
+    remove_file "$GAME_PATH/packaged_mods/9990001/net.ini"
+    # Only if the installer's own directory is now empty; never recursive.
+    if [[ -d "$GAME_PATH/packaged_mods/9990001" ]]; then
+        rmdir "$GAME_PATH/packaged_mods/9990001" 2>/dev/null \
+            && echo "  removed empty $GAME_PATH/packaged_mods/9990001" || true
+    fi
+done
 
 # The uploader, wherever the installer may have put it: the host XDG dirs
 # plus the Snap and Flatpak sandbox mirrors. A non-empty outbox holds session
@@ -166,11 +182,13 @@ if [[ "$PURGE_LOGS" == "1" ]] && \
    prompt_yes_no "Delete session logs and captures? They are research data and cannot be recovered."; then
     echo
     echo "Removing logs and captures (--purge-logs):"
-    remove_file "$GAME_PATH/dsound_proxy.log"
-    remove_file "$GAME_PATH/winmm_proxy.log"
-    remove_file "$GAME_PATH/bz_buffer_log.bin"
-    remove_file "$GAME_PATH/bz_buffer_log.meta.txt"
-    remove_file "$GAME_PATH/BZLogger.txt"
+    for GAME_PATH in "${GAME_PATHS[@]}"; do
+        remove_file "$GAME_PATH/dsound_proxy.log"
+        remove_file "$GAME_PATH/winmm_proxy.log"
+        remove_file "$GAME_PATH/bz_buffer_log.bin"
+        remove_file "$GAME_PATH/bz_buffer_log.meta.txt"
+        remove_file "$GAME_PATH/BZLogger.txt"
+    done
 else
     echo
     echo "Leaving logs and captures in place (pass --purge-logs to delete them)."

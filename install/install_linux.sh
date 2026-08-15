@@ -7,6 +7,7 @@ REPO_SLUG="PiercingXX/battlezone-netcode-patch"
 # copy came from.
 REF="${BZNET_REF:-master}"
 GAME_PATH="${BZNET_GAME_PATH:-}"
+GAME_PATHS=()
 ARCHIVE_URL="${BZNET_ARCHIVE_URL:-https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz}"
 # BZNET_REF is validated after validate_ref is defined; see below.
 ASSUME_YES="${BZNET_ASSUME_YES:-0}"
@@ -318,17 +319,21 @@ EOF
     fi
 }
 
-detect_game_path() {
-    local candidates=()
-
-    candidates+=("$HOME/.local/share/Steam/steamapps/common/Battlezone 98 Redux")
-    candidates+=("$HOME/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux")
-    candidates+=("$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux")
-
+# Every install found is patched, not just the first.  A machine with more
+# than one Steam (native + Flatpak, native + Snap) plays through whichever
+# one the user happens to launch, and first-match-wins silently left the
+# others on a stale build - found live on 2026-08-15, where a dev machine's
+# Flatpak copy sat on V4.93 while the native copy was current.
+detect_game_paths() {
+    local candidates=(
+        "$HOME/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+        "$HOME/snap/steam/common/.local/share/Steam/steamapps/common/Battlezone 98 Redux"
+        "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Battlezone 98 Redux"
+    )
+    local candidate
     for candidate in "${candidates[@]}"; do
         if [[ -f "$candidate/battlezone98redux.exe" ]]; then
-            GAME_PATH="$candidate"
-            return
+            GAME_PATHS+=("$candidate")
         fi
     done
 }
@@ -365,19 +370,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$GAME_PATH" ]]; then
-    detect_game_path
+if [[ -n "$GAME_PATH" ]]; then
+    GAME_PATHS=("$GAME_PATH")
+else
+    detect_game_paths
 fi
 
-if [[ -z "$GAME_PATH" ]]; then
+if [[ ${#GAME_PATHS[@]} -eq 0 ]]; then
     echo "Could not find Battlezone 98 Redux automatically." >&2
     echo "Run again with: --game-path '/path/to/Battlezone 98 Redux'" >&2
     exit 1
 fi
 
-if [[ ! -f "$GAME_PATH/battlezone98redux.exe" ]]; then
-    echo "Game executable not found in: $GAME_PATH" >&2
-    exit 1
+for gp in "${GAME_PATHS[@]}"; do
+    if [[ ! -f "$gp/battlezone98redux.exe" ]]; then
+        echo "Game executable not found in: $gp" >&2
+        exit 1
+    fi
+done
+if [[ ${#GAME_PATHS[@]} -gt 1 ]]; then
+    echo "Found ${#GAME_PATHS[@]} Battlezone installs; patching all of them:"
+    printf '  %s\n' "${GAME_PATHS[@]}"
 fi
 
 ensure_build_dependencies
@@ -412,44 +425,53 @@ if [[ ! -f "$built_dll" ]]; then
     exit 1
 fi
 
-dest_path="$GAME_PATH/dsound.dll"
-if [[ -f "$dest_path" ]]; then
-    echo "Deleting existing $dest_path before install"
-    rm -f "$dest_path"
-fi
-
-echo "Installing patch to $dest_path"
-command install -m 0644 "$built_dll" "$dest_path"
-rm -f "$GAME_PATH/dsound_proxy.log"
-
-# net.ini send-governor tuning.  The game only loads net.ini through the
-# mod system - a copy in the game folder root is silently ignored - so it
-# is installed as a local packaged mod.
+# One deploy per detected install; everything in here is per-game-dir.
 net_ini_src="$source_root/net-ini/net.ini"
-net_ini_dst="$GAME_PATH/packaged_mods/9990001/net.ini"
-if [[ -f "$net_ini_src" ]]; then
-    mkdir -p "$(dirname "$net_ini_dst")"
-    command install -m 0644 "$net_ini_src" "$net_ini_dst"
-    echo "Installed net.ini tuning mod to $net_ini_dst"
-
-    # Workshop mods ship their own net.ini and win over the local file, and
-    # DISABLING the mod in the in-game manager is not enough - it still loads.
-    workshop_net_ini="$(find "$GAME_PATH/../../workshop/content/301650" -mindepth 2 -maxdepth 2 -name net.ini 2>/dev/null | head -n1)"
-    if [[ -n "$workshop_net_ini" ]]; then
-        echo "WARNING: a Workshop mod also provides net.ini and will override the local file:" >&2
-        echo "  $workshop_net_ini" >&2
-        echo "Unsubscribe from that mod (disabling it in-game is NOT enough) if you plan to host." >&2
+for GAME_PATH in "${GAME_PATHS[@]}"; do
+    dest_path="$GAME_PATH/dsound.dll"
+    if [[ -f "$dest_path" ]]; then
+        echo "Deleting existing $dest_path before install"
+        rm -f "$dest_path"
     fi
-fi
+
+    echo "Installing patch to $dest_path"
+    command install -m 0644 "$built_dll" "$dest_path"
+    rm -f "$GAME_PATH/dsound_proxy.log"
+
+    # net.ini send-governor tuning.  The game only loads net.ini through the
+    # mod system - a copy in the game folder root is silently ignored - so it
+    # is installed as a local packaged mod.
+    net_ini_dst="$GAME_PATH/packaged_mods/9990001/net.ini"
+    if [[ -f "$net_ini_src" ]]; then
+        mkdir -p "$(dirname "$net_ini_dst")"
+        command install -m 0644 "$net_ini_src" "$net_ini_dst"
+        echo "Installed net.ini tuning mod to $net_ini_dst"
+
+        # Workshop mods ship their own net.ini and win over the local file, and
+        # DISABLING the mod in the in-game manager is not enough - it still loads.
+        workshop_net_ini="$(find "$GAME_PATH/../../workshop/content/301650" -mindepth 2 -maxdepth 2 -name net.ini 2>/dev/null | head -n1)"
+        if [[ -n "$workshop_net_ini" ]]; then
+            echo "WARNING: a Workshop mod also provides net.ini and will override the local file:" >&2
+            echo "  $workshop_net_ini" >&2
+            echo "Unsubscribe from that mod (disabling it in-game is NOT enough) if you plan to host." >&2
+        fi
+    fi
+done
+# Downstream single-path consumers (EXU repair, the launch-line choice) keep
+# the last path; the snap/flatpak cases below check the whole list.
+GAME_PATH="${GAME_PATHS[${#GAME_PATHS[@]}-1]}"
 
 apply_socket_buffer_sysctls
 
 exu_repair_script="$source_root/Linux/repair_exu_linux.sh"
 if [[ -x "$exu_repair_script" ]]; then
-    echo "Applying Linux EXU compatibility repair (best effort)"
-    if ! "$exu_repair_script" --game-path "$GAME_PATH"; then
-        echo "Warning: EXU compatibility repair failed; continuing with netcode patch install." >&2
-    fi
+    for GAME_PATH in "${GAME_PATHS[@]}"; do
+        echo "Applying Linux EXU compatibility repair (best effort): $GAME_PATH"
+        if ! "$exu_repair_script" --game-path "$GAME_PATH"; then
+            echo "Warning: EXU compatibility repair failed; continuing with netcode patch install." >&2
+        fi
+    done
+    GAME_PATH="${GAME_PATHS[${#GAME_PATHS[@]}-1]}"
 fi
 
 # ── Automatic log upload (test crew) ─────────────────────────────────────────
@@ -630,8 +652,12 @@ elif [[ -f "$wrapper_dir/bz_wrap.sh" && -f "$source_root/upload/bz_wrap.sh" ]]; 
     wrapper_ready=1
 fi
 
+have_snap_install=0
+for gp in "${GAME_PATHS[@]}"; do
+    [[ "$gp" == "$HOME/snap/steam/"* ]] && have_snap_install=1
+done
 if [[ "$wrapper_ready" == "1" ]]; then
-    if [[ "$GAME_PATH" == "$HOME/snap/steam/"* ]]; then
+    if [[ "$have_snap_install" == "1" ]]; then
         # Snap remaps HOME and blocks the host's dot-dirs, so the XDG line
         # can never resolve there; $SNAP_USER_COMMON is guaranteed by snapd
         # inside the sandbox and points at ~/snap/steam/common.
@@ -668,5 +694,5 @@ sampling and the auto-kick tune are all on by default. Every knob has an
 environment override - see the proxy README.)
 
 Installed to:
-$dest_path
+$(printf '%s\n' "${GAME_PATHS[@]}")
 EOF
