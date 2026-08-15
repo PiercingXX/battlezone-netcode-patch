@@ -34,14 +34,14 @@ Command Prompt.
 Automatic path detection:
 
 ```powershell
-irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_windows.ps1 | iex
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex
 ```
 
 Explicit game path — two lines, same window:
 
 ```powershell
 $env:BZNET_GAME_PATH = 'D:\Steam\steamapps\common\Battlezone 98 Redux'
-irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_windows.ps1 | iex
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex
 ```
 
 Do not wrap either of these in `powershell -NoProfile -ExecutionPolicy Bypass

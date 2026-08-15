@@ -3090,7 +3090,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             g_rx.peers       = clamp_u32(parse_env_u32("BZ_REORDER_PEERS", kReorderPeerCap), 1, kReorderPeerCap);
             g_reorder_drain  = clamp_u32(parse_env_u32("BZ_REORDER_DRAIN", kReorderDrainCapDef), 1, kReorderDrainCapMax);
             // Off by default: adds upstream traffic on the P2P socket.
-            g_send_dup = env_truthy(std::getenv("BZ_SEND_DUP"));
+            // V5: send_dup is retired (see the Windows proxy note) -
+            // the knob is no longer honoured.
+            g_send_dup = false;
             g_dup_delay_ms = clamp_u32(parse_env_u32("BZ_DUP_DELAY_MS", kDupDelayMsDef), 0, 500);
             g_dup_max_pps  = clamp_u32(parse_env_u32("BZ_DUP_MAX_PPS", kDupMaxPpsDef), 0, 2000);
             // DSCP class for the P2P socket (0 disables); clamp to the 6-bit field.
@@ -3177,7 +3179,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                  static_cast<unsigned>(g_pace_rate),
                  static_cast<unsigned>(g_pace_max_ms));
         log_line("send_dup: %s dup_delay_ms=%u dup_max_pps=%u loopback_dup=skip dscp=%u"
-                 " (BZ_SEND_DUP=1 to enable outbound packet duplication)",
+                 " (retired in V5; the knob is no longer honoured)",
                  g_send_dup ? "enabled" : "disabled",
                  static_cast<unsigned>(g_dup_delay_ms),
                  static_cast<unsigned>(g_dup_max_pps),

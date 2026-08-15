@@ -49,7 +49,7 @@ $Work     = Join-Path $DataDir "work"
 # predicted: on 2026-08-15 both testers uploaded bundles stamped
 # V4.91-harvest while this repo shipped V4.92-arms, and the drift was only
 # visible after reading a bundle's meta.txt.
-$WrapperVersion = "V4.94-refresh-20260815"
+$WrapperVersion = "V5.0-shipped-20260815"
 
 # Discord's webhook attachment cap is ~10 MB unboosted. Leave room for the
 # multipart envelope.

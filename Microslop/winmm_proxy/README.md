@@ -202,7 +202,7 @@ already sent inside its window is ever suppressed — a first transmission, a
 distinct sequence, and anything too small to carry a sequence number always
 go.  A suppressed send looks to the game like a successful one (a UDP send
 promises handoff, not delivery), is still counted by the burst measurement,
-and is never duplicated by `BZ_SEND_DUP`.
+and is never duplicated.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -263,13 +263,11 @@ Runtime tuning (same env vars as the Linux dsound proxy):
 | BZ_REORDER_DEPTH | 32 | Max buffered packets per peer (max 32) |
 | BZ_REORDER_PEERS | 16 | Max distinct IPv4 sources (max 16) |
 | BZ_REORDER_DRAIN | 96 | Real WSARecvFrom calls per hook invocation (max 128). The drain also stops early whenever a peer queue is full, so this is an upper bound, not a target |
-| BZ_SEND_DUP | 0 | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
+| `BZ_SEND_DUP` | — | Retired in V5: the knob is no longer honoured. Live A/B showed outbound duplication does not help this game |
 | BZ_GOV_START | **40000** | **On by default since V4.8.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched). `0` = disabled. Targets the first-60-seconds drop clusters; sender-side |
 | BZ_GOV_VERIFY_MS | 10000 | V4.9 read-back: how long after the cold-start poke to re-read the global and declare it held. A `POKE DID NOT HOLD` line means something rewrote the value and the session is not a valid BZ_GOV_START sample — this happened in one of the two V4.8 matches and took hand-correlating the game's own log to notice |
 | BZ_GOV_TRACE_MS | 15000 | V4.9 read-back: interval of the periodic `governor_trace:` line reporting the live send rate with its min/max since the last one, which is what makes the ramp rate visible. `0` silences it |
 | BZ_GOV_SCAN | 0 | Diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches |
-| BZ_DUP_DELAY_MS | 25 | Delay before the duplicate is transmitted (max 500). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
-| BZ_DUP_MAX_PPS | 40 | Cap on duplicates per second (max 2000). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
 | BZ_DSCP | 46 | DSCP class marked on the P2P socket (max 63). 46 = EF. Ignored by stock Windows policy (no-op); use qWAVE or a router rule for real effect there. `0` disables |
 | BZ_AUTOKICK_RELAX | 1 | **On by default, host-only.** One-switch preset relaxing all four auto-kick thresholds below (start=60000, ping=2000, loss=200, time=60000) so a transient lag spike no longer ejects a player. Individual `BZ_AUTOKICK_*` vars override it; `0` restores stock kicking. Only affects kicks when **this machine hosts** the session |
 | BZ_AUTOKICK_TIME | 0 | Override `AutoKickTime` — ms a player's connection must stay continuously bad before the host kicks them (game default `15000`). `0` = leave the game's value |

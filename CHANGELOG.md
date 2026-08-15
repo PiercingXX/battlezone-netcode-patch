@@ -1,5 +1,60 @@
 # Changelog
 
+## V5.0 — first shipped release
+
+**Nine instrumented matches on 2026-08-15 found the lag, fixed it, and
+verified the fix live. This release promotes the result to `master` and
+retires the experimental branch.**
+
+### The fix that mattered
+
+The engine's retransmit loop is frame-locked: it may resend every unacked
+reliable message once per frame, so a 180 fps machine emits copies every
+4 ms — up to ~27 copies of one message inside a single round trip (measured:
+28.94). One traffic spike snowballed into sustained storms of 14,000–58,000
+retransmitted datagrams per match, congestion collapse, and the lag players
+felt. Two defects let it through the duplicate suppressor that V4.94 shipped
+to stop exactly this:
+
+- The suppressor's RTT feed was never connected, so its window sat at the
+  60 ms floor — 3x the copies the 1.2xRTT design window allows at the
+  measured 149 ms. The proxy now measures per-peer RTT from the protocol's
+  own ack field (Karn-filtered, reliable stream only) and feeds it in live.
+- Its 64-slot sequence ring held ~6 s of storm churn against retries
+  spanning 9.5 s; retries of evicted sequences looked like peer restarts and
+  silently wiped the suppression state mid-storm. The ring is now 512 slots
+  and the wipes are counted (`epoch_resets`).
+
+Verified across both host/client roles: 24–43x fewer retransmissions, and a
+1-second frame stall that would previously have ignited a storm was absorbed
+and recovered inside 60 seconds.
+
+### Also in V5.0
+
+- **RTT sampling** (`rtt_trace:` every 15 s + session summary), on by
+  default, observation-only. It measured the testers' real link at 25–48 ms
+  and proved the storms were self-inflicted, not the network.
+- **Auto-kick dialled back to ~2x stock** (20000/1000/50/20000). The V4.9
+  relax (60000/2000/200/60000) abolished the engine's amputation reflex: a
+  2026-08-15 collapse left a visibly dead match running for five minutes
+  because nothing would kick. Spikes are still forgiven; corpses are not.
+- **MaxBandwidth 320000 → 64000.** Nine matches never measured a send rate
+  above 24,872 B/s; the "uncapped" headroom was untested surface. 64000 is
+  4x stock and ~2.5x the highest rate ever observed.
+- **send_dup retired.** Live A/B showed outbound duplication doesn't help
+  this game and degrades busy uplinks. The knob is no longer honoured.
+- **Installers refresh the log uploader on every run** (webhook or not), and
+  print the old → new wrapper version, ending silent version drift.
+- Repo slimmed for release; dev-only captures and scratch files removed.
+
+### Known engine issue (not fixed by this patch)
+
+An armory launch's "Scrap Impact Zone" marker can fail to replicate (its
+object class ships without a model file — `impactzn.sdf` is missing) and the
+event ignites a message-generation storm the suppressor can only blunt, not
+cure. One occurrence collapsed a match beyond recovery. Until it's
+understood, avoid armory launches / Day Wreckers in multiplayer.
+
 ## V4.94 (experimental branch)
 
 **The first build whose defaults change on the strength of a measured field

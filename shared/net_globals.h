@@ -182,7 +182,11 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
     16000,   // MinBandwidth — the collapse floor.  On since V4.94; see the long
              // note on the entry above for why the 2026-07-26 A/B does not
              // settle this.  BZ_NET_MINBANDWIDTH=0 reverts.
-    320000,  // MaxBandwidth
+    64000,   // MaxBandwidth — V5: was 320000 ("effectively removes the cap"),
+             // but nine instrumented matches on 2026-08-15 never measured a
+             // send rate above 24,872 B/s, so the extra headroom was untested
+             // surface, not a feature.  64000 is 4x stock and ~2.5x the
+             // highest rate ever observed; BZ_NET_MAXBANDWIDTH overrides.
     // ── The ramp, reconciled (V4.94) ─────────────────────────────────────────
     // These two were 50/200 — the governor cutting four times faster than it
     // recovered.  Stock is 10/5, i.e. up twice as fast as down, so the shipped
@@ -213,12 +217,21 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
 };
 
 // Preset applied when BZ_AUTOKICK_RELAX is on (the default).
+//
+// V5: dialled back to ~2x stock from the V4.9 values (60000/2000/200/60000).
+// The 2026-08-15 armory-launch collapse showed the cost of relaxing this too
+// far: the flood killed the game-level ping loop, the scoreboard read 100%
+// loss, and with Loss=200/Time=60000 the engine's amputation reflex - which
+// on stock settings ends a dead match in seconds - never fired.  Five minutes
+// of zombie match later, the players quit manually.  A kick IS the recovery
+// path when a peer is truly gone; the preset should forgive spikes, not
+// abolish the reflex.  Stock: 10000/750/25/15000.
 constexpr uint32_t kAutoKickRelaxPreset[kNetGlobalCount] = {
     0, 0, 0, 0, 0, 0,
-    60000,   // AutoKickStart — long grace after a join
-    2000,    // AutoKickPing  — a 2 s spike is not a kickable offence
-    200,     // AutoKickLoss
-    60000,   // AutoKickTime  — must be bad for a full minute, not 15 s
+    20000,   // AutoKickStart — double stock's post-join grace
+    1000,    // AutoKickPing  — a 1 s spike is forgiven, sustained 1 s+ is not
+    50,      // AutoKickLoss
+    20000,   // AutoKickTime  — bad for 20 s before the kick, not 60
 };
 
 // ── Environment configuration ────────────────────────────────────────────────

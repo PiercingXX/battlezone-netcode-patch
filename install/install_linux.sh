@@ -3,9 +3,9 @@ set -euo pipefail
 
 REPO_SLUG="PiercingXX/battlezone-netcode-patch"
 # Baked per branch (see the Windows installer for the incident that made
-# this explicit): this copy lives on experimental/v4.9, so running it with
-# no BZNET_REF installs the branch it came from, not master.
-REF="${BZNET_REF:-experimental/v4.9}"
+# this explicit): running this with no BZNET_REF installs the branch this
+# copy came from.
+REF="${BZNET_REF:-master}"
 GAME_PATH="${BZNET_GAME_PATH:-}"
 ARCHIVE_URL="${BZNET_ARCHIVE_URL:-https://github.com/${REPO_SLUG}/archive/${REF}.tar.gz}"
 # BZNET_REF is validated after validate_ref is defined; see below.
@@ -662,14 +662,10 @@ Patch DLL: OK    $uploader_status
 Steam launch options still need to be set once on Linux:
 $launch_line
 
-(That's all you need: bigger socket buffers, DSCP priority marking, the [Net]
-tuning poke, the governor cold-start fix and the host auto-kick relax are on by
-default; BZ_AUTOKICK_RELAX=0 restores stock kicking. The inbound reorder buffer
-is OFF - it has been since V4.8, and V4.9 found the structural reason: this
-protocol's sequence number counts messages, not datagrams, so there is no
-per-datagram key to reorder by. BZ_SEND_DUP=1 exists but is deprecated - live A/B testing
-showed outbound duplication does not help this game and degrades busy
-uplinks by doubling packet rate. Leave it off.)
+(That's all you need: the retransmit suppressor, bigger socket buffers, DSCP
+priority marking, the [Net] tuning poke, the governor cold-start fix, RTT
+sampling and the auto-kick tune are all on by default. Every knob has an
+environment override - see the proxy README.)
 
 Installed to:
 $dest_path

@@ -193,7 +193,7 @@ already sent inside its window is ever suppressed — a first transmission, a
 distinct sequence, and anything too small to carry a sequence number always
 go.  A suppressed send looks to the game like a successful one (a UDP send
 promises handoff, not delivery), is still counted by the burst measurement,
-and is never duplicated by `BZ_SEND_DUP`.
+and is never duplicated.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -227,9 +227,7 @@ teardown as a `session end: dampen:` line.
 | `BZ_REORDER_DEPTH` | `32` | Active per-peer reorder queue depth (max `32`) |
 | `BZ_REORDER_PEERS` | `16` | Active peer table size (max `16`) |
 | `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`). The drain also stops early whenever a peer queue is full, so this is an upper bound, not a target |
-| `BZ_SEND_DUP` | `0` | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
-| `BZ_DUP_DELAY_MS` | `25` | Delay before the duplicate is transmitted (max `500`). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
-| `BZ_DUP_MAX_PPS` | `40` | Cap on duplicates per second (max `2000`). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
+| `BZ_SEND_DUP` | — | Retired in V5: the knob is no longer honoured. Live A/B showed outbound duplication does not help this game |
 | `BZ_DSCP` | `46` | DSCP class marked on the P2P socket via IP_TOS (max `63`). 46 = EF; WMM/SQM routers prioritize it over bulk traffic. Effective under Proton. `0` disables |
 | `BZ_GOV_START` | `0` | **Opt-in.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched); watches for the 4000 cold-start and bumps it. `0` = disabled. Targets the first-60-seconds drop clusters; sender-side, so it helps how your packets reach every peer |
 | `BZ_GOV_SCAN` | `0` | Diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches. (The signature is already captured; this is for re-locating it if the game updates) |

@@ -183,8 +183,13 @@ void test_env_presets_and_overrides() {
     // floors a collapse.  2026-08-12 produced the collapse and it bottomed out
     // at the stock 4000, not this.  See the entry in shared/net_globals.h.
     CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    // V5: MaxBandwidth 320000 -> 64000 (nine instrumented matches never
+    // measured a send rate above 24,872 B/s; the uncapped headroom was
+    // untested surface) and the auto-kick preset back to ~2x stock (the
+    // 2026-08-15 collapse showed Loss=200/Time=60000 abolished the engine's
+    // amputation reflex and left a dead match running for five minutes).
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
     // Recovery must outpace back-off 2:1, as stock intends (V4.94).
     CHECK_EQ(tbl[kNgUpCount].want, 100u);      // recovery step
@@ -211,7 +216,7 @@ void test_env_presets_and_overrides() {
     setenv("BZ_NET_MAXBANDWIDTH", "5", 1);
     net_globals_defaults(tbl);
     net_globals_configure(tbl, kNetGlobalCount);
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
     unsetenv("BZ_NET_MAXBANDWIDTH");
 
     // BZ_NET_TUNE=0 drops the governor preset but leaves auto-kick relax.
@@ -220,7 +225,7 @@ void test_env_presets_and_overrides() {
     net_globals_configure(tbl, kNetGlobalCount);
     CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 0u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
     CHECK(net_globals_any(tbl, kNetGlobalCount));
 
     // Both off: nothing to do, and the proxy skips the thread entirely.

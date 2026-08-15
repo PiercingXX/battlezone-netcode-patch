@@ -5,12 +5,12 @@ $repoSlug = "PiercingXX/battlezone-netcode-patch"
 $steamAppId = "301650"
 $gameExeName = "battlezone98redux.exe"
 $defaultInstallDir = "Battlezone 98 Redux"
-# The default ref is baked per branch: this copy of the script lives on
-# experimental/v4.9, so fetching it from that branch and running it plain
-# installs that branch. Field-tested the hard way - a tester pasted the old
+# The default ref is baked per branch: fetching this script from a branch
+# and running it plain installs that branch. Field-tested the hard way - a
+# tester pasted the old
 # cmd-flavored command into PowerShell, the outer shell expanded
 # $env:BZNET_REF to nothing, and the installer silently fell back to master.
-$ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "experimental/v4.9" }
+$ref = if ($env:BZNET_REF) { $env:BZNET_REF } else { "master" }
 # Same rule as validate_ref in install_linux.sh: the ref lands in three raw
 # URLs, and .NET's Uri normalization collapses dot-segments, so a ref like
 # `../../other/repo/main` silently retargets the download — including the
@@ -494,13 +494,10 @@ try {
     } else {
         Write-Host "No Steam launch option changes are needed on Windows."
     }
-    Write-Host "Bigger buffers, the setsockopt fix, the [Net] tuning poke and the governor"
-    Write-Host "cold-start fix are active by default. The inbound reorder buffer is OFF -"
-    Write-Host "it has been since V4.8, and V4.9 found the structural reason: this protocol's"
-    Write-Host "sequence number counts messages, not datagrams, so there is nothing to reorder by."
-    Write-Host ""
-    Write-Host "Note: BZ_SEND_DUP (outbound duplication) exists but is deprecated - live A/B"
-    Write-Host "testing showed it does not help this game and degrades busy uplinks. Leave it off."
+    Write-Host "The retransmit suppressor, bigger socket buffers, DSCP priority marking,"
+    Write-Host "the [Net] tuning poke, the governor cold-start fix, RTT sampling and the"
+    Write-Host "auto-kick tune are all active by default. Every knob has an environment"
+    Write-Host "override - see the proxy README in the repo."
 }
 finally {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempRoot
