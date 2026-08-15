@@ -35,25 +35,73 @@
 namespace bznet {
 
 // ── Wire layout ──────────────────────────────────────────────────────────────
-// Sequence field: u16 BIG-endian at payload byte offset 16.
+// The full BZ P2P header, derived in V4.9 by tools/seq_crossmatch.py:
 //
-// This was u32 little-endian at offset 13 until 2026-07-26, from
-// resources/valid_capture_reorder_signal_only.csv.  A live capture that day
-// (65,536 datagrams, bz_buffer_log.bin) showed that field cannot be the packet
-// counter: two datagrams whose sequence numbers differ read back *identical*
-// under it —
-//     payload ...c1 00 00 38 f3   u32le@13 = 0x380000c1   u16be@16 = 0x38f3
-//     payload ...c1 00 00 38 f5   u32le@13 = 0x380000c1   u16be@16 = 0x38f5
-// because byte 16 is the counter's high byte and lands as the *most*
-// significant byte of that little-endian u32.  The old field therefore only
-// changed once per 256 packets: 340 distinct values where the real counter had
-// 3,806.  Scoring every offset/width/endianness for per-peer monotonicity put
-// u16be@16 at 0.984-1.000 forward-step across all three observed packet
-// classes (18-byte heartbeat, ~250-byte state, mid), independently.
-constexpr uint32_t kReorderSeqOffset    = 16;
-constexpr uint32_t kReorderSeqBytes     = 2;
-constexpr uint32_t kReorderSeqMask      = 0xffffu;
+//     offset  size  field
+//       0       1   flags   0x40 base, |0x80 = TRY (this is a retransmit)
+//       1       1   class   0x00 game data, 0x02 master probe, 0x03 CON,
+//                           0x04/0x05/0x06/0x07 control
+//       2       3   0x000001  protocol version
+//       5       5   u40 BE millisecond clock
+//      10       4   u32 BE  SEQUENCE — the sender's own message counter
+//      14       4   u32 BE  ACK      — highest sequence seen from the peer
+//      18      ..   body
+//
+// This is not another monotonicity guess.  BZLogger prints its retransmits as
+// `TRY Sent Packet (i,n) to IP:PORT: <payload hex>`, so both header ordinals
+// are known for 65,806 packets in the committed capture alone.  Brute-forcing
+// (offset, width, endian) against those known values matches u32be@10 == i and
+// u32be@14 == n on **100% of 65,860 samples across five packet classes**, in
+// every committed log.  The u40 clock at offset 5 independently agrees with
+// BZLogger's own wall-clock timestamps to a median of 0.3 ms, which accounts
+// for every byte of the header and leaves no room for an alternative reading.
+//
+// Two earlier answers were both wrong, and both were wrong the same way — a
+// monotonicity score cannot tell a sequence from an acknowledgement:
+//   * V3   u32 LE @13 straddles the sequence's low byte and the ack's high
+//          bytes.  It changed once per 256 packets.
+//   * V4.8 u16 BE @16 is the low half of the ACK field.  An ack repeats by
+//          design, which is the whole explanation for the "88.5% duplicate
+//          rate" that motivated retiring this buffer.  The retirement was
+//          nonetheless correct — see the note on kReorderDefaultMs below.
+constexpr uint32_t kReorderSeqOffset    = 10;
+constexpr uint32_t kReorderSeqBytes     = 4;
+constexpr uint32_t kReorderSeqMask      = 0xffffffffu;
 constexpr uint32_t kReorderSeqMinPay    = 18;   // shortest payload carrying a seq
+
+// The ack field, for diagnostics.  Nothing in the reorder path keys on it; it
+// exists here so no future reader has to rediscover why offset 16 "looked
+// like" a counter.
+constexpr uint32_t kReorderAckOffset    = 14;
+constexpr uint32_t kReorderAckBytes     = 4;
+
+// ── Byte 0 flags ─────────────────────────────────────────────────────────────
+// Corrected 2026-08-10.  This file previously described bit 7 as "TRY, i.e.
+// this datagram is a retransmit", and named the accessor
+// reorder_is_retransmit().  That was wrong, and wrong in a way that flattered
+// the data: 0x80 marks the datagram RELIABLE, not resent.  Every datagram
+// BZLogger prints as "TRY Sent Packet" carries 0xC0 because TRY is the retry
+// path *for reliable messages* — so the bit tested true on 144,228 of 144,232
+// storm packets for a reason that had nothing to do with retransmission.
+//
+// Confirmed two ways: byte 0 is 0xC0 on 100% of 100,820 sampled TRY datagrams
+// (a real retransmit flag would have to be clear on first transmissions, and
+// there is no other value present), and independently by the public BZRNet
+// protocol capture in GrizzlyOne95/Battlezone98Redux_Shim, which documents
+// 0x40 = final/unfragmented, 0x80 = reliable, 0xC0 = both.
+constexpr uint8_t  kBzHdrFlagFinal      = 0x40; // final/unfragmented fragment
+constexpr uint8_t  kBzHdrFlagReliable   = 0x80; // sent on the reliable channel
+
+// The message-kind nibble.  All gameplay traffic observed is kind 0.
+constexpr uint32_t kBzHdrKindOffset     = 1;
+constexpr uint8_t  kBzHdrKindGameplay   = 0x0;
+
+// Sender's wall clock in Unix epoch milliseconds, big-endian, stamped fresh on
+// every copy — including each retry, which is what makes the retransmission
+// cadence measurable from an ordinary BZLogger.  Verified against the log
+// clock to the millisecond across sessions on two platforms.
+constexpr uint32_t kBzHdrSendMsOffset   = 2;
+constexpr uint32_t kBzHdrSendMsBytes    = 8;
 
 // ── Window tuning ────────────────────────────────────────────────────────────
 constexpr uint32_t kReorderDefaultMs    = 100;  // window ceiling
@@ -96,14 +144,27 @@ enum DeliverKind {
 
 enum InsertResult {
     kInsertBuffered  = 0,
-    kInsertStale     = 1,   // already superseded; rejected (defect B)
-    kInsertDuplicate = 2,   // same seq already buffered
+    kInsertStale     = 1,   // sequence already delivered; caller must PASS IT THROUGH
+    kInsertDuplicate = 2,   // sequence already buffered; caller must PASS IT THROUGH
     kInsertEvicted   = 3,   // ring full; caller must deliver *evicted_out now
 };
 
+// Defect E (V4.9): kInsertStale and kInsertDuplicate used to mean "drop it".
+// That was safe only under the assumption that the sequence field counts
+// datagrams.  It counts *messages*: the sender stamps its current message
+// number on every datagram it emits, so in the committed capture 45,893 of
+// 46,914 inbound datagrams (97.8%) carry a sequence that has already been
+// delivered.  Dropping them discarded almost all inbound game traffic.
+//
+// Both results now oblige the caller to hand the datagram to the game
+// immediately.  See the health warning on ReorderCtx.
+inline bool reorder_must_pass_through(InsertResult r) {
+    return r == kInsertStale || r == kInsertDuplicate;
+}
+
 struct ReorderSlot {
     uint64_t    ts;                          // arrival time (ms)
-    uint32_t    seq;                         // BZRNet sequence (u16be at payload[16])
+    uint32_t    seq;                         // BZRNet sequence (u32be at payload[10])
     uint32_t    len;                         // payload byte count
     uint32_t    used;                        // 1 = slot occupied
     uint32_t    _pad;
@@ -129,12 +190,16 @@ struct ReorderStats {
     uint64_t delivered_in_order;
     uint64_t delivered_forced;
     uint64_t delivered_evicted;
-    uint64_t dropped_stale;
-    uint64_t dropped_duplicate;
+    uint64_t dropped_stale;         // V4.9: no longer dropped — passed through
+    uint64_t dropped_duplicate;     // V4.9: no longer dropped — passed through
+    uint64_t purged_stale;          // buffered, then destroyed when the cursor
+                                    // passed them — genuinely lost payload,
+                                    // NOT the harmless pass-through above
     uint64_t dropped_reclaim;       // packets lost reclaiming an idle peer
     uint64_t bypass_short;          // too short / not IPv4: passed straight through
     uint64_t bypass_table_full;
     uint64_t emsgsize;              // oversized datagram destroyed by the stack
+    uint64_t truncated;             // caller's buffer too small; WSAEMSGSIZE returned
     uint64_t peers_reclaimed;
     uint64_t hold_ms_sum;
     uint32_t hold_ms_max;
@@ -142,6 +207,26 @@ struct ReorderStats {
     uint64_t hold_hist[kReorderHoldBuckets];
 };
 
+// ── Health warning (V4.9) ────────────────────────────────────────────────────
+// This buffer was built on the premise stated at the top of this file: that
+// Battlezone's receiver discards any datagram whose sequence is not the exact
+// successor of the last accepted one, so holding stragglers in order would
+// recover them.  The V4.9 header derivation disproves the premise.
+//
+// There is no per-datagram sequence number in this protocol.  Offset 10 counts
+// *messages*, and one message routinely spans several datagrams that all carry
+// the identical sequence — 19,572 distinct headers across 46,935 captured
+// datagrams.  A buffer that orders by that field cannot order datagrams, and
+// the game plainly consumes the repeats rather than discarding them.
+//
+// The measurement agrees.  Over 8.1 minutes of live capture there were 28
+// first-arrival inversions in 1,021 message sequences (2.7%), and reordering
+// them would have required an 883 ms hold window — nine times the 100 ms
+// ceiling this code shipped with.  A 100 ms window would have recovered none.
+//
+// BZ_REORDER therefore stays 0, and the proxies log this finding when someone
+// sets it to 1.  The code is kept correct and tested rather than deleted, but
+// it is not a candidate for re-enabling without a new protocol finding.
 struct ReorderCtx {
     // Config (set once from env at startup).
     bool     adapt;
@@ -157,14 +242,14 @@ struct ReorderCtx {
     ReorderStats stats;
 };
 
-// Sequence comparison must wrap in the counter's OWN width, not in 32 bits.
-// The field is 16 bits, so it wraps every 65,536 packets — at the ~100-200
-// packets/sec measured in a live match that is roughly every 6-11 minutes, i.e.
-// at least once in an ordinary game.  Comparing in 32-bit space would read the
-// wrap as a 65,535-packet backward jump and stall the peer for the rest of the
-// match.
+// Sequence comparison must wrap in the counter's OWN width.  The field is
+// 32 bits, so at the ~1,600 messages/min measured in a live match it wraps
+// after roughly five years of continuous play — it will not wrap in a session.
+// The wrap-aware form is kept anyway: it costs one cast, it is correct if the
+// counter is ever reset or resumed mid-session, and getting this wrong in
+// 16-bit space is exactly the bug V4.8 had to fix.
 inline int32_t seq_cmp(uint32_t a, uint32_t b) {
-    return static_cast<int16_t>(static_cast<uint16_t>(a) - static_cast<uint16_t>(b));
+    return static_cast<int32_t>(a - b);
 }
 
 // Successor of a sequence number, wrapping in the field's width.
@@ -181,8 +266,64 @@ inline bool seq_ahead_or_equal(uint32_t seq, uint32_t want) {
 // did their own memcpy, which is how a wrong offset stayed wrong in three
 // places at once.  Caller must have checked len >= kReorderSeqMinPay.
 inline uint32_t reorder_seq_from_payload(const uint8_t *p) {
-    return (static_cast<uint32_t>(p[kReorderSeqOffset]) << 8)
-         |  static_cast<uint32_t>(p[kReorderSeqOffset + 1]);
+    return (static_cast<uint32_t>(p[kReorderSeqOffset]) << 24)
+         | (static_cast<uint32_t>(p[kReorderSeqOffset + 1]) << 16)
+         | (static_cast<uint32_t>(p[kReorderSeqOffset + 2]) << 8)
+         |  static_cast<uint32_t>(p[kReorderSeqOffset + 3]);
+}
+
+// Read the acknowledgement field.  Diagnostics only.
+inline uint32_t reorder_ack_from_payload(const uint8_t *p) {
+    return (static_cast<uint32_t>(p[kReorderAckOffset]) << 24)
+         | (static_cast<uint32_t>(p[kReorderAckOffset + 1]) << 16)
+         | (static_cast<uint32_t>(p[kReorderAckOffset + 2]) << 8)
+         |  static_cast<uint32_t>(p[kReorderAckOffset + 3]);
+}
+
+// True when this datagram was sent on the reliable channel.  See the flag
+// block above for why this is not "is a retransmit".
+inline bool reorder_is_reliable(const uint8_t *p) {
+    return (p[0] & kBzHdrFlagReliable) != 0;
+}
+
+// Deprecated misnomer, kept so the rename is visible rather than silent.
+// Callers wanting "was this datagram resent" cannot get it from the header at
+// all — the only way to know is to have seen the same (peer, seq) before.
+inline bool reorder_is_retransmit(const uint8_t *p) {
+    return reorder_is_reliable(p);
+}
+
+// Sender's wall clock for THIS copy, Unix epoch ms.  Caller must have checked
+// len >= kBzHdrSendMsOffset + kBzHdrSendMsBytes.
+inline uint64_t reorder_send_time_ms(const uint8_t *p) {
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < kBzHdrSendMsBytes; ++i) {
+        v = (v << 8) | static_cast<uint64_t>(p[kBzHdrSendMsOffset + i]);
+    }
+    return v;
+}
+
+// ── Shared with the Windows IOCP path ────────────────────────────────────────
+// The IOCP completion-deferral path in netcode_hooks.cpp made both of these
+// decisions inline, and got the first one wrong: it compared against
+// `pb->last_seq + 1` in 32-bit space long after V4.8 fixed that everywhere
+// else, and there was no test that could have caught it because the logic sat
+// inside a function that needs a live completion port to call.  They live here
+// now so tests/reorder_test.cpp exercises the same code the proxy runs.
+
+// Is `seq` the exact successor of what this peer last delivered?  Wrap-aware.
+inline bool reorder_is_successor(const PeerBuf *pb, uint32_t seq) {
+    return pb != nullptr && pb->seq_init && seq == seq_next(pb->last_seq);
+}
+
+// How long a held packet from this peer may be held.  A peer we have no entry
+// for gets the adaptive floor, and max_hold_ms caps everything.
+inline uint32_t reorder_hold_window(const ReorderCtx *c, const PeerBuf *pb) {
+    uint32_t hold = (pb != nullptr) ? pb->win_ms : c->win_min_ms;
+    if (c->max_hold_ms != 0 && hold > c->max_hold_ms) {
+        hold = c->max_hold_ms;
+    }
+    return hold;
 }
 
 inline void reorder_init(ReorderCtx *c) {
@@ -373,7 +514,12 @@ inline void reorder_purge_stale(ReorderCtx *c, PeerBuf *pb) {
             if (pb->filled > 0) {
                 --pb->filled;
             }
-            c->stats.dropped_stale++;
+            // Purged, not passed through: this datagram was buffered and is
+            // now destroyed without ever reaching the game.  Under the
+            // message-counter reality (equal sequences are distinct payload)
+            // that is real loss, so it must not hide in the pass-through
+            // counter.
+            c->stats.purged_stale++;
         }
     }
 }
@@ -421,9 +567,14 @@ inline void reorder_note_delivery(ReorderCtx *c, PeerBuf *pb, uint32_t seq,
 
 // Insert a received packet.
 //
-// Defect B: packets the game has already moved past are rejected outright.
-// Buffering them wasted a scarce slot, delivered them out of order anyway, and
-// dragged the peer cursor backwards.
+// Defect B: packets whose sequence the game has already moved past are not
+// buffered.  Buffering them wasted a scarce slot, delivered them out of order
+// anyway, and dragged the peer cursor backwards.
+//
+// Defect E (V4.9): "not buffered" must not mean "dropped".  kInsertStale and
+// kInsertDuplicate oblige the caller to deliver the datagram immediately —
+// see reorder_must_pass_through().  Under the message-counter reality of this
+// protocol that is the overwhelming majority of traffic.
 //
 // Defect A: when the ring is full the oldest packet is *returned to the caller*
 // via evicted_out for immediate delivery, never discarded.  Losing ordering on
@@ -604,8 +755,8 @@ inline int reorder_format_stats(const ReorderCtx *c, char *buf, size_t n) {
 
     int p = std::snprintf(buf, n,
         "reorder_stats: delivered=%llu (in_order=%llu forced=%llu evicted=%llu first=%llu)"
-        " dropped(stale=%llu dup=%llu reclaim=%llu) bypass(short=%llu tblfull=%llu)"
-        " emsgsize=%llu peers_reclaimed=%llu drain_max=%u"
+        " passthrough(stale=%llu dup=%llu) dropped(reclaim=%llu purged=%llu) bypass(short=%llu tblfull=%llu)"
+        " emsgsize=%llu truncated=%llu peers_reclaimed=%llu drain_max=%u"
         " hold_ms(avg=%u max=%u) hist[0,1-5,6-15,16-30,31-60,61+]=[%llu,%llu,%llu,%llu,%llu,%llu]",
         static_cast<unsigned long long>(delivered),
         static_cast<unsigned long long>(s.delivered_in_order),
@@ -615,9 +766,11 @@ inline int reorder_format_stats(const ReorderCtx *c, char *buf, size_t n) {
         static_cast<unsigned long long>(s.dropped_stale),
         static_cast<unsigned long long>(s.dropped_duplicate),
         static_cast<unsigned long long>(s.dropped_reclaim),
+        static_cast<unsigned long long>(s.purged_stale),
         static_cast<unsigned long long>(s.bypass_short),
         static_cast<unsigned long long>(s.bypass_table_full),
         static_cast<unsigned long long>(s.emsgsize),
+        static_cast<unsigned long long>(s.truncated),
         static_cast<unsigned long long>(s.peers_reclaimed),
         static_cast<unsigned>(s.max_drain_depth),
         avg, static_cast<unsigned>(s.hold_ms_max),

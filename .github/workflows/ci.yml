@@ -1,0 +1,162 @@
+# CI for the Battlezone netcode patch.
+#
+# There was none until V4.9, and the cost of that is on record: the installer
+# hash incident of 2026-07-26 shipped a pin that rejected the very binary this
+# repo serves. tools/check_prebuilt_pins.sh was written afterwards, and its own
+# header laments that "nothing could have caught" it — which stayed true,
+# because nothing ran it. This runs it on every push.
+#
+# What this covers:
+#   * both proxies cross-build for 32-bit Windows (they are shipped as 32-bit
+#     DLLs and nothing else ever compiled them automatically)
+#   * the host test suite, at 64-bit AND 32-bit — host tests were 64-bit only
+#     while the shipped DLLs are 32-bit, so the shipped ABI was never exercised
+#   * the prebuilt pins, against the binaries actually committed
+#   * the Python tools import and run against the committed sample data
+#   * shell and PowerShell syntax
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-proxies:
+    name: Cross-build both proxies (32-bit mingw)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-i686 binutils-mingw-w64-i686
+      - name: Build the Linux (Proton) dsound proxy
+        run: make -C Linux/proton_dsound_proxy
+      - name: Build the Windows winmm proxy
+        run: make -C Microslop/winmm_proxy
+      - name: The build id must be stamped into both binaries
+        run: |
+          set -euo pipefail
+          for dll in Linux/proton_dsound_proxy/build/dsound.dll \
+                     Microslop/winmm_proxy/build/winmm.dll; do
+            if ! strings "$dll" | grep -q 'V4\.9'; then
+              echo "::error::$dll carries no BZ_BUILD_ID stamp"
+              exit 1
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: proxies
+          path: |
+            Linux/proton_dsound_proxy/build/dsound.dll
+            Microslop/winmm_proxy/build/winmm.dll
+
+  tests:
+    name: Host tests (${{ matrix.bits }}-bit)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bits: '64'
+            cxxflags: '-std=c++14 -O1 -g -Wall -Wextra -Wno-unused-parameter'
+          # The shipped DLLs are 32-bit. Running the suite at -m32 as well is
+          # what keeps a pointer-width or packing assumption from passing CI
+          # and failing in the only build anyone actually installs.
+          - bits: '32'
+            cxxflags: '-m32 -std=c++14 -O1 -g -Wall -Wextra -Wno-unused-parameter'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install 32-bit toolchain
+        if: matrix.bits == '32'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+      - name: Run the suite
+        run: make -C tests run CXXFLAGS="${{ matrix.cxxflags }}"
+
+  pins:
+    name: Prebuilt pin check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tools/check_prebuilt_pins.sh
+
+  tools:
+    name: Python tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile every tool
+        run: python3 -m compileall -q tools buffer-logging
+      - name: Each tool runs and reports its own usage
+        run: |
+          set -euo pipefail
+          python3 tools/analyze_drops.py --help > /dev/null
+          python3 tools/seq_crossmatch.py --help > /dev/null
+          python3 buffer-logging/decode_buffer_log.py --help > /dev/null
+      - name: The record layout in C++ matches the decoder's struct
+        run: python3 tools/check_record_layout.py
+      - name: The analyzers survive the committed fixture and any local logs
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Raw session logs are gitignored (they held real peer IPs), so CI
+          # exercises a committed synthetic fixture: torn lines, a crash-cut
+          # odd-length hex payload, both bandwidth formats.
+          python3 tools/analyze_drops.py tests/fixtures/sample_bzlogger.txt > /dev/null
+          # seq_crossmatch exits 1 legitimately when a log carries no ground
+          # truth; what it must never do is throw. A traceback also exits 1,
+          # so tell them apart by looking for one.
+          out="$(python3 tools/seq_crossmatch.py tests/fixtures/sample_bzlogger.txt 2>&1)" || true
+          if grep -q 'Traceback' <<< "$out"; then
+            echo "seq_crossmatch crashed:"; echo "$out"; exit 1
+          fi
+          # Local checkouts may hold real (ignored) logs; cover them when present.
+          for f in test-logs/*.txt test-logs/*.log; do
+            python3 tools/analyze_drops.py "$f" > /dev/null
+          done
+      # These are the declared verifies of the analyze_drops fixes. A task's
+      # verify that CI never executes is how these defects shipped green, so
+      # each one runs here explicitly (mesh counting, then proxy pairing).
+      - name: analyze_drops mesh counting test
+        run: python3 tests/analyze_drops_mesh_test.py
+      - name: analyze_drops proxy pairing test
+        run: python3 tests/analyze_drops_pairing_test.py
+
+  scripts:
+    name: Shell and PowerShell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n every script
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            bash -n "$f" || { echo "::error file=$f::syntax error"; fail=1; }
+          done < <(find . -name '*.sh' -not -path './.git/*' -print0)
+          exit $fail
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $fail = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              Write-Host "::error file=$($_.FullName)::$($errors[0].Message)"
+              $fail = 1
+            }
+          }
+          exit $fail

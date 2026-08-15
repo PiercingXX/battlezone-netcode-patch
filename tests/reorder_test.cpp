@@ -75,6 +75,7 @@ struct Sim {
     uint32_t              drain_cap = kReorderDrainCapDef;
     std::deque<WirePkt>   wire;      // datagrams queued in the "kernel socket"
     std::vector<Delivered> out;      // datagrams handed to the game
+    std::vector<Delivered> passed_through;  // of those, ones the buffer declined
 
     Sim() {
         reorder_init(&ctx);
@@ -103,11 +104,14 @@ struct Sim {
 
             const sockaddr_in from = peer_addr(w.peer);
             std::memset(buf, 0, sizeof(buf));
-            // Write the sequence exactly as the wire carries it: u16 big-endian.
-            // This used to memcpy a host-order u32, which silently agreed with
-            // whatever the header said and so could never catch a wrong field.
-            buf[kReorderSeqOffset]     = static_cast<uint8_t>((w.seq >> 8) & 0xff);
-            buf[kReorderSeqOffset + 1] = static_cast<uint8_t>(w.seq & 0xff);
+            // Write the sequence exactly as the wire carries it: u32 big-endian
+            // at offset 10.  This used to memcpy a host-order u32, which
+            // silently agreed with whatever the header said and so could never
+            // catch a wrong field.
+            buf[kReorderSeqOffset]     = static_cast<uint8_t>((w.seq >> 24) & 0xff);
+            buf[kReorderSeqOffset + 1] = static_cast<uint8_t>((w.seq >> 16) & 0xff);
+            buf[kReorderSeqOffset + 2] = static_cast<uint8_t>((w.seq >> 8) & 0xff);
+            buf[kReorderSeqOffset + 3] = static_cast<uint8_t>(w.seq & 0xff);
 
             // Read it back out the way the proxies do, so the wire encoding is
             // on the tested path rather than bypassed by handing w.seq along.
@@ -129,6 +133,15 @@ struct Sim {
             if (r == kInsertEvicted) {
                 reorder_note_delivery(&ctx, pb, evicted.seq, evicted.ts, now, kDeliverEvicted);
                 out.push_back(Delivered{w.peer, evicted.seq});
+                return true;
+            }
+            if (reorder_must_pass_through(r)) {
+                // Defect E: a sequence we have already delivered is ordinary
+                // payload under this protocol, not a duplicate to discard.
+                // The proxies hand it to the game; so must the simulation, or
+                // the tests cannot see the data loss the old code caused.
+                passed_through.push_back(Delivered{w.peer, seq});
+                out.push_back(Delivered{w.peer, seq});
                 return true;
             }
         }
@@ -270,7 +283,8 @@ void test_burst_loses_nothing() {
     const uint64_t accounted = s.delivered_total()
                              + s.buffered_total()
                              + s.ctx.stats.dropped_stale
-                             + s.ctx.stats.dropped_duplicate;
+                             + s.ctx.stats.dropped_duplicate
+                             + s.ctx.stats.purged_stale;
     CHECK_EQ(accounted, 200u);
     CHECK_EQ(s.out.size(), 200u);
     CHECK(ascending_for(s, 0));
@@ -327,10 +341,12 @@ void test_window_decays_quickly() {
     CHECK_EQ(s.win_of(0), kReorderMinMsDef);
 }
 
-// Defect B regression.  Replayed old sequences must be rejected at insert, must
-// not consume ring slots, and must never drag the peer cursor backwards.
+// Defect B regression, amended by defect E (V4.9).  Replayed old sequences must
+// not be buffered and must never drag the peer cursor backwards — but they must
+// still reach the game.  Before V4.9 this test asserted they were *dropped*,
+// which is what made a 98%-data-loss bug look like correct behaviour.
 void test_stale_flood_rejected() {
-    begin("replayed old sequences are rejected, cursor never regresses (defect B)");
+    begin("replayed old sequences bypass the buffer, cursor never regresses (defects B+E)");
     Sim s;
     for (uint32_t seq = 1; seq <= 100; ++seq) {
         s.send(0, seq);
@@ -346,15 +362,15 @@ void test_stale_flood_rejected() {
     }
 
     CHECK_EQ(s.ctx.stats.dropped_stale, 50u);
-    CHECK_EQ(s.out.size(), delivered_before);    // nothing stale reached the game
+    CHECK_EQ(s.passed_through.size(), 50u);      // every one reached the game
+    CHECK_EQ(s.out.size(), delivered_before + 50);
     CHECK_EQ(s.buffered_total(), 0u);            // no slots wasted on them
 
     // Cursor still at 100, so the next real packet is accepted in order.
     s.send(0, 101);
     s.pump();
-    CHECK_EQ(s.out.size(), delivered_before + 1);
+    CHECK_EQ(s.out.size(), delivered_before + 51);
     CHECK_EQ(s.out.back().seq, 101u);
-    CHECK(ascending_for(s, 0));
 }
 
 // Defect G regression.  In a mesh, one busy peer must not starve the others:
@@ -442,9 +458,12 @@ void test_max_hold_ceiling() {
     CHECK_LE(s.ctx.stats.hold_ms_max, 30u);
 }
 
-// Exact duplicates of buffered packets are dropped, not delivered twice.
-void test_duplicate_dropped() {
-    begin("duplicate sequences are dropped once buffered");
+// A second datagram carrying a sequence already sitting in the ring is not
+// buffered twice — one slot per sequence.  Defect E: it is still delivered.
+// Under a message counter the second datagram is a different datagram with the
+// same header, so discarding it discards payload.
+void test_duplicate_not_buffered_twice() {
+    begin("a repeated sequence takes one slot but is still delivered");
     Sim s;
     s.send(0, 1);
     s.pump();
@@ -452,23 +471,76 @@ void test_duplicate_dropped() {
     s.send(0, 3);
     s.pump();
     CHECK_EQ(s.ctx.stats.dropped_duplicate, 1u);
+    CHECK_EQ(s.passed_through.size(), 1u);
+    CHECK_EQ(s.buffered_total(), 1u);      // seq 3 occupies exactly one slot
     s.advance(kReorderDefaultMs * 2);
     s.pump();
-    CHECK_EQ(s.out.size(), 2u);
+    CHECK_EQ(s.out.size(), 3u);            // 1, the pass-through copy, then 3
+}
+
+// ── The Windows IOCP deferral path (defect D, V4.9) ──────────────────────────
+// That path never ran on real Windows and had no test at all, which is how it
+// kept comparing `seq == last_seq + 1` in 32-bit space through V4.8's fix and
+// into V4.9. The two decisions it makes now live in reorder_core.h, so the
+// same code the proxy runs is exercised here.
+void test_iocp_successor_wraps() {
+    begin("IOCP successor test wraps (defect D)");
+    ReorderCtx c;
+    reorder_init(&c);
+    PeerBuf pb;
+    std::memset(&pb, 0, sizeof(pb));
+    pb.seq_init = 1;
+
+    pb.last_seq = 100;
+    CHECK(reorder_is_successor(&pb, 101));
+    CHECK(!reorder_is_successor(&pb, 102));
+    CHECK(!reorder_is_successor(&pb, 100));
+
+    // The case the 32-bit `+ 1` got wrong: at the top of the field the
+    // successor is 0, and `last_seq + 1` overflows to exactly that only
+    // because the field happens to be 32 bits wide. Pin it so a narrower
+    // field would fail here rather than in a live match.
+    pb.last_seq = kReorderSeqMask;
+    CHECK(reorder_is_successor(&pb, 0));
+    CHECK(!reorder_is_successor(&pb, 1));
+
+    // No peer entry, or a peer with no sequence yet: never a successor.
+    CHECK(!reorder_is_successor(nullptr, 1));
+    pb.seq_init = 0;
+    CHECK(!reorder_is_successor(&pb, 1));
+}
+
+void test_iocp_hold_window() {
+    begin("IOCP hold window honours the per-peer window and the hard ceiling");
+    ReorderCtx c;
+    reorder_init(&c);
+    c.win_min_ms = 5;
+    c.max_hold_ms = 0;               // no ceiling
+    PeerBuf pb;
+    std::memset(&pb, 0, sizeof(pb));
+    pb.win_ms = 60;
+
+    CHECK_EQ(reorder_hold_window(&c, &pb), 60u);
+    CHECK_EQ(reorder_hold_window(&c, nullptr), 5u);   // unknown peer -> floor
+
+    c.max_hold_ms = 20;              // ceiling bites
+    CHECK_EQ(reorder_hold_window(&c, &pb), 20u);
+    pb.win_ms = 10;                  // ...but never raises a smaller window
+    CHECK_EQ(reorder_hold_window(&c, &pb), 10u);
 }
 
 }  // namespace
 
-// The sequence field is 16 bits, so it wraps every 65,536 packets — at the
-// 100-200 packets/sec measured live that is every 6-11 minutes, i.e. at least
-// once in an ordinary match.  Comparing in 32-bit space reads 0xffff -> 0x0000
-// as a 65,535-packet *backward* jump, rejects everything after it as stale, and
-// stalls the peer for the rest of the game.
+// The sequence field is 32 bits (V4.9), so it will not wrap inside a session —
+// at the ~1,600 messages/min measured live that is roughly five years of
+// continuous play.  The wrap must still be handled: comparing without wrap
+// arithmetic reads 0xffffffff -> 0x00000000 as a 4-billion-packet *backward*
+// jump, rejects everything after it as stale, and stalls the peer permanently.
 void test_sequence_wrap() {
-    begin("16-bit sequence wrap is not read as a backward jump");
+    begin("32-bit sequence wrap is not read as a backward jump");
     Sim s;
     for (uint32_t i = 0; i < 40; ++i) {
-        s.send(0, (0xffe0 + i) & kReorderSeqMask);
+        s.send(0, (0xffffffe0u + i) & kReorderSeqMask);
         s.pump();
         s.advance(10);
     }
@@ -484,14 +556,74 @@ void test_sequence_wrap() {
 void test_reorder_across_wrap() {
     begin("out-of-order arrival straddling the wrap is still reordered");
     Sim s;
-    s.send(0, 0xfffe); s.pump(); s.advance(10);
-    s.send(0, 0x0000); s.pump(); s.advance(5);   // jumped the wrap, gap open
-    s.send(0, 0xffff); s.pump(); s.advance(10);  // straggler fills it
+    s.send(0, 0xfffffffeu); s.pump(); s.advance(10);
+    s.send(0, 0x00000000u); s.pump(); s.advance(5);   // jumped the wrap, gap open
+    s.send(0, 0xffffffffu); s.pump(); s.advance(10);  // straggler fills it
     s.advance(kReorderDefaultMs * 2);
     s.pump();
     CHECK_EQ(s.out.size(), 3u);
     CHECK(ascending_for(s, 0));
     CHECK_EQ(s.ctx.stats.dropped_stale, 0u);
+}
+
+// The wire layout, asserted against the values tools/seq_crossmatch.py derives
+// from BZLogger's own ordinals.  A real captured datagram is decoded here so
+// that changing a constant in reorder_core.h without re-deriving the header
+// fails the build rather than silently mis-reading every packet — which is how
+// the offset stayed wrong from V3 through V4.8.
+void test_wire_layout_matches_capture() {
+    begin("header constants decode a real captured datagram");
+    // From test_bundles/.../BZLogger.txt:
+    //   BZRNet P2P TRY Sent Packet (705,14710) to 203.0.113.20:34354
+    // c0 0000 0001 9f9fc236ff 000002c1 00003976 ...
+    const uint8_t pkt[20] = {
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x9f, 0x9f, 0xc2, 0x36, 0xff,
+        0x00, 0x00, 0x02, 0xc1,
+        0x00, 0x00, 0x39, 0x76,
+        0x7a, 0x75,
+    };
+    CHECK_EQ(kReorderSeqOffset, 10u);
+    CHECK_EQ(kReorderSeqBytes, 4u);
+    CHECK_EQ(reorder_seq_from_payload(pkt), 705u);
+    CHECK_EQ(reorder_ack_from_payload(pkt), 14710u);
+    // Byte 0 = 0xC0 = reliable | final.  This used to assert "is a retransmit";
+    // the bit means reliable, and the rename is deliberate (see reorder_core.h).
+    CHECK(reorder_is_reliable(pkt));
+    CHECK((pkt[0] & kBzHdrFlagReliable) != 0);
+    CHECK((pkt[0] & kBzHdrFlagFinal) != 0);
+    CHECK_EQ(static_cast<uint32_t>(pkt[kBzHdrKindOffset]), 0u); // gameplay kind
+    // Sender wall clock, epoch ms, stamped fresh on every copy.  This fixture
+    // was captured on 2026-07-26 and the field decodes to 18:48:53.247Z that
+    // day — the layout was validated on the 08-08 captures and this is an
+    // independent confirmation on an older one, different machine, different
+    // platform.  Bytes 5..9 were previously described as "a u40 clock at
+    // offset 5"; they are the low five bytes of this u64.
+    CHECK_EQ(reorder_send_time_ms(pkt), 1785091733247ull);
+    // The V4.8 reading, for the record: u16 BE at offset 16 is the low half of
+    // the ack, which is why it "duplicated" 88.5% of the time.
+    CHECK_EQ(static_cast<uint32_t>((pkt[16] << 8) | pkt[17]), 14710u & 0xffffu);
+}
+
+// Defect E: a datagram whose sequence has already been delivered must reach
+// the game.  Under this protocol the sequence counts messages, not datagrams,
+// so ~98% of real inbound traffic repeats the previous value; the pre-V4.9
+// code dropped every one of them.
+void test_repeated_sequence_is_delivered_not_dropped() {
+    begin("repeated sequence is passed through, not discarded");
+    Sim s;
+    s.send(0, 100); s.pump(); s.advance(5);
+    // Four more datagrams of the same message, as a real sender emits.
+    for (int i = 0; i < 4; ++i) {
+        s.send(0, 100);
+        s.pump();
+        s.advance(5);
+    }
+    s.advance(kReorderDefaultMs * 2);
+    s.pump();
+    // All five datagrams reach the game; four of them bypassed the buffer.
+    CHECK_EQ(s.out.size(), 5u);
+    CHECK_EQ(s.passed_through.size(), 4u);
 }
 
 int main() {
@@ -505,9 +637,13 @@ int main() {
     test_mesh_fairness();
     test_peer_reclaim();
     test_max_hold_ceiling();
-    test_duplicate_dropped();
+    test_duplicate_not_buffered_twice();
     test_sequence_wrap();
     test_reorder_across_wrap();
+    test_wire_layout_matches_capture();
+    test_iocp_successor_wraps();
+    test_iocp_hold_window();
+    test_repeated_sequence_is_delivered_not_dropped();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

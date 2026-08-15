@@ -1,0 +1,12 @@
+2026-07-26 14:41:30.100000 Launching Network Game HostAlpha, Map bltop04.bzn, 4 players
+2026-07-26 14:41:31.000000 Net: Bandwidth usage now set to 16000, Interval 50 ms
+2026-07-26 14:41:32.000000 Net: Bandwidth usage now set to 40000, Interval 48, Actual Used 21250
+2026-07-26 14:41:33.627163 BZRNet P2P TRY Sent Packet (7,10) to 203.0.113.20:34354: c0000000019f9fbb81bb000000070000000a0001
+2026-07-26 14:41:34.100000 BZRNet P2P Sent Packet to 203.0.113.21:17770: c0000000019f9fc0000000080000000b0001
+2026-07-26 14:41:35.000000 Chat Message: TesterTwo is lagging
+2026-07-26 14:41:36.000000 Chat Message: TesterTwo stopped lagging
+garbled-prefixNet: Bandwidth usage now set to 82100, Interval 48, Actual Used 61270
+2026-07-26 14:41:37.000000 Possible Large Warp: Distributed Object Updated Position By (12.5,0.0,9.1)
+2026-07-26 14:41:38.000000 Dropping Packet (Source IP doesn't match any known player)
+2026-07-26 14:41:39.000000 Exiting Game With Return Code 0
+2026-07-26 14:41:40.000000 BZRNet P2P TRY Sent Packet (9,12) to 203.0.113.20:34354: c0000000019f9fd

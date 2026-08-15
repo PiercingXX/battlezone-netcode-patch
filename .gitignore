@@ -12,14 +12,17 @@ build/
 !prebuilt/linux/dsound.dll
 !prebuilt/linux/dsound.dll.sha256
 
-# Test bundles / captured run data
+# Test bundles / captured run data. The retention policy is versioned; the
+# bundles themselves are not.
 test_bundles/
+!test_bundles/README.md
 *.exe
 *.out
-# Host-native test binary (built by `make -C tests run`)
-tests/reorder_test
-tests/net_globals_test
-tests/send_pace_test
+# Host-native test binaries (built by `make -C tests run`). Ignore by SHAPE, not
+# by name: a compiled test is tests/<name>_test with no extension; sources end in
+# .cpp/.h/.py so they're untouched. (Named-list approach let dampen_{epoch,purge,
+# storm}_test slip in one at a time — 2026-08-11.)
+tests/*_test
 # Raw game logs are huge research data - keep analysis .md summaries, not the logs
 test-logs/*BZLogger*.txt
 test-logs/*.log
@@ -31,6 +34,10 @@ new logs/
 *.log
 *.tmp
 *.cache
+# But the committed analyze_drops pairing fixtures are real .log files
+!tests/fixtures/proxy_pair_proxy.log
+!tests/fixtures/proxy_pair_match_proxy.log
+!tests/fixtures/proxy_pair_single_proxy.log
 
 # Shell/PowerShell transient outputs
 *.stackdump
@@ -44,3 +51,12 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Python bytecode from compileall in CI
+__pycache__/
+*.pyc
+
+# Skippy runtime bookkeeping — never tracked
+.skippy/
+tests/send_dampen_test
+tests/dampen_epoch_test

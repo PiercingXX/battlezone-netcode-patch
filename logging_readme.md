@@ -49,6 +49,15 @@ Linux note: Proton logs are copied with a 64 MB cap per log by default. To skip 
 - Game logs and proxy logs.
 - Route/path diagnostics and interface counters.
 - Crash data (Windows dumps when `procdump.exe` is installed).
+
+> **The everyday path is now `upload/bz_wrap.sh`**, a launch-option wrapper that
+> bundles and uploads a session automatically on every exit — including a crash.
+> See [upload/README.md](upload/README.md). `tester_diag` remains the
+> deep-capture path when you need mtr timelines, socket timelines and dumps.
+>
+> Note what `tester_diag start` now tells you up front: whether a crash on this
+> machine would actually produce a dump. Both hard stops in this repo produced
+> none, and nobody found out until the bundle was opened days later.
 - Baseline ping timeline and peer candidate inference from socket metadata.
 - Linux Proton logs are included but capped to 64 MB per `steam-*.log` by default.
 

@@ -45,12 +45,12 @@ irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master
 ```
 
 Do not wrap either of these in `powershell -NoProfile -ExecutionPolicy Bypass
--Command "..."`. Pasted into PowerShell rather than Command Prompt, the outer
-shell expands every `$env:` inside the double quotes before the child shell
-sees it, so the variables arrive empty — the explicit-path form then reduces
-to a bare `='...'` and fails to parse. The ref is baked into each branch's
-copy of the script, so running it plain installs the branch you fetched it
-from.
+-Command "..."`. That wrapper was retired: pasted into PowerShell rather than
+Command Prompt, the outer shell expands every `$env:` inside the double quotes
+before the child shell ever sees it, so the variables arrive empty and the
+remaining `='...'` is a syntax error. The ref is baked into each branch's copy
+of the script, so fetching it from a branch and running it plain installs that
+branch with no `$env:` prefix needed.
 
 Windows installs the known-good `winmm.dll` from this repo and verifies SHA256 before deploy. No Steam launch option changes are required.
 
@@ -59,3 +59,19 @@ The expected hash is read from `prebuilt/windows/winmm.dll.sha256` at run time r
 ```powershell
 $env:BZNET_WINMM_SHA256='<64 hex>'
 ```
+## Uninstalling
+
+```bash
+# Linux
+./install/uninstall_linux.sh                 # add --purge-logs to delete captures too
+
+# Windows
+powershell -ExecutionPolicy Bypass -File install\uninstall_windows.ps1
+```
+
+Removes the proxy DLL and the `net.ini` tuning mod, and offers to remove
+`/etc/sysctl.d/99-battlezone-netcode.conf` on Linux. Logs and captures are
+**kept** unless you pass `--purge-logs` / `-PurgeLogs` — they are research data,
+and an uninstaller should not quietly delete someone's session logs.
+
+Neither script can clear your Steam launch options; do that by hand.

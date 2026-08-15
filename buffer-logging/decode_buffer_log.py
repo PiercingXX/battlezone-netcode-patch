@@ -17,12 +17,34 @@ decoder's first job is to say which route the game actually uses:
   * `WSARecvFrom` records but still no reorder_stats -> the receives are
     overlapped (IOCP), and only the BZ_IOCP_REORDER path can help.
 
-Its second job is to size the thing.  `--seq-scan` finds the sequence field in
-the payload prefix by scoring every byte offset for per-peer monotonicity, which
-independently checks the proxy's hardcoded `seq_offset`.  With an offset known,
-the per-peer reorder report measures how *late* an out-of-order packet actually
-was — the number `BZ_REORDER_MAX_HOLD_MS` should be set from, rather than the
-current guessed 100 ms.
+Its second job is to measure delivery.  That needs the BZ P2P header, which as
+of V4.9 is known exactly rather than guessed — `tools/seq_crossmatch.py` derives
+it from BZLogger's own logged ordinals and matches 100% of 65,860 samples:
+
+    offset  size  field
+      0       1   flags   0x40 base, |0x80 = TRY (this datagram is a retransmit)
+      1       1   class   0x00 game data, 0x02 master-server probe,
+                          0x03 CON/connect, 0x04, 0x05, 0x06, 0x07 control
+      2       3   0x000001  protocol version
+      5       5   u40 BE millisecond clock (verified against wall time)
+     10       4   u32 BE  SEQUENCE - the sender's own message counter
+     14       4   u32 BE  ACK      - highest sequence seen from the peer
+     18      ..   body
+
+Two consequences that invalidate every delivery number published before V4.9:
+
+  * V4.8 measured "loss" and "duplication" at offset 16 u16 BE.  That is the
+    low half of the ACK field.  An acknowledgement repeats by design, which is
+    the entire explanation for its "88.5% duplicate rate".
+  * The SEQUENCE field is a *message* counter, not a per-datagram counter.  It
+    is stamped on every datagram the sender emits, so one sequence value
+    legitimately appears on dozens of datagrams.  Counting repeats as network
+    duplicates is meaningless; this decoder reports them as `advert` and
+    measures delivery over distinct sequence values instead.
+
+`--seq-scan` remains for reverse-engineering an unknown build, but it is a
+weak instrument — monotonicity scoring cannot tell a sequence from an ack, and
+it picked the wrong field twice.  Prefer seq_crossmatch.py.
 
 Record layout is `BufferLogRecordHeader` in the proxy sources, `#pragma pack(1)`:
 52-byte header followed by `payload_bytes` of payload prefix.  The stride comes
@@ -31,8 +53,8 @@ scanning for the record magic.
 
 Usage:
   decode_buffer_log.py BINFILE [--meta META] [--sid N] [--seq-scan]
-                               [--seq-offset N --seq-width {2,4} --seq-endian {le,be}]
-                               [--limit N] [--dump N]
+                               [--seq-offset N --seq-width {1,2,4} --seq-endian {le,be}]
+                               [--class HEX] [--limit N] [--dump N]
 """
 import argparse
 import struct
@@ -42,6 +64,25 @@ from collections import Counter, defaultdict
 MAGIC = 0x474C5A42          # 'BZLG'
 HDR = struct.Struct('<IIIIQIIIIIHHHH')
 HDR_SIZE = HDR.size          # 52
+
+# The BZ P2P header, settled by tools/seq_crossmatch.py (V4.9).
+BZ_FLAG_OFF = 0
+BZ_CLASS_OFF = 1
+BZ_CLOCK_OFF, BZ_CLOCK_WIDTH = 5, 5
+BZ_SEQ_OFF, BZ_SEQ_WIDTH, BZ_SEQ_ENDIAN = 10, 4, 'be'
+BZ_ACK_OFF, BZ_ACK_WIDTH = 14, 4
+BZ_HEADER_BYTES = 18         # smallest payload that carries a full header
+BZ_FLAG_TRY = 0x80           # this datagram is a retransmit
+
+CLASS_NAMES = {
+    0x00: 'game data',
+    0x02: 'master probe',
+    0x03: 'CON/connect',
+    0x04: 'control',
+    0x05: 'control',
+    0x06: 'control',
+    0x07: 'control',
+}
 
 EVENT_NAMES = {
     1: 'recvfrom',           # synchronous; NO reorder path in this hook
@@ -59,8 +100,8 @@ FIONBIO = 0x8004667E         # ioctlsocket opcode that sets non-blocking mode
 def read_meta(path):
     """Parse bz_buffer_log.meta.txt into a dict.
 
-    The Linux proxy writes literal backslash-r-n instead of real CRLF (a
-    escaping bug in dsound_proxy.cpp), so split on both.
+    Older Linux proxies wrote literal backslash-r-n instead of real CRLF, so
+    split on both.
     """
     try:
         with open(path, errors='replace') as fh:
@@ -130,11 +171,22 @@ def read_field(buf, off, width, endian):
     return int.from_bytes(raw, 'little' if endian == 'le' else 'big')
 
 
+def bz_class(payload):
+    """(flags, class) of a datagram, or None if it is too short to have a header."""
+    if len(payload) < BZ_HEADER_BYTES:
+        return None
+    return payload[BZ_FLAG_OFF], payload[BZ_CLASS_OFF]
+
+
 def score_offset(by_peer, off, width, endian):
     """Fraction of consecutive same-peer packets whose field steps forward a little.
 
     A real sequence counter advances by a small positive amount almost every
     packet.  Length fields, checksums and timestamps do not.
+
+    This heuristic is retained only for reverse-engineering an unknown build.
+    It cannot distinguish a sequence from an acknowledgement, and it chose the
+    wrong field in both V3 and V4.8.  seq_crossmatch.py is the authority.
     """
     good = total = 0
     for pkts in by_peer.values():
@@ -153,7 +205,8 @@ def score_offset(by_peer, off, width, endian):
 
 
 def seq_scan(by_peer, payload_bytes):
-    print("  sequence-field scan (higher score = looks more like a counter)")
+    print("  sequence-field scan (heuristic — see tools/seq_crossmatch.py for the")
+    print("  ground-truth derivation; this scan picked the wrong field twice)")
     results = []
     for width in (2, 4):
         for endian in ('le', 'be'):
@@ -168,93 +221,84 @@ def seq_scan(by_peer, payload_bytes):
     for s, off, width, endian, n in results[:8]:
         print(f"    offset={off:<3} width={width} {endian}  score={s:.3f}  ({n} pairs)")
     best = results[0]
-    print(f"  -> best guess: seq_offset={best[1]} width={best[2]} endian={best[3]} "
-          f"(proxy currently hardcodes seq_offset=13)")
+    print(f"    best heuristic guess: offset={best[1]} width={best[2]} endian={best[3]}")
+    print(f"    known-good answer:    offset={BZ_SEQ_OFF} width={BZ_SEQ_WIDTH} "
+          f"endian={BZ_SEQ_ENDIAN}")
+    if (best[1], best[2], best[3]) != (BZ_SEQ_OFF, BZ_SEQ_WIDTH, BZ_SEQ_ENDIAN):
+        print("    -> they disagree, as expected; trust the known-good answer")
     return best
 
 
-def reorder_report(by_peer, off, width, endian):
-    """Classify arrivals and measure how late the out-of-order ones were.
+def delivery_report(by_peer, off, width, endian, class_filter=None):
+    """Measure delivery over the sender's message sequence.
 
-    `late_ms` is measured from the moment the gap *opened* — the arrival of the
-    packet that skipped over this sequence number — to the straggler finally
-    showing up.  That interval is exactly how long a reorder buffer would have
-    had to hold the stream to put it back in order, so it is the number
-    BZ_REORDER_MAX_HOLD_MS should be set from.
+    The sequence is a *message* counter stamped on every datagram, so the unit
+    of analysis is the distinct sequence value, not the datagram:
 
-    Measuring instead from the last packet seen would understate it badly: on a
-    stream sending every 20 ms, a straggler 200 ms late still arrives within
-    20 ms of *some* packet.
+      delivered   distinct sequence values observed
+      missing     values inside the observed span that never appeared at all
+      advert      datagrams re-advertising a sequence already seen; this is
+                  normal protocol behaviour, not network duplication
+      inversion   a sequence first observed after a higher one already was —
+                  the only thing a reorder buffer could ever have fixed
+
+    `missing` is an upper bound on loss, not a loss rate: a sequence value is
+    only observable while it is the sender's *current* message, so a value that
+    advanced between two captured datagrams is indistinguishable from one that
+    was lost.  A wrapped ring inflates it further.
     """
-    print(f"  reorder analysis @ offset={off} width={width} {endian}")
-    modulus = 1 << (width * 8)
-    half = modulus // 2
-    all_late = []
-    never_arrived = 0
+    print(f"  delivery analysis @ seq offset={off} width={width} {endian}"
+          + (f"  (class 0x{class_filter:02x} only)" if class_filter is not None else ""))
+    grand_inv = []
     for peer, pkts in sorted(by_peer.items(), key=lambda kv: -len(kv[1])):
-        highest = None            # highest seq seen so far
-        in_order = dup = ooo = jump = 0
-        late = []
-        missing = {}              # seq -> tick at which the gap opened
-        seen = set()
+        if class_filter is not None:
+            pkts = [p for p in pkts
+                    if bz_class(p['payload']) and bz_class(p['payload'])[1] == class_filter]
+        first, order = {}, []
         for p in pkts:
             v = read_field(p['payload'], off, width, endian)
             if v is None:
                 continue
-            if highest is None:
-                highest = v
-                in_order += 1
-                seen.add(v)
-                continue
-            # Signed delta, wrap-aware.
-            d = ((v - highest + half) % modulus) - half
-            if d == 1:
-                in_order += 1
-            elif d <= 0:
-                if v in missing:
-                    ooo += 1
-                    late.append(p['tick'] - missing.pop(v))
-                elif v in seen:
-                    dup += 1
-                else:
-                    ooo += 1      # older than anything tracked; lateness unknown
-            else:
-                # Forward jump: every sequence it skipped is now a gap that a
-                # reorder buffer would be holding the stream open for.
-                jump += 1
-                for miss in range(1, min(d, 4096)):
-                    missing.setdefault((highest + miss) % modulus, p['tick'])
-            if d > 0:
-                highest = v
-            seen.add(v)
-        tot = in_order + dup + ooo + jump
-        if tot < 10:
+            if v not in first:
+                first[v] = p['tick']
+                order.append(v)
+        if len(first) < 10:
             continue
-        all_late.extend(late)
-        never_arrived += len(missing)
-        pct = lambda x: 100.0 * x / tot
-        print(f"    {peer:<22} n={tot:<7} in_order={pct(in_order):5.1f}%  "
-              f"fwd_gap={pct(jump):5.1f}%  out_of_order={pct(ooo):5.1f}%  dup={pct(dup):5.1f}%")
-        if late:
-            late.sort()
-            print(f"      {'':20} straggler lateness ms: med={late[len(late)//2]} "
-                  f"p90={late[int(len(late)*0.9)]} p99={late[int(len(late)*0.99)]} max={late[-1]}")
-        if missing:
-            print(f"      {'':20} {len(missing)} sequence numbers never arrived "
-                  f"(genuine loss — no buffer recovers these)")
-    if all_late:
-        all_late.sort()
-        n = len(all_late)
-        p95 = all_late[int(n * 0.95)]
-        print(f"\n  ALL PEERS: {n} recoverable out-of-order arrivals, lateness "
-              f"med={all_late[n//2]}ms p95={p95}ms p99={all_late[int(n*0.99)]}ms max={all_late[-1]}ms")
-        print(f"  -> a hold window of {p95} ms would reorder 95% of them; "
-              f"BZ_REORDER_MAX_HOLD_MS is currently 100")
-        if never_arrived:
-            print(f"  -> {never_arrived} sequence numbers never arrived at all: that share is "
-                  f"loss, not reordering, and no hold window recovers it")
+        lo, hi = min(first), max(first)
+        span = hi - lo + 1
+        missing = span - len(first)
+        advert = len(pkts) - len(first)
+        # An inversion is a first sighting below the running high-water mark.
+        inversions, peak, lateness = 0, order[0], []
+        for v in order:
+            if v < peak:
+                inversions += 1
+                lateness.append(first[v] - first[peak])
+            peak = max(peak, v)
+        grand_inv.extend(lateness)
+        # A peer we barely captured looks catastrophically lossy for the same
+        # reason a two-frame video looks like a slideshow.  Say so.
+        thin = ' [thin sample — treat as unmeasured]' if len(pkts) < 100 else ''
+        print(f"    {peer:<22} datagrams={len(pkts):<7} sequences={len(first)} "
+              f"(span {lo}..{hi}){thin}")
+        print(f"      {'':20} missing={missing} ({100.0 * missing / span:.2f}% of span)  "
+              f"inversions={inversions} ({100.0 * inversions / max(len(order), 1):.2f}%)  "
+              f"advert={advert} ({100.0 * advert / max(len(pkts), 1):.1f}% of datagrams)")
+        if lateness:
+            lateness.sort()
+            print(f"      {'':20} inversion lateness ms: "
+                  f"med={lateness[len(lateness) // 2]} "
+                  f"p95={lateness[int(len(lateness) * 0.95)]} max={lateness[-1]}")
+    if grand_inv:
+        grand_inv.sort()
+        n = len(grand_inv)
+        p95 = grand_inv[int(n * 0.95)]
+        print(f"\n  ALL PEERS: {n} inversions, lateness med={grand_inv[n // 2]}ms "
+              f"p95={p95}ms max={grand_inv[-1]}ms")
+        print(f"  -> reordering these would need a {p95} ms hold window; "
+              f"BZ_REORDER_MAX_HOLD_MS was 100 when the buffer was retired")
     else:
-        print("\n  no out-of-order arrivals seen — nothing for the reorder buffer to fix")
+        print("\n  no inversions seen — nothing for a reorder buffer to fix")
 
 
 def main():
@@ -263,13 +307,18 @@ def main():
     ap.add_argument('binfile')
     ap.add_argument('--meta', default=None, help='bz_buffer_log.meta.txt (default: alongside binfile)')
     ap.add_argument('--sid', type=int, default=None, help='restrict to one socket id')
-    ap.add_argument('--seq-scan', action='store_true', help='search for the sequence field')
-    ap.add_argument('--seq-offset', type=int, default=None)
-    ap.add_argument('--seq-width', type=int, choices=(2, 4), default=4)
-    ap.add_argument('--seq-endian', choices=('le', 'be'), default='le')
+    ap.add_argument('--seq-scan', action='store_true',
+                    help='heuristic search for the sequence field (prefer seq_crossmatch.py)')
+    ap.add_argument('--seq-offset', type=int, default=BZ_SEQ_OFF)
+    ap.add_argument('--seq-width', type=int, choices=(1, 2, 4), default=BZ_SEQ_WIDTH)
+    ap.add_argument('--seq-endian', choices=('le', 'be'), default=BZ_SEQ_ENDIAN)
+    ap.add_argument('--class', dest='cls', default=None,
+                    help='restrict delivery analysis to one packet class, e.g. 0x00')
     ap.add_argument('--limit', type=int, default=0, help='stop after N records')
     ap.add_argument('--dump', type=int, default=0, help='hex-dump the first N records')
     args = ap.parse_args()
+
+    class_filter = int(args.cls, 0) if args.cls is not None else None
 
     try:
         with open(args.binfile, 'rb') as fh:
@@ -294,12 +343,21 @@ def main():
     print(f"{args.binfile}")
     print(f"  stride={stride} ({how})  payload_prefix={payload_bytes}B  "
           f"records={len(recs)}  unreadable={bad}")
+    if payload_bytes < BZ_HEADER_BYTES:
+        print(f"  WARNING: payload prefix is {payload_bytes}B but the BZ header is "
+              f"{BZ_HEADER_BYTES}B — re-capture with BZ_BUFFER_LOG_BYTES>={BZ_HEADER_BYTES}")
     if meta:
         seen = meta.get('total_events_seen')
         wrote = meta.get('records_written')
         if seen and wrote and seen != wrote:
-            print(f"  ring wrapped: {seen} events seen, only the last {wrote} kept "
-                  f"(raise BZ_BUFFER_LOG_RING)")
+            try:
+                lost = 100.0 * (int(seen) - int(wrote)) / int(seen)
+                print(f"  ring wrapped: {seen} events seen, only the last {wrote} kept "
+                      f"({lost:.0f}% discarded — raise BZ_BUFFER_LOG_RING)")
+                print(f"  -> `missing` below is inflated by the wrap; treat it as an "
+                      f"upper bound only")
+            except ValueError:
+                pass
     if not recs:
         print("  no readable records")
         return 1
@@ -353,6 +411,27 @@ def main():
         if span_min:
             print(f"    capture span {span_min:.1f} min")
 
+    # ── Packet classes ──────────────────────────────────────────────────────
+    classes = Counter()
+    for r in data:
+        c = bz_class(r['payload'])
+        if c:
+            classes[c] += 1
+    short = sum(1 for r in data if bz_class(r['payload']) is None)
+    if classes:
+        print("\n  PACKET CLASSES (BZ P2P header)")
+        for (flags, cls), n in classes.most_common():
+            tag = ' TRY' if flags & BZ_FLAG_TRY else ''
+            print(f"    0x{flags:02x}/0x{cls:02x}{tag:<4} {CLASS_NAMES.get(cls, 'unknown'):<14} "
+                  f"{n:>8}  ({100.0*n/len(data):5.1f}%)")
+        if short:
+            print(f"    {'(no header)':<24} {short:>8}  "
+                  f"(payload prefix shorter than {BZ_HEADER_BYTES}B)")
+        retrans = sum(n for (f, _c), n in classes.items() if f & BZ_FLAG_TRY)
+        if retrans:
+            print(f"    -> {retrans} of {len(data)} received datagrams "
+                  f"({100.0*retrans/len(data):.1f}%) are retransmits")
+
     if args.dump:
         print("\n  FIRST RECORDS")
         for r in recs[:args.dump]:
@@ -361,13 +440,12 @@ def main():
 
     if args.seq_scan and by_peer:
         print()
-        best = seq_scan(by_peer, payload_bytes)
-        if best and args.seq_offset is None:
-            print()
-            reorder_report(by_peer, best[1], best[2], best[3])
-    elif args.seq_offset is not None and by_peer:
+        seq_scan(by_peer, payload_bytes)
+
+    if by_peer:
         print()
-        reorder_report(by_peer, args.seq_offset, args.seq_width, args.seq_endian)
+        delivery_report(by_peer, args.seq_offset, args.seq_width, args.seq_endian,
+                        class_filter)
 
     return 0
 

@@ -18,14 +18,21 @@ Why the patch is shaped the way it is, and what measurement has ruled out.
   to the `[Net]` tuning, the socket buffers and DSCP marking. `BZ_IOCP_REORDER=1`
   exists but has never run on real Windows.
 
-- **…and on these links there was nothing to reorder.** The same capture put
-  out-of-order arrivals at **0.0-0.2%** across all three packet classes,
-  corroborated by the game's own log: 6,998 of 7,012 discards were packets
-  *already consumed*, and only 14 arrived early. What the links actually show is
-  duplication (56-83% of inbound) and outright loss (10-27% of sequence numbers
-  never arriving) — neither of which a reorder buffer can fix. That is why it
-  ships off, and why building an IOCP receive path to reach it is not currently
-  worth the risk.
+- **…and this protocol has nothing a reorder buffer could order by.** V4.9
+  derived the packet header exactly, from BZLogger's own logged ordinals rather
+  than by scoring offsets for monotonicity — see `resources/BZ_P2P_HEADER.md`.
+  The sequence field counts **messages, not datagrams**: one message spans
+  several datagrams that all carry the identical sequence, so 97.8% of inbound
+  datagrams repeat a value already delivered. There is no per-datagram ordering
+  key. On the corrected field the same capture shows 28 first-arrival inversions
+  in 1,021 message sequences, and repairing them would have needed an **883 ms**
+  hold window against the 100 ms ceiling the buffer shipped with — it would have
+  recovered none of them.
+
+  The V4.8 conclusion (ship it off) was right; the reasoning was not. The
+  "0.0-0.2% out-of-order, 56-83% duplication, 10-27% loss" figures published in
+  V4.8 were read from the **acknowledgement** field, which repeats by design.
+  They are withdrawn: they were never measurements of the link.
 
 - **Reordering is not free, and the drop counter hides the cost.** Holding a
   packet adds latency, and the game's drop count stops counting a packet the

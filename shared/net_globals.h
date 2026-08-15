@@ -61,6 +61,30 @@ struct NetGlobal {
 //
 // Sanity ranges are wide enough to admit both the stock default and our own
 // written value, and narrow enough to reject a pointer, a zero, or garbage.
+// ABOUT THE `stock` COLUMN — it is phase-dependent, and the first live
+// values-as-found reads (2026-08-03, identical on a Windows host and a Linux
+// client, taken at the MENU before our first write) prove it:
+//
+//   key            stock below   as found at menu
+//   MinBandwidth   4000          1000
+//   MaxBandwidth   16000         4000
+//   UpCount        10            10    (match)
+//   DownCount      5             5     (match)
+//   MaxPing        300           700
+//   MaxPingsLost   20            20    (match)
+//   AutoKickStart  10000         10000 (match)
+//   AutoKickPing   750           1000
+//   AutoKickLoss   25            50
+//   AutoKickTime   15000         10000
+//
+// The two are not in contradiction for MaxBandwidth: 16000 was READ LIVE
+// mid-match on 2026-07-26 (the revert that built the governor read-back), so
+// session init rewrites at least that global from its menu-time 4000.  For
+// MaxPing and the AutoKick trio the `stock` numbers are from static RE and no
+// in-match unpatched read exists yet — the menu reads may be pre-init values
+// or the real ones.  Treat `stock` as "documented, unverified in-match" until
+// an unpatched in-match values-as-found read settles it.  The sanity ranges
+// below span both candidates in every case, so the veto gate is unaffected.
 inline void net_globals_defaults(NetGlobal *t) {
     size_t i = 0;
 
@@ -76,13 +100,40 @@ inline void net_globals_defaults(NetGlobal *t) {
     // jumping to 40000.
     //
     // So the claim that this is copied into the live send rate at 0x56fdb2 is
-    // wrong for this build, and by extension the identification of this address
-    // as MinBandwidth is itself unconfirmed.  The sanity gate below only rejects
-    // values outside [500, 2000000], which is far too wide to catch a wrong
-    // address.  BZ_GOV_START is what actually sets the opening rate; tune the
-    // ramp with that.  Left at 0 (leave the game's value) until the address is
-    // re-verified.
-    t[i++] = NetGlobal{0x008e8cf4, "MinBandwidth",  "BZ_NET_MINBANDWIDTH",  4000,   500, 2000000, 0, 0, kNgPending, 0};
+    // wrong for this build.  BZ_GOV_START is what sets the opening rate; tune
+    // the ramp with that.  That test stands — and V4.94 reopens the entry
+    // anyway, because it answered a different question than the one now being
+    // asked.
+    //
+    // The 2026-07-26 A/B could only speak to the OPENING rate: no session in
+    // the set had ever collapsed to the floor, so nothing in it observed
+    // whether this value acts as one.  On 2026-08-12 a session did.  Four
+    // runaway repair-kit objects saturated the reliable channel, the governor
+    // took 54 consecutive DownCount steps over 107 seconds, and it bottomed out
+    // at 4,150 -> 4,000 B/s: the stock floor, not this file's documented 16000.
+    // The match then spent its worst two minutes at a budget an order of
+    // magnitude under what the link carried, and the only thing that lifted it
+    // was the cold-start sentinel misfiring (see shared/gov_trace.h).
+    //
+    // A floor at 16000 would make that collapse survivable AND put the floor
+    // out of the 4000 sentinel's reach, which is the structural fix for the
+    // misfire rather than the defensive one.  So the preset is on, at the value
+    // net-ini/net.ini has documented all along.
+    //
+    // This is a live experiment on an address that is identified but not
+    // confirmed, and it is written to say so: BZ_NET_MINBANDWIDTH=0 reverts to
+    // leaving the game's value alone.  What settles it is one collapse observed
+    // with this on — if the governor bottoms out at 16000 instead of 4150, the
+    // address is what we think it is and the floor works.  Watch the proxy's
+    // governor_trace window minimum, which is where the 4150 was read.
+    //
+    // The gate was also too wide to be worth much at [500, 2000000].  The
+    // as-found reads are now known and consistent across a Windows host and a
+    // Linux client (1000 at the menu, 4000 at cold start), so 100000 — the same
+    // ceiling the ramp knobs use, and far above any plausible byte-rate floor —
+    // rejects a pointer and most garbage while admitting every value this
+    // entry has ever legitimately held.
+    t[i++] = NetGlobal{0x008e8cf4, "MinBandwidth",  "BZ_NET_MINBANDWIDTH",  4000,   500,  100000, 0, 0, kNgPending, 0};
     // Ceiling.  A 2026-07-19 session was observed ramping to 79,600 B/s, so a
     // "safe" low cap would be a regression; the governor is closed-loop
     // (it only climbs while ping < MaxPing) so a high ceiling is not itself a
@@ -128,25 +179,59 @@ enum {
 // Preset values applied when the BZ_NET_TUNE preset is on.  These mirror
 // net-ini/net.ini.  Index-aligned with the table above; 0 = leave alone.
 constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
-    0,       // MinBandwidth — writing this changed nothing measurable in a live
-             // A/B (see the entry above) and the address is unconfirmed, so we
-             // no longer write it by default.  BZ_NET_MINBANDWIDTH still forces
-             // a value for anyone re-testing it.
-    320000,  // MaxBandwidth
-    100,     // UpCount
-    50,      // DownCount
+    16000,   // MinBandwidth — the collapse floor.  On since V4.94; see the long
+             // note on the entry above for why the 2026-07-26 A/B does not
+             // settle this.  BZ_NET_MINBANDWIDTH=0 reverts.
+    64000,   // MaxBandwidth — V5: was 320000 ("effectively removes the cap"),
+             // but nine instrumented matches on 2026-08-15 never measured a
+             // send rate above 24,872 B/s, so the extra headroom was untested
+             // surface, not a feature.  64000 is 4x stock and ~2.5x the
+             // highest rate ever observed; BZ_NET_MAXBANDWIDTH overrides.
+    // ── The ramp, reconciled (V4.94) ─────────────────────────────────────────
+    // These two were 50/200 — the governor cutting four times faster than it
+    // recovered.  Stock is 10/5, i.e. up twice as fast as down, so the shipped
+    // preset had inverted the stock bias by 8x, in the direction that turns a
+    // traffic spike into a collapse.
+    //
+    // What that cost, measured off the 2026-08-12 xxMonke1.bzn match: the
+    // governor
+    // fell -203 B/s per second (25,900 -> 4,150 in 107 s, 54 consecutive steps,
+    // no up-step in between) and climbed +40.5 B/s per second (23,900 -> 29,450
+    // over 137 s).  Five to one.  A two-minute collapse needs nine minutes to
+    // undo, so in a real fight the governor never recovers before the next
+    // spike and the match just ratchets downward.
+    //
+    // 100/50 restores stock's 2:1 up-bias while keeping the 10x scale-up that
+    // is the point of tuning these at all.  It is also the pairing the host ran
+    // from 2026-08-02 to 2026-08-12 while the client ran 50/200 — the two
+    // machines were not on the same tuning, which is its own reason to pin one
+    // value here.  Note the per-step B/s figures above are what the ramp did at
+    // 50/200; that these scale linearly with the knobs is inferred from the
+    // step sizes in the log, not separately measured.
+    100,     // UpCount — recovery step, twice the back-off, as stock intends
+    50,      // DownCount — bytes removed from the send budget per adjustment while
+             // over MaxPing (the governor's back-off step, not a receive budget).
     450,     // MaxPing
     0,       // MaxPingsLost — no evidence a change helps; leave the game's
     0, 0, 0, 0,  // auto-kick group has its own preset (BZ_AUTOKICK_RELAX)
 };
 
 // Preset applied when BZ_AUTOKICK_RELAX is on (the default).
+//
+// V5: dialled back to ~2x stock from the V4.9 values (60000/2000/200/60000).
+// The 2026-08-15 armory-launch collapse showed the cost of relaxing this too
+// far: the flood killed the game-level ping loop, the scoreboard read 100%
+// loss, and with Loss=200/Time=60000 the engine's amputation reflex - which
+// on stock settings ends a dead match in seconds - never fired.  Five minutes
+// of zombie match later, the players quit manually.  A kick IS the recovery
+// path when a peer is truly gone; the preset should forgive spikes, not
+// abolish the reflex.  Stock: 10000/750/25/15000.
 constexpr uint32_t kAutoKickRelaxPreset[kNetGlobalCount] = {
     0, 0, 0, 0, 0, 0,
-    60000,   // AutoKickStart — long grace after a join
-    2000,    // AutoKickPing  — a 2 s spike is not a kickable offence
-    200,     // AutoKickLoss
-    60000,   // AutoKickTime  — must be bad for a full minute, not 15 s
+    20000,   // AutoKickStart — double stock's post-join grace
+    1000,    // AutoKickPing  — a 1 s spike is forgiven, sustained 1 s+ is not
+    50,      // AutoKickLoss
+    20000,   // AutoKickTime  — bad for 20 s before the kick, not 60
 };
 
 // ── Environment configuration ────────────────────────────────────────────────

@@ -1,19 +1,24 @@
-# Battlezone 98 Redux Netcode Patch
+# Battlezone 98 Redux — Netcode Patch
 
-Battlezone caps every player's send rate at **16,000 B/s** and opens each match
-at a 4,000 B/s trickle. Lifting both took measured matches to 82,000+ B/s and
-cut visible position corrections by 55-70% on identical maps.
+**V5.0** · [CHANGELOG](CHANGELOG.md)
 
-The patch is a DLL proxy that writes the game's own network tuning into memory,
-enlarges the socket buffers, and marks your traffic for router priority. No game
-code is modified.
+Fixes multiplayer lag in Battlezone 98 Redux. A small proxy DLL sits between
+the game and the network — no game files are modified, and uninstalling
+removes it completely.
 
-**Everyone in the lobby should install it** — the tuning is per-machine, so your
-install fixes your rate and your buffers, nobody else's.
+What it does:
 
-Current version: **V4.8** · [CHANGELOG](CHANGELOG.md)
-
----
+- **Kills retransmit storms.** The engine resends unacknowledged messages
+  every frame, so one player's traffic spike snowballs into a flood that
+  lags everyone. The patch suppresses the redundant copies at the socket,
+  sized to the live round-trip time it measures itself.
+- **Fixes the slow match start.** The game hardcodes a 4 KB/s send rate at
+  every match start; the patch raises it so the opening world sync doesn't
+  crawl.
+- **Tunes the network settings** the game never exposed: bigger socket
+  buffers, packet priority marking (DSCP), a saner bandwidth governor, and
+  auto-kick thresholds relaxed to roughly double stock — enough to forgive a
+  lag spike without keeping dead connections around.
 
 ## Install
 
@@ -26,128 +31,91 @@ Paste this in:
 irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex
 ```
 
-That's it. No launch options — just start the game.
+That's it. No launch options needed — just start the game.
 
 <details>
-<summary>If it fails with <code>Cannot bind argument to parameter 'Command' because it is an empty string</code></summary>
+<summary>If the command fails with an "empty string" error</summary>
 
-That error means `irm` downloaded nothing and handed the empty result to
-`iex` — the script never ran. The URL above is fine, so something on your
-machine emptied the response: an ad-blocker or corporate DNS blackholing
-`raw.githubusercontent.com`, or antivirus HTTPS inspection stripping the
-body.
-
-Download to a file first, which shows you the real failure instead of an
-empty string:
+`Cannot bind argument to parameter 'Command'` means `irm` downloaded nothing —
+something on your machine emptied the response (an ad-blocker or corporate
+DNS blackholing `raw.githubusercontent.com`, or antivirus HTTPS inspection).
+Download to a file first to see the real failure:
 
 ```powershell
 $dst = "$env:TEMP\bznet_install.ps1"
 Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1' -OutFile $dst
-(Get-Item $dst).Length   # expect ~9000, not 0
+(Get-Item $dst).Length   # expect a few thousand bytes, not 0
 powershell -NoProfile -ExecutionPolicy Bypass -File $dst
 ```
-
-If the length is 0, the download is being blocked — try another network or
-temporarily disable the blocker. If it looks right, the last line installs.
 </details>
 
 <details>
-<summary>If Defender quarantines <code>winmm.dll</code></summary>
+<summary>If Defender flags <code>winmm.dll</code></summary>
 
-Some users see it flagged as `Program:Win32/Contebrew.A!ml`, a heuristic
-detection common for unsigned DLL proxies. Restore it from Protection History
-and add an exception for that one file in the game folder. Don't disable AV
-globally.
+A known false positive (often `Program:Win32/Contebrew.A!ml`) — unsigned DLL
+proxies that hook networking are exactly the shape AV heuristics flag. The
+installer verifies the file's SHA256 against the repo's published hash.
+Restore it from Protection History and add an exception for that one file.
+Don't disable AV globally.
 </details>
 
-### Linux / Proton
+### Linux (Proton)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_linux.sh | bash
 ```
 
-Then set Steam launch options for Battlezone 98 Redux:
+Then set the Steam launch options once (Steam → Battlezone 98 Redux →
+Properties → Launch Options):
 
 ```text
 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
-Without that second step the DLL is never loaded.
-
-Prefer to do it by hand? [docs/MANUAL_INSTALL.md](docs/MANUAL_INSTALL.md)
-
----
-
-## Check it worked
-
-Play one multiplayer match, quit, then run:
+## Uninstall
 
 ```bash
-Linux/verify_net_patch.sh          # from the game folder
+# Linux
+curl -fsSL https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/uninstall_linux.sh | bash
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/uninstall_windows.ps1 | iex
 ```
-```powershell
-.\Microslop\verify_windows.ps1
+
+## For hosts
+
+The host's settings matter most — the tuning mod (`net.ini`) installs
+automatically and applies when you host. Nothing to configure.
+
+## Test crew: session logging (opt-in)
+
+Logging is off unless you opt in. Members of the test crew can have each
+session's logs bundled and uploaded automatically to the private channel:
+
+1. Install with the pinned command from the private Discord channel (it's
+   the normal install command with the webhook included).
+2. Use the wrapper launch option instead of the plain one:
+
+```text
+# Windows
+cmd /c ""%LOCALAPPDATA%\bz-netcode\bz_wrap.bat" %command%"
+
+# Linux
+WINEDLLOVERRIDES=dsound=n,b "${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode/bz_wrap.sh" %command% -nointro
 ```
 
-Expect `VERIFY RESULT: PASS`.
+No wrapper in the launch options = nothing ever uploads. Bundles contain
+every peer's public IP, which is why the destination is a private channel.
 
-To eyeball it instead, open the proxy log next to the game exe
-(`dsound_proxy.log` or `winmm_proxy.log`) and look for `net_patch: version
-confirmed`.
+## Advanced
 
-`reorder: DISABLED` is expected — that buffer ships off by default.
-`net_patch: … VETOED` means the game updated and the patch safely fell back to
-stock behaviour; open an issue with the log.
+Every behavior has an environment-variable override — see the proxy READMEs
+([Windows](Microslop/winmm_proxy/README.md),
+[Linux](Linux/proton_dsound_proxy/README.md)). Protocol research and
+investigation writeups live in [resources/](resources/). Diagnostic tooling
+(packet capture, log analysis) lives in [buffer-logging/](buffer-logging/)
+and [tools/](tools/).
 
----
-
-## What it does
-
-- **Lifts the send governor.** `MaxBandwidth` 16,000 → 320,000, and each match
-  opens at 40,000 B/s instead of the stock 4,000 trickle.
-- **Bigger socket buffers.** 4 MB receive / 512 KB send, re-forced so the game
-  can't shrink them back.
-- **Relaxes auto-kick** (host only). A connection has to stay bad for 60 s
-  instead of 15 s, so a transient spike no longer ejects anyone.
-- **DSCP priority marking** so a QoS-capable router serves game traffic ahead of
-  bulk downloads.
-
-All memory writes are data-only and DRM-safe, and every address is
-sanity-checked before it's written.
-
----
-
-## Tuning
-
-The defaults are meant to be what you want. The few worth knowing:
-
-| Variable | Default | Effect |
-|---|---|---|
-| `BZ_NET_TUNE` | `1` | `0` restores the game's stock governor behaviour |
-| `BZ_AUTOKICK_RELAX` | `1` | `0` restores stock auto-kicking |
-| `BZ_GOV_START` | `40000` | opening send rate; `0` restores the stock 4000 |
-| `BZ_REORDER` | `0` | `1` enables inbound reordering |
-
-Full tables: [Linux proxy](Linux/proton_dsound_proxy/README.md) ·
-[Windows proxy](Microslop/winmm_proxy/README.md)
-
----
-
-## Good to know
-
-- **A workshop mod shipping its own `net.ini` overrides the patch's.**
-  Unsubscribe — disabling it in-game isn't enough.
-- **The addresses are pinned to one game build.** If Rebellion patches the game
-  you get stock behaviour, not a crash.
-- **It fixes tuning, not loss.** A saturated uplink on the *sending* peer's end
-  is theirs to fix.
-- **The inbound reorder buffer is off by default** as of 2026-07-26. Measurement
-  showed it never ran, and that there was almost nothing to reorder.
-
----
-
-Running a test session? [docs/TESTING.md](docs/TESTING.md) —
-what to collect and how to read it.
-
-Why things are the way they are: [docs/RESEARCH.md](docs/RESEARCH.md) ·
-[resources/](resources/) · [test-logs/](test-logs/)
+Building from source: `make` in `Microslop/winmm_proxy/` or
+`Linux/proton_dsound_proxy/` (needs 32-bit MinGW), tests via
+`make -C tests run`.

@@ -11,6 +11,10 @@
 //   make -C tests run
 
 #include "../shared/net_globals.h"
+// For kGovColdStartSentinel / kGovDescentBandDef: the MinBandwidth floor exists
+// to put the governor out of the cold-start sentinel's reach, and that is a
+// relationship between the two headers, not a magic number in this one.
+#include "../shared/gov_trace.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -174,13 +178,25 @@ void test_env_presets_and_overrides() {
     unsetenv("BZ_NET_MAXBANDWIDTH");
     net_globals_defaults(tbl);
     net_globals_configure(tbl, kNetGlobalCount);
-    // MinBandwidth is deliberately NOT written by default since 2026-07-26: a
-    // live A/B showed writing it changed nothing, and the address is
-    // unconfirmed.  See the entry in shared/net_globals.h.
-    CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    // MinBandwidth is written by default since V4.94: the 2026-07-26 A/B ruled
+    // it out as the OPENING rate, which is a different question from whether it
+    // floors a collapse.  2026-08-12 produced the collapse and it bottomed out
+    // at the stock 4000, not this.  See the entry in shared/net_globals.h.
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
+    // V5: MaxBandwidth 320000 -> 64000 (nine instrumented matches never
+    // measured a send rate above 24,872 B/s; the uncapped headroom was
+    // untested surface) and the auto-kick preset back to ~2x stock (the
+    // 2026-08-15 collapse showed Loss=200/Time=60000 abolished the engine's
+    // amputation reflex and left a dead match running for five minutes).
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
+    // Recovery must outpace back-off 2:1, as stock intends (V4.94).
+    CHECK_EQ(tbl[kNgUpCount].want, 100u);      // recovery step
+    CHECK_EQ(tbl[kNgDownCount].want, 50u);     // over-MaxPing back-off step
+    check(tbl[kNgUpCount].want >= 2 * tbl[kNgDownCount].want,
+          "the governor recovers at least twice as fast as it cuts",
+          tbl[kNgUpCount].want, 2 * tbl[kNgDownCount].want);
 
     // ...but anyone re-testing it can still force a value by env.
     setenv("BZ_NET_MINBANDWIDTH", "40000", 1);
@@ -200,7 +216,7 @@ void test_env_presets_and_overrides() {
     setenv("BZ_NET_MAXBANDWIDTH", "5", 1);
     net_globals_defaults(tbl);
     net_globals_configure(tbl, kNetGlobalCount);
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
     unsetenv("BZ_NET_MAXBANDWIDTH");
 
     // BZ_NET_TUNE=0 drops the governor preset but leaves auto-kick relax.
@@ -209,7 +225,7 @@ void test_env_presets_and_overrides() {
     net_globals_configure(tbl, kNetGlobalCount);
     CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 0u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
     CHECK(net_globals_any(tbl, kNetGlobalCount));
 
     // Both off: nothing to do, and the proxy skips the thread entirely.
@@ -220,6 +236,111 @@ void test_env_presets_and_overrides() {
 
     unsetenv("BZ_NET_TUNE");
     unsetenv("BZ_AUTOKICK_RELAX");
+}
+
+// DownCount is the governor's over-MaxPing back-off step (bytes removed from the
+// send budget per adjustment while over MaxPing), NOT a receive budget.  All
+// three tuning sources — net_globals.h, net-ini/net.ini, and both proxy READMEs
+// — must state the same reconciled value.  net-ini/net.ini mirrors this compiled
+// default; if either drifts, the mirror invariant below is what catches it.
+
+// Read one [Net] key from net-ini/net.ini (relative to the tests/ CWD that
+// `make -C tests run` uses). Returns -1 if absent/unparseable. This is what
+// makes the mirror invariant REAL: pinning kNetTunePreset alone never reads
+// net.ini, so a drift there stays green (2026-08-11 audit — the comment
+// claimed the invariant was covered; it was not).
+static long read_netini_key(const char *key) {
+    // Try both CWDs: tests/ (make -C tests run) and repo root (a manual run).
+    FILE *f = fopen("../net-ini/net.ini", "r");
+    if (!f) f = fopen("net-ini/net.ini", "r");
+    if (!f) return -1;
+    char line[256];
+    long val = -1;
+    bool in_net = false;
+    while (fgets(line, sizeof line, f)) {
+        char *h = line;
+        while (*h == ' ' || *h == '\t') ++h;
+        if (*h == '[') { in_net = (strncmp(h, "[Net]", 5) == 0); continue; }
+        if (!in_net) continue;
+        char k[64]; long v;
+        if (sscanf(h, "%63[^= \t] = %ld", k, &v) == 2 && strcmp(k, key) == 0) { val = v; break; }
+    }
+    fclose(f);
+    return val;
+}
+
+// The mirror invariant, ACTUALLY implemented: net.ini must equal the compiled
+// default for BOTH ramp knobs. Reverting either net.ini value now fails here
+// (2026-08-11 audit: the old test only pinned kNetTunePreset and never read
+// net.ini, so a drift stayed green — the exact vacuous-validator trap).
+void test_netini_mirrors_compiled_defaults() {
+    begin("net.ini UpCount/DownCount mirror the compiled preset defaults");
+    long ini_up = read_netini_key("UpCount");
+    long ini_down = read_netini_key("DownCount");
+    CHECK_EQ((unsigned)ini_up, kNetTunePreset[kNgUpCount]);
+    CHECK_EQ((unsigned)ini_down, kNetTunePreset[kNgDownCount]);
+    CHECK_EQ((unsigned)ini_up, 100u);
+    CHECK_EQ((unsigned)ini_down, 50u);
+}
+
+void test_downcount_reconciled() {
+    begin("DownCount is reconciled to 50 and net.ini mirrors the compiled default");
+    NetGlobal tbl[kNetGlobalCount];
+    net_globals_defaults(tbl);
+
+    // The reconciled value, pinned here so a drift in any source is a test fail.
+    CHECK_EQ(kNetTunePreset[kNgDownCount], 50u);
+
+    // The value must pass the sanity gate it will later be re-read through.
+    const NetGlobal &g = tbl[kNgDownCount];
+    check(kNetTunePreset[kNgDownCount] >= g.lo
+              && kNetTunePreset[kNgDownCount] <= g.hi,
+          "DownCount preset passes its own gate", kNetTunePreset[kNgDownCount],
+          (long long)g.hi);
+
+    // With the BZ_NET_TUNE preset on (default), the configured want is 200.
+    unsetenv("BZ_NET_TUNE");
+    unsetenv("BZ_AUTOKICK_RELAX");
+    unsetenv("BZ_NET_DOWNCOUNT");
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(tbl[kNgDownCount].want, 50u);
+}
+
+// V4.94: the collapse floor.  Pinned in all three sources, with net.ini held
+// to the same mirror invariant the ramp knobs have and for the same reason.
+void test_min_bandwidth_floor_is_asserted() {
+    begin("MinBandwidth is written as the collapse floor and net.ini mirrors it");
+    NetGlobal tbl[kNetGlobalCount];
+    unsetenv("BZ_NET_TUNE");
+    unsetenv("BZ_AUTOKICK_RELAX");
+    unsetenv("BZ_NET_MINBANDWIDTH");
+    net_globals_defaults(tbl);
+    net_globals_configure(tbl, kNetGlobalCount);
+    CHECK_EQ(kNetTunePreset[kNgMinBandwidth], 16000u);
+    CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
+    CHECK_EQ((unsigned)read_netini_key("MinBandwidth"), kNetTunePreset[kNgMinBandwidth]);
+
+    // The value must pass the gate it will be re-read through.
+    const NetGlobal &g = tbl[kNgMinBandwidth];
+    check(kNetTunePreset[kNgMinBandwidth] >= g.lo
+              && kNetTunePreset[kNgMinBandwidth] <= g.hi,
+          "MinBandwidth preset passes its own gate",
+          kNetTunePreset[kNgMinBandwidth], (long long)g.hi);
+    // ...and the gate must still admit the values the game itself is known to
+    // hold here (1000 at the menu, 4000 at cold start), or the entry vetoes
+    // itself before the first write.
+    check(1000u >= g.lo && 4000u <= g.hi,
+          "the gate admits the known as-found values", g.lo, g.hi);
+
+    // The point of the floor is to put the governor out of reach of the 4000
+    // cold-start sentinel, so that gov_trace.h's floor rescue becomes the
+    // backstop rather than the mechanism.  A floor inside the descent band
+    // would leave the collapse landing on the sentinel exactly as before.
+    check(kNetTunePreset[kNgMinBandwidth] > kGovColdStartSentinel + kGovDescentBandDef,
+          "the floor clears the cold-start sentinel and its descent band",
+          kNetTunePreset[kNgMinBandwidth],
+          kGovColdStartSentinel + kGovDescentBandDef);
 }
 
 // A wrong address must not take the rest of the table down with it.
@@ -246,6 +367,9 @@ int main() {
     test_zero_want_leaves_value_alone();
     test_shipped_table_admits_stock_defaults();
     test_shipped_presets_pass_their_own_gate();
+    test_downcount_reconciled();
+    test_min_bandwidth_floor_is_asserted();
+    test_netini_mirrors_compiled_defaults();
     test_env_presets_and_overrides();
     test_veto_is_per_entry();
 

@@ -114,10 +114,10 @@ written.
 | Variable | Default | net.ini key | Stock | Notes |
 |---|---|---|---|---|
 | `BZ_NET_TUNE` | `1` | — | — | `0` restores the game's stock governor behaviour |
-| `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | also the value copied into the live send rate at session setup |
+| `BZ_NET_MINBANDWIDTH` | `16000` | MinBandwidth | 4000 | the collapse floor. On since V4.94: a 2026-08-12 collapse bottomed out at the stock 4,150 B/s and the match spent two minutes there. `0` reverts to leaving the game's value alone |
 | `BZ_NET_MAXBANDWIDTH` | `320000` | MaxBandwidth | 16000 | the governor is closed-loop, so a high ceiling is not itself a risk |
-| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | stock ramps +10 bytes per ~3 s: a short match never escapes the opening trickle |
-| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | |
+| `BZ_NET_UPCOUNT` | `100` | UpCount | 10 | recovery step, twice DownCount as stock intends. Reconciled 2026-08-12: the old 50/200 pairing cut 5x faster than it recovered (measured -203 vs +40.5 B/s per second), so a two-minute collapse needed nine minutes to undo |
+| `BZ_NET_DOWNCOUNT` | `50` | DownCount | 5 | bytes removed from the send budget per adjustment while over MaxPing (the governor's back-off step, not a receive budget) |
 | `BZ_NET_MAXPING` | `450` | MaxPing | 300 | stock turns a jitter spike into a rate cut into more warping into more spike |
 | `BZ_NET_MAXPINGSLOST` | leave | MaxPingsLost | 20 | no evidence a change helps |
 | `BZ_AUTOKICK_RELAX` | `1` | — | — | `0` restores stock kicking |
@@ -148,6 +148,73 @@ can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates th
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
 
+### Round-trip sampling (`BZ_RTT`, on by default since V4.94)
+
+Observation only: it reads two header fields and never alters, delays or drops
+a datagram.
+
+It exists because of the 2026-08-15 lag report. That match could be narrowed
+to "the link was at 141/174 ms, against 73 ms two matches earlier the same
+evening" and no further, because BZLogger prints its `Delay:` block only at
+match start. Whether the link spiked during the warp storm or stayed flat
+while something else broke was unanswerable from anything the patch collects.
+
+**Why the ack field and not the send clock.** The header carries the sender's
+wall clock at offset 2, but the two machines' clocks are not synchronised, so
+subtracting it on receive yields (delay + clock offset) with no way to separate
+the terms. The ack at offset 14 closes a loop inside one clock: record when our
+sequence S went out, and when a peer acknowledges S the elapsed local time is a
+true round trip.
+
+**Read it as an upper bound.** The ack is piggybacked on the peer's normal
+traffic rather than sent immediately, so a sample includes however long the
+peer sat on it. The padding is bounded by the peer's send interval and does not
+grow with distance or congestion, which is what makes it usable for "is the
+link degrading".
+
+Retransmitted sequences are never sampled (Karn's algorithm) — an ack for a
+sequence sent twice cannot be attributed to either copy. The session line
+reports `unmatched`, `ambiguous` and `discarded` alongside the sample count, so
+a filtered population is visible instead of hidden behind a clean mean.
+
+| variable | default | effect |
+|---|---|---|
+| `BZ_RTT` | `1` | per-peer round-trip sampling from the protocol's ack field; `0` disables |
+| `BZ_RTT_TRACE_MS` | `15000` | interval for the periodic `rtt_trace:` line; `0` silences it and leaves only the session-end summary |
+
+### Duplicate suppressor (`BZ_SEND_DAMPEN`, on by default since V4.94)
+
+BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an
+RTT the game itself reports as 56–91 ms, so every reliable message goes out
+6–9 times before an acknowledgement can physically return (see
+`resources/CAMERAPOD_STORM.md`).  The damper drops the redundant in-window
+copies on the send path: only a 2nd-or-later copy of a `(peer, sequence)`
+already sent inside its window is ever suppressed — a first transmission, a
+distinct sequence, and anything too small to carry a sequence number always
+go.  A suppressed send looks to the game like a successful one (a UDP send
+promises handoff, not delivery), is still counted by the burst measurement,
+and is never duplicated.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BZ_SEND_DAMPEN` | `1` | suppresses redundant in-window reliable retransmits; `0` disables. On by default since V4.94 — replaying the 2026-08-12 storm's logged send stream through it suppresses 63.9% of the datagrams at the 60 ms floor window and 69.0% at a realistic 1.2xRTT window |
+
+The suppression window starts at a 60 ms floor and doubles on each genuine
+loss-recovery retransmit, capped at 400 ms.  Since 2026-08-15 the window is
+sized off the RTT sampler's live estimate (1.2 x srtt, same clamps): the
+plumbing for this existed from day one but was never connected, so every
+earlier session ran at the floor - at the measured 149 ms RTT that allowed
+three times the copies the design intended.  The same evening's third game
+also showed retries outliving the 64-slot sequence ring (659 new sequences a
+minute against retries spanning 9.5 s), and a retry of an evicted sequence is
+indistinguishable from a peer restart, so it wiped the ring mid-storm.  The
+ring is now 512 slots and the wipes are counted (`epoch_resets` in the stats
+line - during a match anything beyond one per reconnect means the ring is
+undersized again).  A peer restart is detected in-band (a sequence below the
+ring's oldest retained entry), and the socket-close path purges every peer
+explicitly, so a reconnecting peer is never suppressed.  Counters appear at
+teardown as a `session end: dampen:` line.
+
 | Variable | Default | Description |
 |---|---|---|
 | `BZ_REORDER` | `1` | Set to `0` to disable reordering entirely |
@@ -160,9 +227,7 @@ default shapes well under one packet and traffic passes straight through — rea
 | `BZ_REORDER_DEPTH` | `32` | Active per-peer reorder queue depth (max `32`) |
 | `BZ_REORDER_PEERS` | `16` | Active peer table size (max `16`) |
 | `BZ_REORDER_DRAIN` | `96` | Max socket drain iterations per hook call (max `128`). The drain also stops early whenever a peer queue is full, so this is an upper bound, not a target |
-| `BZ_SEND_DUP` | `0` | **Deprecated** (off by default). Re-sends outbound P2P datagrams. Live A/B testing showed it doesn't help this game and degrades busy uplinks by ~doubling packet rate. Kept for completeness; leave off |
-| `BZ_DUP_DELAY_MS` | `25` | Delay before the duplicate is transmitted (max `500`). Time-shifting the copy means one queue spike can't kill both. `0` = legacy back-to-back duplicate |
-| `BZ_DUP_MAX_PPS` | `40` | Cap on duplicates per second (max `2000`). Low-rate control traffic keeps redundancy; bulk bursts shed theirs. `0` = unlimited |
+| `BZ_SEND_DUP` | — | Retired in V5: the knob is no longer honoured. Live A/B showed outbound duplication does not help this game |
 | `BZ_DSCP` | `46` | DSCP class marked on the P2P socket via IP_TOS (max `63`). 46 = EF; WMM/SQM routers prioritize it over bulk traffic. Effective under Proton. `0` disables |
 | `BZ_GOV_START` | `0` | **Opt-in.** Raise the send governor's hardcoded 4000 B/s match-start rate to this many bytes/sec (e.g. `16000`). Data-only patch of the live send-rate global (never touches `.text`, so SteamStub's integrity check is untouched); watches for the 4000 cold-start and bumps it. `0` = disabled. Targets the first-60-seconds drop clusters; sender-side, so it helps how your packets reach every peer |
 | `BZ_GOV_SCAN` | `0` | Diagnostic: 15 s after launch, scan the DRM-decrypted `.text` for the 4000 B/s governor start constant and log candidate addresses. Read-only; never patches. (The signature is already captured; this is for re-locating it if the game updates) |

@@ -78,5 +78,21 @@ is `UpCount`.
 
 The engine also reads `MaxPingsLost`, `LimitLowNPPI`, `LimitHiNPPI`,
 `DivisorMPPI2NPPI`, and `DivisorPing2NPPI` (packets-per-interval pacing).
-Their stock defaults and safe ranges are unmapped; left alone until someone
-instruments them.
+`MaxPingsLost` now has a confirmed live address (read 20 at the menu on both
+platforms, 2026-08-03); the NPPI four remain unmapped and are left alone
+until someone instruments them.
+
+## Stock Values: What the Live Reads Say (2026-08-03)
+
+The V4.91 proxies log every watched global *as found*, before the first
+write. The first reads — identical on a Windows host and a Linux client,
+taken at the menu — disagree with the reverse-engineered stock for six of
+ten keys: `MaxPing` reads 700 (documented 300), `MaxBandwidth` 4000
+(documented 16000, but 16000 was read live mid-match on 2026-07-26, so
+session init rewrites it), `AutoKickPing` 1000 (documented 750),
+`AutoKickLoss` 50 (documented 25), `AutoKickTime` 10000 (documented 15000),
+`MinBandwidth` 1000 (documented 4000). Menu-time values may be pre-init;
+the documented numbers may be wrong; an unpatched in-match values-as-found
+read is what settles it. Until then, treat any "stock" number in this file
+as documented-but-unverified-in-match. (`shared/net_globals.h` carries the
+full comparison table.)

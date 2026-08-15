@@ -36,6 +36,78 @@ run_with_timeout() {
   fi
 }
 
+# Will a crash actually leave us a dump?
+#
+# Both hard stops in the repo produced no dump, no proxy log and no session-end
+# line, and nobody found that out until the bundle was opened days later.  The
+# capture path has to be checked *before* the session, loudly, while the tester
+# is still at the keyboard and can fix it.  Writes crash_capture_status.txt so
+# the bundle records what was true at the time.
+check_crash_capture() {
+  local session_dir="$1"
+  local status_file="$session_dir/crash_capture_status.txt"
+  local ready=1
+  local notes=()
+
+  local pattern="unknown"
+  if [[ -r /proc/sys/kernel/core_pattern ]]; then
+    pattern="$(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unknown)"
+  fi
+  local limit
+  limit="$(ulimit -c 2>/dev/null || echo 0)"
+
+  case "$pattern" in
+    *systemd-coredump*)
+      if command -v coredumpctl >/dev/null 2>&1; then
+        notes+=("core_pattern routes to systemd-coredump and coredumpctl is present")
+      else
+        ready=0
+        notes+=("core_pattern routes to systemd-coredump but coredumpctl is missing")
+      fi
+      ;;
+    core|core.*|/*)
+      notes+=("cores land at '$pattern' — collect them by hand after a crash")
+      ;;
+    "|"*)
+      notes+=("cores are piped to '$pattern' — check that handler keeps them")
+      ;;
+    *)
+      ready=0
+      notes+=("core_pattern is '$pattern' — cores may go nowhere")
+      ;;
+  esac
+
+  if [[ "$limit" == "0" ]]; then
+    ready=0
+    notes+=("ulimit -c is 0: this shell would produce no core at all")
+  fi
+
+  {
+    echo "checked_utc=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo "core_pattern=$pattern"
+    echo "ulimit_c=$limit"
+    echo "ready=$ready"
+    printf 'note=%s\n' "${notes[@]}"
+  } >"$status_file"
+
+  echo
+  if [[ "$ready" == "1" ]]; then
+    echo "  crash capture: READY"
+  else
+    echo "  ####################################################################"
+    echo "  #  crash capture: NOT READY — a crash this session will leave no   #"
+    echo "  #  dump, exactly as happened to both hard stops already in the     #"
+    echo "  #  repo. Fix it now or accept that a crash is unanalysable.        #"
+    echo "  ####################################################################"
+  fi
+  printf '    - %s\n' "${notes[@]}"
+  if [[ "$ready" != "1" ]]; then
+    echo "    fix: sudo sysctl -w kernel.core_pattern='|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h'"
+    echo "         ulimit -c unlimited   (in the shell that launches Steam)"
+  fi
+  echo
+}
+
 is_public_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -456,6 +528,19 @@ start_diag() {
     ) >"$session_dir/net_rate_timeline.log" 2>&1 &
     echo "$!" >"$session_dir/netrate.pid"
   fi
+
+  # Clock offset.  The three testers' wall clocks differ by up to an hour and
+  # no bundle records the offset, which turns every cross-host correlation into
+  # archaeology — the sequence cross-match found two logs exactly 3 h apart.
+  {
+    echo "utc=$(date -u +"%Y-%m-%dT%H:%M:%S.%NZ")"
+    echo "local=$(date +"%Y-%m-%dT%H:%M:%S.%N%z")"
+    echo "tz=${TZ:-$(cat /etc/timezone 2>/dev/null || echo unknown)}"
+    echo "utc_offset_seconds=$(date +%z | awk '{s=substr($0,1,1); h=substr($0,2,2); m=substr($0,4,2); v=(h*3600+m*60); print (s=="-"? -v : v)}')"
+    echo "hostname=$(hostname 2>/dev/null || echo unknown)"
+  } >"$session_dir/clock_offset.txt"
+
+  check_crash_capture "$session_dir"
 
   cat <<EOF
 Deep diagnostics started.

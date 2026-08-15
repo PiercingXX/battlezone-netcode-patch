@@ -44,6 +44,47 @@ Linux (all Steam variants):
 
 ---
 
+## Check the capture before you rely on it
+
+`stop` now verifies the bundle and prints either
+
+```
+  capture verified: ran with the settings you asked for, ring did not wrap
+```
+
+or a loud `CAPTURE IS NOT CLEAN` block, and writes the same to
+`capture_verify.txt` in the bundle. Read it.
+
+This exists because the one successful capture of 2026-07-26 asked for a
+500,000-record ring and ran with the 65,536 default, discarding 48% of its
+events — including the entire match start — and nothing said so. The cause was
+that the game had already been launched before the launch options were pasted,
+so `BZ_BUFFER_LOG_RING` was never in its environment. The proxy now records
+what it was *asked* for next to what it used, so the bundle proves this on its
+own. `ring_env=NOT SET` means exactly that: close the game, paste the launch
+options, start again.
+
+**Order matters and the game must be started after the options are set.**
+
+### Capturing less, so the ring lasts longer
+
+`-PeerFilter` / the third `start` argument takes one or more IPv4 addresses and
+records only those peers. It is how you make a ring cover a whole match instead
+of overflowing on lobby and master-server chatter. Up to eight addresses,
+comma- or space-separated:
+
+```
+BZ_BUFFER_LOG_PEER=203.0.113.20,203.0.113.21
+```
+
+Events with no peer address (socket-mode records) are always kept. An
+unparseable entry is rejected and counted rather than guessed at — the proxy
+logs how many, and a spec with no valid entries records everything rather than
+silently recording nothing.
+
+> Until V4.9 this option was written into every tester's launch options by both
+> logger scripts and **no proxy read it**. It was a knob that did nothing.
+
 ## What This Gives You
 
 The scripts collect only the lightweight files we care about:
