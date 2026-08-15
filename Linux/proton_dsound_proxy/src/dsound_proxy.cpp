@@ -1564,6 +1564,22 @@ int WSAAPI hooked_WSARecvFrom(SOCKET s,
             buffer_log_event(kEventTypeWSARecvFrom, s, from, recv_flags, requested, transferred,
                              (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u, payload, payload_len);
         }
+        // RTT: with reorder off (the shipped configuration) this bypass IS
+        // the receive path.  The first post-fix session on 2026-08-15 proved
+        // it the hard way: the sampler was wired into hooked_recvfrom only,
+        // and under Proton the game receives through WSARecvFrom, so the
+        // session ended sends_tracked=1144 acks=0 samples=0 - the send half
+        // alive, the receive half never called.
+        if (rc == 0 && g_rtt.enabled && g_rtt_cs_ready && bytes_received != nullptr
+            && *bytes_received > 0 && from != nullptr && from->sa_family == AF_INET
+            && buffers != nullptr && buffers[0].buf != nullptr) {
+            const sockaddr_in *in4r = reinterpret_cast<const sockaddr_in *>(from);
+            EnterCriticalSection(&g_rtt_cs);
+            rtt_on_recv(&g_rtt, in4r->sin_addr.s_addr,
+                        reinterpret_cast<const uint8_t *>(buffers[0].buf),
+                        static_cast<uint32_t>(*bytes_received), GetTickCount64());
+            LeaveCriticalSection(&g_rtt_cs);
+        }
         WSASetLastError(wsa);
         return rc;
     }
