@@ -218,20 +218,50 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
 
 // Preset applied when BZ_AUTOKICK_RELAX is on (the default).
 //
-// V5: dialled back to ~2x stock from the V4.9 values (60000/2000/200/60000).
-// The 2026-08-15 armory-launch collapse showed the cost of relaxing this too
-// far: the flood killed the game-level ping loop, the scoreboard read 100%
-// loss, and with Loss=200/Time=60000 the engine's amputation reflex - which
-// on stock settings ends a dead match in seconds - never fired.  Five minutes
-// of zombie match later, the players quit manually.  A kick IS the recovery
-// path when a peer is truly gone; the preset should forgive spikes, not
-// abolish the reflex.  Stock: 10000/750/25/15000.
+// A tick is bad when ping > AutoKickPing OR loss > AutoKickLoss; bad
+// continuously for AutoKickTime and the host ejects the player.  Two failure
+// modes have to be served at once, and they pull in opposite directions:
+//
+//   1. A peer that is truly gone must be ejected, or the match runs on as a
+//      corpse.  The 2026-08-15 collapse: the flood killed the game-level ping
+//      loop, the scoreboard read 100% loss, and nothing kicked for five
+//      minutes until the players quit by hand.
+//   2. A live peer on a spiky link must NOT be ejected.
+//
+// V5.0 read (1) as "the whole envelope is too loose" and cut all four knobs to
+// ~2x stock (20000/1000/50/20000).  The 2026-08-15 evening session then
+// ejected the same tester twice, both times at 42 s — AutoKickStart +
+// AutoKickTime to the second, i.e. bad from the first tick after grace and
+// never given a chance to recover.  That tester's link reads 805-3314 ms on
+// the game's own per-player Delay while every other peer sits at 47-230 ms,
+// so a 1000 ms bar runs straight through the middle of their normal range.
+//
+// The knob that was actually broken in V4.9 is AutoKickLoss.  The write-up for
+// (1) records the scoreboard at 100% loss with the reflex still not firing,
+// which is only possible if Loss=200 was unreachable — so the loss predicate
+// was dead and ping was the sole detector, and ping cannot detect a peer whose
+// ping loop has stopped answering.  Keep V5.0's Loss=50 (that is the fix for
+// (1)) and revert Ping/Time to the V4.9 values that demonstrably did not
+// false-kick: on 2026-08-12 a host running 2000/60000 measured a peer at
+// 3418 and 4011 ms across matches of 179 s and 237 s and never ejected them.
+//
+// AutoKickStart stays at V5.0's 20000: grace only ever delays a kick, so it is
+// not implicated in (2), and the shorter grace helps (1).
+//
+// CAVEAT, unresolved: AutoKickLoss's units are not established.  Stock is 25
+// and the sanity gate accepts 1-100000; "200 was unreachable" is inference
+// from the 100%-loss observation above, not a measurement.  If loss is a
+// packet count rather than a percentage, 50 may be far too aggressive and this
+// preset trades a ping-driven false kick for a loss-driven one.  To settle it:
+// host one session with BZ_AUTOKICK_PING=60000 (disabling the ping predicate)
+// and BZ_AUTOKICK_LOSS=5 — healthy players kicked at 5 but not at 50 means
+// percentage.  Stock: 10000/750/25/15000.
 constexpr uint32_t kAutoKickRelaxPreset[kNetGlobalCount] = {
     0, 0, 0, 0, 0, 0,
     20000,   // AutoKickStart — double stock's post-join grace
-    1000,    // AutoKickPing  — a 1 s spike is forgiven, sustained 1 s+ is not
-    50,      // AutoKickLoss
-    20000,   // AutoKickTime  — bad for 20 s before the kick, not 60
+    2000,    // AutoKickPing  — 1000 sits inside a real tester's normal range
+    50,      // AutoKickLoss  — reachable, unlike V4.9's 200; the actual fix
+    60000,   // AutoKickTime  — a spike clears well inside this; a corpse never
 };
 
 // ── Environment configuration ────────────────────────────────────────────────

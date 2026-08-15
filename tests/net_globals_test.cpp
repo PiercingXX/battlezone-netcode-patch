@@ -185,11 +185,18 @@ void test_env_presets_and_overrides() {
     CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
     // V5: MaxBandwidth 320000 -> 64000 (nine instrumented matches never
     // measured a send rate above 24,872 B/s; the uncapped headroom was
-    // untested surface) and the auto-kick preset back to ~2x stock (the
-    // 2026-08-15 collapse showed Loss=200/Time=60000 abolished the engine's
-    // amputation reflex and left a dead match running for five minutes).
+    // untested surface).
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
+    // V5.1 auto-kick: Loss stays at V5.0's reachable 50 (V4.9's 200 could not
+    // fire, which is how a dead match ran on for five minutes), while Ping and
+    // Time revert to the V4.9 values that demonstrably did not false-kick.
+    // V5.0's 1000/20000 ejected a live tester twice on 2026-08-15, both times
+    // at exactly AutoKickStart + AutoKickTime.  Pinned as a quartet because
+    // the two failure modes are only balanced by all four together.
+    CHECK_EQ(tbl[kNgAutoKickStart].want, 20000u);
+    CHECK_EQ(tbl[kNgAutoKickPing].want,   2000u);
+    CHECK_EQ(tbl[kNgAutoKickLoss].want,     50u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want,  60000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
     // Recovery must outpace back-off 2:1, as stock intends (V4.94).
     CHECK_EQ(tbl[kNgUpCount].want, 100u);      // recovery step
@@ -225,7 +232,7 @@ void test_env_presets_and_overrides() {
     net_globals_configure(tbl, kNetGlobalCount);
     CHECK_EQ(tbl[kNgMinBandwidth].want, 0u);
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 0u);
-    CHECK_EQ(tbl[kNgAutoKickTime].want, 20000u);
+    CHECK_EQ(tbl[kNgAutoKickTime].want, 60000u);
     CHECK(net_globals_any(tbl, kNetGlobalCount));
 
     // Both off: nothing to do, and the proxy skips the thread entirely.

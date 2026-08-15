@@ -1,6 +1,6 @@
 # Battlezone 98 Redux — Netcode Patch
 
-**V5.0** · [CHANGELOG](CHANGELOG.md)
+**V5.1** · [CHANGELOG](CHANGELOG.md)
 
 Fixes multiplayer lag in Battlezone 98 Redux. A small proxy DLL sits between
 the game and the network — no game files are modified, and uninstalling
@@ -17,8 +17,24 @@ What it does:
   crawl.
 - **Tunes the network settings** the game never exposed: bigger socket
   buffers, packet priority marking (DSCP), a saner bandwidth governor, and
-  auto-kick thresholds relaxed to roughly double stock — enough to forgive a
-  lag spike without keeping dead connections around.
+  relaxed auto-kick thresholds — enough to forgive a lag spike without
+  keeping dead connections around.
+
+## What changed in V5.1
+
+**If you were getting auto-kicked mid-match on V5.0, this is the fix.**
+Update and you're done — no launch-option changes.
+
+V5.0 tightened the host's auto-kick thresholds too far. Logs from the
+2026-08-15 session show one tester ejected twice, both times at 42 seconds
+into the match — the earliest instant the rules allowed — on a link that
+spikes to 1–3 seconds while everyone else sits under 230 ms. V5.1 raises the
+ping bar back to 2 s and the patience window back to 60 s, so a spike has
+room to clear. The threshold that actually ends a dead match (packet loss) is
+unchanged from V5.0, so a peer who genuinely drops off is still removed.
+
+Hosts: this only bites on the machine that hosts, so the host is the one who
+needs to be on V5.1.
 
 ## Install
 

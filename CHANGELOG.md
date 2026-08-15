@@ -1,5 +1,83 @@
 # Changelog
 
+## V5.1 — auto-kick correction
+
+**V5.0's auto-kick preset ejected a live player twice in one evening. This
+release reverts the two knobs responsible and keeps the one that was
+actually broken.**
+
+### What went wrong
+
+The 2026-08-15 evening session (four testers, V5.0 on all machines) produced
+two host-enforced ejections of the same player:
+
+```
+16:06:38 (host A)  Auto kicking player <tester> due to ping failure
+17:08:00 (host B)  Auto kicking player <tester> due to ping failure
+```
+
+Both fired at the earliest instant the rules permit — `AutoKickStart` (20 s)
++ `AutoKickTime` (20 s) = 40 s, measured at 42.4 s and 41.9 s from
+`Game Simulation Initialized`. That timing means the player was flagged bad
+on the first tick after grace and was never given a window to recover.
+
+The game's own per-player `Delay` from the host netstat blocks explains why:
+
+| peer | Delay (ms) |
+|---|---|
+| three of the four testers | 47–230 |
+| the ejected tester | 805, 1158, 1197, 1230, 3265, 3314 |
+
+V5.0's `AutoKickPing=1000` runs straight through the middle of that player's
+normal operating range. Their link is spiky, not dead — it recovers — but a
+20 s patience window does not wait long enough to find that out.
+
+The prior release settings prove the point directly. On 2026-08-12 a host
+running the V4.9 preset (`AutoKickPing=2000`, `AutoKickTime=60000`) measured
+that same peer at 3418 ms and 4011 ms across matches lasting 179 s and 237 s
+— both far past that preset's 120 s kick horizon — and never ejected them.
+Zero auto-kicks appear anywhere in the 8-12 bundles.
+
+### The correction
+
+V5.0 read the earlier zombie-match collapse as "the whole envelope is too
+loose" and cut all four knobs together. Only one of them was broken.
+
+| knob | V4.9 | V5.0 | **V5.1** | |
+|---|---|---|---|---|
+| AutoKickStart | 60000 | 20000 | **20000** | keep — grace only delays a kick |
+| AutoKickPing | 2000 | 1000 | **2000** | revert — 1000 is inside a real link's range |
+| AutoKickLoss | 200 | 50 | **50** | keep — this is the fix for the corpse case |
+| AutoKickTime | 60000 | 20000 | **60000** | revert — proven not to false-kick |
+
+A tick is bad when ping > `AutoKickPing` **OR** loss > `AutoKickLoss`, so the
+two predicates serve different failure modes. Loss is what catches a peer
+that is truly gone; V4.9's `Loss=200` was unreachable, which is why that
+collapse ran on as a corpse for five minutes with nothing kicking. Fixing
+loss restores the amputation reflex on its own. Tightening ping and patience
+on top of it is what started ejecting live players.
+
+### Unresolved
+
+`AutoKickLoss`'s units are not established. Stock is 25 and the sanity gate
+accepts 1–100000; "200 was unreachable" is inference from the scoreboard
+reading 100% loss while nothing kicked, not a measurement. If loss is a
+packet count rather than a percentage, 50 may be too aggressive and this
+preset trades a ping-driven false kick for a loss-driven one. To settle it,
+host one session with `BZ_AUTOKICK_PING=60000` (disabling the ping
+predicate) and `BZ_AUTOKICK_LOSS=5`: healthy players kicked at 5 but not at
+50 means percentage.
+
+### Notes
+
+- No behaviour outside the auto-kick preset changed. The retransmit
+  suppressor, RTT sampler, governor and bandwidth tuning are as shipped in
+  V5.0.
+- Auto-kick is host-enforced, so only the hosting machine's setting matters.
+- Every knob remains individually overridable (`BZ_AUTOKICK_PING`,
+  `BZ_AUTOKICK_LOSS`, `BZ_AUTOKICK_TIME`, `BZ_AUTOKICK_START`); a per-key
+  variable still beats the preset, and `BZ_AUTOKICK_RELAX=0` restores stock.
+
 ## V5.0 — first shipped release
 
 **Nine instrumented matches on 2026-08-15 found the lag, fixed it, and
