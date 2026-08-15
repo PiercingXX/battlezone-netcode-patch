@@ -72,6 +72,11 @@ Properties → Launch Options):
 WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 ```
 
+That same line is correct for every Steam flavour — native, Flatpak and Snap.
+The installer patches **every** Steam install it finds, so if you have more
+than one, set the launch options in each of them; whichever one you launch
+from is the one that has to carry the override.
+
 ## Uninstall
 
 ```bash
@@ -96,17 +101,50 @@ session's logs bundled and uploaded automatically to the private channel:
    the normal install command with the webhook included).
 2. Use the wrapper launch option instead of the plain one:
 
+Windows:
+
 ```text
-# Windows
 cmd /c ""%LOCALAPPDATA%\bz-netcode\bz_wrap.bat" %command%"
 ```
-```
-# Linux
+
+Linux — native or Flatpak Steam:
+
+```text
 WINEDLLOVERRIDES=dsound=n,b "${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode/bz_wrap.sh" %command% -nointro
 ```
 
+Linux — Snap Steam:
+
+```text
+WINEDLLOVERRIDES=dsound=n,b "$SNAP_USER_COMMON/.local/share/bz-netcode/bz_wrap.sh" %command% -nointro
+```
+
+The installer prints the right one for your machine on its last lines — copy
+that. Don't guess between them: the wrapper is the launch target, so a path
+that doesn't resolve inside the sandbox kills the launch instead of starting
+the game.
+
 No wrapper in the launch options = nothing ever uploads. Bundles contain
 every peer's public IP, which is why the destination is a private channel.
+
+### Snap Steam
+
+Snap needs its own line because snapd remaps `HOME` into
+`~/snap/steam/common/` and its home interface hides the host's dot-directories
+outright, so the `XDG_DATA_HOME` path above can never exist inside the
+sandbox. `$SNAP_USER_COMMON` is guaranteed by snapd and points at the mirrored
+copy the installer places there.
+
+The Steam snap's runtime also ships neither `curl` nor `python3`, so nothing
+inside the sandbox can send a bundle. Sessions are parked in an outbox and a
+host-side systemd user unit drains them — the installer enables
+`bz-netcode-retry.path` (fires within seconds of the game exiting) plus a
+10-minute timer as a backstop. Nothing to do; a parked bundle is not a lost
+one. If the installer says it couldn't enable those units, send by hand:
+
+```bash
+"$HOME/snap/steam/common/.local/share/bz-netcode/bz_wrap.sh" --retry
+```
 
 ## Advanced
 
