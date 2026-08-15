@@ -200,11 +200,20 @@ and is never duplicated by `BZ_SEND_DUP`.
 | `BZ_SEND_DAMPEN` | `1` | suppresses redundant in-window reliable retransmits; `0` disables. On by default since V4.94 — replaying the 2026-08-12 storm's logged send stream through it suppresses 63.9% of the datagrams at the 60 ms floor window and 69.0% at a realistic 1.2xRTT window |
 
 The suppression window starts at a 60 ms floor and doubles on each genuine
-loss-recovery retransmit, capped at 400 ms.  A peer restart is detected
-in-band (a sequence below the ring's oldest retained entry), and the
-socket-close path purges every peer explicitly, so a reconnecting peer is
-never suppressed.  Counters appear at teardown as a `session end: dampen:`
-line.
+loss-recovery retransmit, capped at 400 ms.  Since 2026-08-15 the window is
+sized off the RTT sampler's live estimate (1.2 x srtt, same clamps): the
+plumbing for this existed from day one but was never connected, so every
+earlier session ran at the floor - at the measured 149 ms RTT that allowed
+three times the copies the design intended.  The same evening's third game
+also showed retries outliving the 64-slot sequence ring (659 new sequences a
+minute against retries spanning 9.5 s), and a retry of an evicted sequence is
+indistinguishable from a peer restart, so it wiped the ring mid-storm.  The
+ring is now 512 slots and the wipes are counted (`epoch_resets` in the stats
+line - during a match anything beyond one per reconnect means the ring is
+undersized again).  A peer restart is detected in-band (a sequence below the
+ring's oldest retained entry), and the socket-close path purges every peer
+explicitly, so a reconnecting peer is never suppressed.  Counters appear at
+teardown as a `session end: dampen:` line.
 
 | Variable | Default | Description |
 |---|---|---|

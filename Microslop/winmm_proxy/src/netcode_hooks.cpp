@@ -2456,6 +2456,35 @@ static DWORD WINAPI GovernorPatchThread(LPVOID)
             for (uint32_t i = 0; i < n; ++i) {
                 ProxyLog("%s", lines[i]);
             }
+            // Feed the sampler's srtt into the damper so its suppression
+            // window is 1.2 x the measured RTT instead of the 60 ms floor.
+            // dampen_observe_ack was built for this and never called from
+            // either proxy, so every session before 2026-08-15 ran at the
+            // floor - at the measured 149 ms RTT that allowed three times the
+            // copies the design intended.  The two locks are taken one after
+            // the other, never nested: srtt is copied out under g_rtt_cs,
+            // applied under g_pace_cs.
+            if (g_dampen.enabled && g_pace_cs_ready) {
+                uint32_t fa[kRttPeers];
+                uint32_t fs[kRttPeers];
+                uint32_t fn = 0;
+                EnterCriticalSection(&g_rtt_cs);
+                for (uint32_t i = 0; i < kRttPeers && fn < kRttPeers; ++i) {
+                    if (g_rtt.peers[i].addr != 0 && g_rtt.peers[i].srtt_init) {
+                        fa[fn] = g_rtt.peers[i].addr;
+                        fs[fn] = g_rtt.peers[i].srtt_ms;
+                        fn++;
+                    }
+                }
+                LeaveCriticalSection(&g_rtt_cs);
+                if (fn > 0) {
+                    EnterCriticalSection(&g_pace_cs);
+                    for (uint32_t i = 0; i < fn; ++i) {
+                        dampen_set_rtt(&g_dampen, fa[i], fs[i]);
+                    }
+                    LeaveCriticalSection(&g_pace_cs);
+                }
+            }
         }
         Sleep(kGovPollMs);
     }

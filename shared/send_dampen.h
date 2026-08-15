@@ -37,7 +37,19 @@
 namespace bznet {
 
 constexpr uint32_t kDampenPeers    = 16;   // same order as reorder's peer table
-constexpr uint32_t kDampenSlots    = 64;   // per-peer ring of recent sequences
+// Per-peer ring of recent sequences.  64 until 2026-08-15, and 64 was the
+// hole the third storm of that evening poured through: the storm minute put
+// 659 NEW sequences on the wire (11/s) while retries of a message spanned
+// 9.5 s (p99), so a 64-slot ring held ~6 s of history and the retries of
+// anything older missed the ring entirely.  A missed retry sits below the
+// ring's oldest retained sequence, which is indistinguishable from a peer
+// restart, so it fired the epoch reset and wiped the whole ring - suppression
+// state collapsing exactly when it was needed most (tbl_full=3,975 that
+// session, and the wipes were invisible because nothing counted them; see
+// epoch_resets below).  512 holds ~45 s at that storm's rate: retries are
+// found, suppressed, and the cascade cannot start.  Cost: 16 peers x 512
+// slots x 16 B = 128 KB, static.
+constexpr uint32_t kDampenSlots    = 512;
 constexpr uint32_t kDampenFloorMs  = 60;   // never suppress on a shorter window
 constexpr uint32_t kDampenMaxMs    = 400;  // backoff ceiling
 constexpr uint32_t kDampenRttShift = 3;    // ewma: rtt += (sample - rtt) >> 3
@@ -74,6 +86,15 @@ struct DampenStats {
     uint64_t bypass_short;
     uint64_t bypass_notretx;
     uint64_t tbl_full;
+    // Ring wipes from the epoch-reset path.  Counted since 2026-08-15: the
+    // reset's invariant ("a live duplicate is necessarily inside the retained
+    // set") only holds while the ring never evicts, and when the third storm
+    // that evening overflowed the 64-slot ring, retries of evicted sequences
+    // fired this as if the peer had restarted - repeatedly, invisibly.  A
+    // nonzero rate here during a match (rather than one per reconnect) means
+    // the ring is undersized for the current traffic and suppression is being
+    // wiped while it works.
+    uint64_t epoch_resets;
 };
 
 struct DampenCtx {
@@ -195,6 +216,7 @@ inline DampenDecision dampen_admit(DampenCtx *c, uint32_t peer_addr,
             p->head     = 0;
             p->high_seq = seq;
             found       = -1;   // ring was cleared; the sequence is unrecorded
+            c->st.epoch_resets++;
         }
     }
     if (seq_cmp(seq, p->high_seq) > 0) {
@@ -270,6 +292,35 @@ inline void dampen_observe_ack(DampenCtx *c, uint32_t peer_addr,
     }
 }
 
+// Feed an externally measured smoothed RTT for a peer.  Preferred over
+// dampen_observe_ack when a proper sampler is available (shared/net_rtt.h):
+// that sampler is Karn-filtered - it refuses to time a sequence that was
+// resent - while the exact-match sample in dampen_observe_ack times against
+// last_sent_ms, which every past-window resend overwrites, so under exactly
+// the retransmit pressure the damper exists for its own estimate degrades.
+// The value is written directly (no ewma): net_rtt's srtt is already
+// smoothed, and smoothing a smoothed input twice just adds lag.
+//
+// Only updates a peer the send path has already created.  Creating one here
+// would let a receive-side observation claim a table slot for a peer we have
+// never sent to, and peer creation is the send path's job.
+//
+// Never wired until 2026-08-15: dampen_observe_ack existed, passed its tests,
+// and was called from neither proxy - so rtt_ewma_ms stayed 0 and every
+// window sat at the 60 ms floor.  At a measured 149 ms RTT the design window
+// (1.2 x RTT = 179 ms) allows a third of the copies the floor does.
+inline void dampen_set_rtt(DampenCtx *c, uint32_t peer_addr, uint32_t rtt_ms) {
+    if (!c->enabled || rtt_ms == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < kDampenPeers; ++i) {
+        if (c->peers[i].addr == peer_addr) {
+            c->peers[i].rtt_ewma_ms = rtt_ms;
+            return;
+        }
+    }
+}
+
 // Forget everything about one peer (it disconnected).  Other peers are
 // untouched; cumulative stats survive.
 inline void dampen_purge_peer(DampenCtx *c, uint32_t peer_addr) {
@@ -299,7 +350,8 @@ inline int dampen_format_stats(const DampenCtx *c, char *buf, size_t n) {
     const DampenStats &s = c->st;
     return std::snprintf(buf, n,
         "dampen: enabled=%d seen=%llu suppressed=%llu bytes_saved=%llu"
-        " peers_evicted=%llu bypass_short=%llu bypass_notretx=%llu tbl_full=%llu",
+        " peers_evicted=%llu bypass_short=%llu bypass_notretx=%llu tbl_full=%llu"
+        " epoch_resets=%llu",
         c->enabled ? 1 : 0,
         static_cast<unsigned long long>(s.seen),
         static_cast<unsigned long long>(s.suppressed),
@@ -307,7 +359,8 @@ inline int dampen_format_stats(const DampenCtx *c, char *buf, size_t n) {
         static_cast<unsigned long long>(s.peers_evicted),
         static_cast<unsigned long long>(s.bypass_short),
         static_cast<unsigned long long>(s.bypass_notretx),
-        static_cast<unsigned long long>(s.tbl_full));
+        static_cast<unsigned long long>(s.tbl_full),
+        static_cast<unsigned long long>(s.epoch_resets));
 }
 
 }  // namespace bznet
