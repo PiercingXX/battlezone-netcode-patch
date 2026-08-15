@@ -207,6 +207,51 @@ void test_short_payload_ignored() {
     CHECK_EQ(c.st.sends_tracked, 0);
 }
 
+// Unreliable datagrams are never tracked: the ack acknowledges the RELIABLE
+// sequence stream, and unreliable sequences repeat values that collide with
+// reliable ones in flight.  Game 6 of 2026-08-15 measured the damage of
+// tracking them: 1,122 ack advances, 65 samples, 1,052 discarded as falsely
+// "ambiguous".
+void test_unreliable_not_tracked() {
+    begin("an unreliable datagram is not tracked and cannot spoil a sample");
+    RttCtx c;
+    rtt_init(&c, true, 15000, 0);
+
+    Pkt rel = make_pkt(100, 0, /*reliable=*/true);
+    rtt_on_send(&c, kPeer, rel.b, rel.len, 1000);
+    // An unreliable datagram reusing the same sequence value: previously this
+    // marked seq 100 ambiguous and killed the sample.
+    Pkt unrel = make_pkt(100, 0, /*reliable=*/false);
+    rtt_on_send(&c, kPeer, unrel.b, unrel.len, 1050);
+    CHECK_EQ(c.st.sends_tracked, 1);
+    CHECK_EQ(c.st.sends_ambiguous, 0);
+
+    Pkt in = make_pkt(7, 100);
+    CHECK_EQ(rtt_on_recv(&c, kPeer, in.b, in.len, 1170), 170);
+    CHECK_EQ(c.st.samples, 1);
+}
+
+// The shared per-peer session formatter: content for a sampled peer, silence
+// for an unknown or sampleless one.
+void test_peer_session_formatter() {
+    begin("the per-peer session line prints for sampled peers only");
+    RttCtx c;
+    rtt_init(&c, true, 15000, 0);
+    char line[512];
+    CHECK_EQ(rtt_format_peer_session(&c, kPeer, line, sizeof(line)), 0);
+
+    Pkt out = make_pkt(100, 0); rtt_on_send(&c, kPeer, out.b, out.len, 1000);
+    Pkt in  = make_pkt(7, 100); rtt_on_recv(&c, kPeer, in.b, in.len, 1170);
+    CHECK(rtt_format_peer_session(&c, kPeer, line, sizeof(line)) > 0);
+    CHECK(std::strstr(line, "srtt=170") != nullptr);
+    CHECK(std::strstr(line, "over 1 samples") != nullptr);
+
+    // After a purge the peer is gone and the formatter is silent - which is
+    // exactly why the caller must format BEFORE purging.
+    rtt_purge_peer(&c, kPeer);
+    CHECK_EQ(rtt_format_peer_session(&c, kPeer, line, sizeof(line)), 0);
+}
+
 // The periodic line must fire on its interval and stay silent when a window
 // produced nothing — a row of zeroes reads as "the link is fine".
 void test_trace_cadence_and_silence() {
@@ -284,6 +329,8 @@ int main() {
     test_implausible_sample_rejected();
     test_disabled_is_inert();
     test_short_payload_ignored();
+    test_unreliable_not_tracked();
+    test_peer_session_formatter();
     test_trace_cadence_and_silence();
     test_wraparound();
     test_stats_line_exposes_denominators();

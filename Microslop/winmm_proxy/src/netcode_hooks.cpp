@@ -1681,6 +1681,8 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
     if (g_pace_cs_ready) {
         char pline[512];
         char dline[512];
+        char rtt_lines[kDampenPeers][512];
+        uint32_t n_rtt_lines = 0;
         bool have_pace   = false;
         bool have_dampen = false;
         EnterCriticalSection(&g_pace_cs);
@@ -1709,10 +1711,23 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
                     // socket across matches, so a new epoch's low sequences
                     // would otherwise match the previous match's outstanding
                     // ones and manufacture an RTT out of two unrelated events.
-                    if (g_rtt_cs_ready) {
+                    // The session line is captured HERE, before the purge -
+                    // the process-exit walk runs after this and would find
+                    // the peer already gone (game 6, 2026-08-15: only a
+                    // stray LAN peer survived to be reported).  Formatting
+                    // only; the write happens after g_pace_cs is released,
+                    // matching the rest of this block.
+                    if (g_rtt_cs_ready && n_rtt_lines < kDampenPeers) {
+                        int rplen;
                         EnterCriticalSection(&g_rtt_cs);
+                        rplen = rtt_format_peer_session(
+                            &g_rtt, g_dampen.peers[i].addr,
+                            rtt_lines[n_rtt_lines], sizeof(rtt_lines[0]));
                         rtt_purge_peer(&g_rtt, g_dampen.peers[i].addr);
                         LeaveCriticalSection(&g_rtt_cs);
+                        if (rplen > 0) {
+                            n_rtt_lines++;
+                        }
                     }
                     dampen_purge_peer(&g_dampen, g_dampen.peers[i].addr);
                 }
@@ -1750,6 +1765,9 @@ static int WSAAPI Hooked_closesocket(SOCKET s)
         if (have_dampen) {
             ProxyLog("session end: %s", dline);
             g_dampen_stats_logged = true;
+        }
+        for (uint32_t i = 0; i < n_rtt_lines; ++i) {
+            ProxyLog("session end: %s", rtt_lines[i]);
         }
     }
 
@@ -1837,22 +1855,9 @@ static void emit_session_stats_at_exit()
             uint32_t addrs[kRttPeers];
             const uint32_t peers = rtt_active_peers(&g_rtt, addrs, kRttPeers);
             for (uint32_t i = 0; i < peers; ++i) {
-                for (uint32_t k = 0; k < kRttPeers; ++k) {
-                    if (g_rtt.peers[k].addr != addrs[i]) continue;
-                    const RttPeer &p = g_rtt.peers[k];
-                    const uint8_t a = (uint8_t)(p.addr & 0xff), b = (uint8_t)((p.addr >> 8) & 0xff);
-                    const uint8_t c2 = (uint8_t)((p.addr >> 16) & 0xff), d = (uint8_t)((p.addr >> 24) & 0xff);
-                    std::snprintf(rper[rn], sizeof(rper[rn]),
-                        "rtt: peer=%u.%u.%u.%u srtt=%u ms var=%u ms "
-                        "session min=%u max=%u mean=%llu over %llu samples "
-                        "(upper bound: includes the peer's ack delay)",
-                        (unsigned)a, (unsigned)b, (unsigned)c2, (unsigned)d,
-                        (unsigned)p.srtt_ms, (unsigned)p.rttvar_ms,
-                        (unsigned)p.min_ms, (unsigned)p.max_ms,
-                        (unsigned long long)(p.samples ? p.sum_ms / p.samples : 0),
-                        (unsigned long long)p.samples);
+                if (rtt_format_peer_session(&g_rtt, addrs[i],
+                                            rper[rn], sizeof(rper[rn])) > 0) {
                     rn++;
-                    break;
                 }
             }
             LeaveCriticalSection(&g_rtt_cs);

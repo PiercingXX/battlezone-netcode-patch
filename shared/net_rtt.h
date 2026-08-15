@@ -181,9 +181,17 @@ inline void rtt_purge_peer(RttCtx *c, uint32_t addr) {
 
 // Record one outbound datagram.  Call AFTER the send is committed, on the
 // same payload the peer will see.
+//
+// Reliable datagrams only: the ack field acknowledges the RELIABLE sequence
+// stream, and unreliable datagrams repeat sequence values that collide with
+// reliable ones in flight.  The first live session (2026-08-15, game 6)
+// measured the cost of not filtering: 1,122 ack advances produced 65 samples
+// because 1,052 were discarded as "ambiguous" - overwhelmingly false
+// ambiguity manufactured by unreliable-sequence collisions, not resends.
 inline void rtt_on_send(RttCtx *c, uint32_t peer_addr,
                         const uint8_t *pay, uint32_t len, uint64_t now) {
     if (!c->enabled || len < kReorderSeqMinPay || peer_addr == 0) return;
+    if (!reorder_is_reliable(pay)) return;
 
     const uint32_t seq = reorder_seq_from_payload(pay);
     RttPeer *p = rtt_get_peer(c, peer_addr, now);
@@ -325,6 +333,34 @@ inline int rtt_format_trace(const RttCtx *c, uint32_t addr, char *out, size_t ca
         (unsigned long long)(p->win_sum_ms / p->win_samples),
         (unsigned long long)p->win_samples,
         (unsigned)p->min_ms, (unsigned)p->max_ms,
+        (unsigned long long)p->samples);
+}
+
+// The per-peer session-spread line, shared by both proxies' session-end
+// blocks and by the disconnect purge path.  It must be emitted BEFORE
+// rtt_purge_peer for a departing peer: game 6 of 2026-08-15 proved the
+// ordering the hard way - the dampen disconnect path purged the real peer's
+// record, and the session-end walk that runs later found only a stray LAN
+// peer to report.  Returns 0 when the peer is unknown or sampleless.
+inline int rtt_format_peer_session(const RttCtx *c, uint32_t addr,
+                                   char *out, size_t cap) {
+    const RttPeer *p = nullptr;
+    for (uint32_t i = 0; i < kRttPeers; ++i) {
+        if (c->peers[i].addr == addr) { p = &c->peers[i]; break; }
+    }
+    if (p == nullptr || p->samples == 0) return 0;
+    const uint8_t a = (uint8_t)(addr & 0xff);
+    const uint8_t b = (uint8_t)((addr >> 8) & 0xff);
+    const uint8_t cc = (uint8_t)((addr >> 16) & 0xff);
+    const uint8_t d = (uint8_t)((addr >> 24) & 0xff);
+    return std::snprintf(out, cap,
+        "rtt: peer=%u.%u.%u.%u srtt=%u ms var=%u ms "
+        "session min=%u max=%u mean=%llu over %llu samples "
+        "(upper bound: includes the peer's ack delay)",
+        (unsigned)a, (unsigned)b, (unsigned)cc, (unsigned)d,
+        (unsigned)p->srtt_ms, (unsigned)p->rttvar_ms,
+        (unsigned)p->min_ms, (unsigned)p->max_ms,
+        (unsigned long long)(p->sum_ms / p->samples),
         (unsigned long long)p->samples);
 }
 
