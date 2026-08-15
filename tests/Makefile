@@ -5,7 +5,7 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++14 -O1 -g -Wall -Wextra -Wno-unused-parameter
 
-BINS := reorder_test net_globals_test send_pace_test gov_trace_test buffer_filter_test send_dampen_test dampen_epoch_test dampen_storm_test dampen_purge_test dampen_gate_test
+BINS := reorder_test net_globals_test send_pace_test gov_trace_test buffer_filter_test send_dampen_test dampen_epoch_test dampen_storm_test dampen_purge_test dampen_gate_test net_rtt_test
 
 .PHONY: all run clean
 
@@ -40,6 +40,9 @@ dampen_purge_test: dampen_purge_test.cpp ../shared/send_dampen.h ../shared/reord
 
 dampen_gate_test: dampen_gate_test.cpp ../shared/send_dampen.h ../shared/reorder_core.h
 	$(CXX) $(CXXFLAGS) -o $@ dampen_gate_test.cpp
+
+net_rtt_test: net_rtt_test.cpp ../shared/net_rtt.h ../shared/reorder_core.h
+	$(CXX) $(CXXFLAGS) -o $@ net_rtt_test.cpp
 
 run: $(BINS)
 	@fail=0; for t in $(BINS); do ./$$t || fail=1; echo; done; exit $$fail

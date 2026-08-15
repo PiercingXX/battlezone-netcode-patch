@@ -148,6 +148,40 @@ can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates th
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
 
+### Round-trip sampling (`BZ_RTT`, on by default since V4.95)
+
+Observation only: it reads two header fields and never alters, delays or drops
+a datagram.
+
+It exists because of the 2026-08-15 lag report. That match could be narrowed
+to "the link was at 141/174 ms, against 73 ms two matches earlier the same
+evening" and no further, because BZLogger prints its `Delay:` block only at
+match start. Whether the link spiked during the warp storm or stayed flat
+while something else broke was unanswerable from anything the patch collects.
+
+**Why the ack field and not the send clock.** The header carries the sender's
+wall clock at offset 2, but the two machines' clocks are not synchronised, so
+subtracting it on receive yields (delay + clock offset) with no way to separate
+the terms. The ack at offset 14 closes a loop inside one clock: record when our
+sequence S went out, and when a peer acknowledges S the elapsed local time is a
+true round trip.
+
+**Read it as an upper bound.** The ack is piggybacked on the peer's normal
+traffic rather than sent immediately, so a sample includes however long the
+peer sat on it. The padding is bounded by the peer's send interval and does not
+grow with distance or congestion, which is what makes it usable for "is the
+link degrading".
+
+Retransmitted sequences are never sampled (Karn's algorithm) — an ack for a
+sequence sent twice cannot be attributed to either copy. The session line
+reports `unmatched`, `ambiguous` and `discarded` alongside the sample count, so
+a filtered population is visible instead of hidden behind a clean mean.
+
+| variable | default | effect |
+|---|---|---|
+| `BZ_RTT` | `1` | per-peer round-trip sampling from the protocol's ack field; `0` disables |
+| `BZ_RTT_TRACE_MS` | `15000` | interval for the periodic `rtt_trace:` line; `0` silences it and leaves only the session-end summary |
+
 ### Duplicate suppressor (`BZ_SEND_DAMPEN`, on by default since V4.94)
 
 BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an

@@ -14,6 +14,7 @@
 #include "net_globals.h"
 #include "send_pace.h"
 #include "send_dampen.h"
+#include "net_rtt.h"
 #include "gov_trace.h"
 #include "buffer_filter.h"
 
@@ -261,6 +262,16 @@ static const uint8_t     kGovSig[15] = {
 static PaceCtx           g_tx;
 static CRITICAL_SECTION  g_pace_cs          = {};
 static bool              g_pace_cs_ready    = false;
+
+// Per-peer round-trip sampling (shared/net_rtt.h).  ON by default since
+// V4.95.  See the header for why the ack field and not the send clock: the
+// two machines' clocks are unsynchronised, so only a loop that closes inside
+// one clock measures a round trip.  Own lock, because the send half and the
+// receive half run on different threads under different locks.
+static RttCtx            g_rtt;
+static CRITICAL_SECTION  g_rtt_cs           = {};
+static bool              g_rtt_cs_ready     = false;
+static bool              g_rtt_stats_logged = false;
 static volatile LONG     g_pace_stop        = 0;
 static uint32_t          g_pace_rate        = 0;   // 0 = measure only
 static uint32_t          g_pace_max_ms      = kPaceMaxDelayDef;
@@ -1170,6 +1181,14 @@ int WSAAPI hooked_closesocket(SOCKET s) {
                     : static_cast<unsigned long long>(g_dampen_sock))) {
             for (uint32_t i = 0; i < kDampenPeers; ++i) {
                 if (g_dampen.peers[i].addr != 0) {
+                    // Same reset for the RTT slots: one UDP socket is reused
+                    // across matches, so a new epoch's low sequences would
+                    // otherwise match the previous match's outstanding ones.
+                    if (g_rtt_cs_ready) {
+                        EnterCriticalSection(&g_rtt_cs);
+                        rtt_purge_peer(&g_rtt, g_dampen.peers[i].addr);
+                        LeaveCriticalSection(&g_rtt_cs);
+                    }
                     dampen_purge_peer(&g_dampen, g_dampen.peers[i].addr);
                 }
             }
@@ -1229,9 +1248,15 @@ static void emit_session_stats_at_exit() {
     if (!g_reorder_stats) {
         return;                                 // BZ_REORDER_STATS=0
     }
-    if (g_reorder_stats_logged && g_send_stats_logged && g_dampen_stats_logged) {
+    if (g_reorder_stats_logged && g_send_stats_logged && g_dampen_stats_logged
+        && (g_rtt_stats_logged || !g_rtt.enabled)) {
         return;                                 // clean shutdown already did it
     }
+    // Note the rtt term above: the closesocket path emits the other three, so
+    // without it a clean shutdown returned here and the rtt lines - the only
+    // record of what the link was doing - were never written at all.  Each
+    // block below carries its own !logged guard, so falling through costs a
+    // few predictable branches and cannot double-log anything.
 
     bool noted = false;
     auto note = [&noted]() {
@@ -1274,6 +1299,55 @@ static void emit_session_stats_at_exit() {
             note();
             log_line("session end: %s", pline);
             g_send_stats_logged = true;
+        }
+    }
+
+    if (!g_rtt_stats_logged && g_rtt_cs_ready && g_rtt.enabled) {
+        char rline[512];
+        char rper[kRttPeers][512];
+        uint32_t rn = 0;
+        bool have_rtt = false;
+        if (TryEnterCriticalSection(&g_rtt_cs)) {
+            have_rtt = rtt_format_stats(&g_rtt, rline, sizeof(rline)) > 0;
+            // The exit line reports the SESSION spread, so unlike the periodic
+            // line it must not be gated on the current window having samples:
+            // a match that went quiet in its last 15 s would print nothing.
+            uint32_t addrs[kRttPeers];
+            const uint32_t peers = rtt_active_peers(&g_rtt, addrs, kRttPeers);
+            for (uint32_t i = 0; i < peers; ++i) {
+                for (uint32_t k = 0; k < kRttPeers; ++k) {
+                    if (g_rtt.peers[k].addr != addrs[i]) continue;
+                    const RttPeer &pr = g_rtt.peers[k];
+                    const uint8_t a = static_cast<uint8_t>(pr.addr & 0xff);
+                    const uint8_t b = static_cast<uint8_t>((pr.addr >> 8) & 0xff);
+                    const uint8_t c2 = static_cast<uint8_t>((pr.addr >> 16) & 0xff);
+                    const uint8_t d = static_cast<uint8_t>((pr.addr >> 24) & 0xff);
+                    std::snprintf(rper[rn], sizeof(rper[rn]),
+                        "rtt: peer=%u.%u.%u.%u srtt=%u ms var=%u ms "
+                        "session min=%u max=%u mean=%llu over %llu samples "
+                        "(upper bound: includes the peer's ack delay)",
+                        static_cast<unsigned>(a), static_cast<unsigned>(b),
+                        static_cast<unsigned>(c2), static_cast<unsigned>(d),
+                        static_cast<unsigned>(pr.srtt_ms),
+                        static_cast<unsigned>(pr.rttvar_ms),
+                        static_cast<unsigned>(pr.min_ms),
+                        static_cast<unsigned>(pr.max_ms),
+                        static_cast<unsigned long long>(pr.samples ? pr.sum_ms / pr.samples : 0),
+                        static_cast<unsigned long long>(pr.samples));
+                    rn++;
+                    break;
+                }
+            }
+            LeaveCriticalSection(&g_rtt_cs);
+        } else {
+            log_line("session end: rtt lock held at exit, rtt stats lost");
+        }
+        if (have_rtt) {
+            log_line("session end: %s", rline);
+            for (uint32_t i = 0; i < rn; ++i) {
+                log_line("session end: %s", rper[i]);
+            }
+            g_rtt_stats_logged = true;
         }
     }
 
@@ -1438,6 +1512,18 @@ int WSAAPI hooked_recvfrom(SOCKET s, char *buf, int len, int flags, sockaddr *fr
                          (rc == SOCKET_ERROR) ? static_cast<uint32_t>(wsa) : 0u,
                          payload,
                          payload_len);
+    }
+
+    // RTT: reorder is off in the shipped configuration, so this plain
+    // recvfrom is the receive path that actually runs.
+    if (rc > 0 && g_rtt.enabled && g_rtt_cs_ready && buf != nullptr
+        && from != nullptr && from->sa_family == AF_INET) {
+        const sockaddr_in *in4r = reinterpret_cast<const sockaddr_in *>(from);
+        EnterCriticalSection(&g_rtt_cs);
+        rtt_on_recv(&g_rtt, in4r->sin_addr.s_addr,
+                    reinterpret_cast<const uint8_t *>(buf),
+                    static_cast<uint32_t>(rc), GetTickCount64());
+        LeaveCriticalSection(&g_rtt_cs);
     }
 
     WSASetLastError(wsa);
@@ -1749,6 +1835,20 @@ int WSAAPI hooked_sendto(SOCKET s, const char *buf, int len, int flags, const so
         }
     }
 
+    // RTT: only datagrams that actually reach the wire.  A suppressed copy
+    // never arrives, so counting it would mark the sequence ambiguous and
+    // discard a sample that was never ambiguous.  Hence: after the return.
+    if (g_rtt.enabled && g_rtt_cs_ready && flags == 0 && len > 0
+        && buf != nullptr && to != nullptr && to->sa_family == AF_INET
+        && !dup_is_loopback(to)) {
+        const sockaddr_in *in4r = reinterpret_cast<const sockaddr_in *>(to);
+        EnterCriticalSection(&g_rtt_cs);
+        rtt_on_send(&g_rtt, in4r->sin_addr.s_addr,
+                    reinterpret_cast<const uint8_t *>(buf),
+                    static_cast<uint32_t>(len), GetTickCount64());
+        LeaveCriticalSection(&g_rtt_cs);
+    }
+
     // Measure (always) and optionally pace.  When the pacer takes ownership the
     // game is told the send succeeded, which is what a UDP send means anyway:
     // handed off, no delivery promise.
@@ -1846,6 +1946,14 @@ int WSAAPI hooked_WSASendTo(SOCKET s,
                 pace_observe(&g_tx, total, now);
             }
             LeaveCriticalSection(&g_pace_cs);
+        }
+        // Same rule as the sendto path: only what actually reaches the wire.
+        if (!dampened && g_rtt.enabled && g_rtt_cs_ready && fits && total > 0
+            && to->sa_family == AF_INET && !dup_is_loopback(to)) {
+            const sockaddr_in *in4r = reinterpret_cast<const sockaddr_in *>(to);
+            EnterCriticalSection(&g_rtt_cs);
+            rtt_on_send(&g_rtt, in4r->sin_addr.s_addr, flat, total, GetTickCount64());
+            LeaveCriticalSection(&g_rtt_cs);
         }
         if (dampened) {
             if (bytes_sent != nullptr) {
@@ -2612,6 +2720,29 @@ DWORD WINAPI governor_patch_thread(LPVOID) {
             default:
                 break;
         }
+        // Periodic RTT line.  Rides this thread: same cadence, and neither the
+        // send nor the receive path is touched.  Formatting happens under the
+        // lock, the file write outside it.
+        if (g_rtt.enabled && g_rtt_cs_ready) {
+            uint32_t addrs[kRttPeers];
+            char rlines[kRttPeers][512];
+            uint32_t rn = 0;
+            EnterCriticalSection(&g_rtt_cs);
+            if (rtt_trace_due(&g_rtt, GetTickCount64())) {
+                const uint32_t peers = rtt_active_peers(&g_rtt, addrs, kRttPeers);
+                for (uint32_t i = 0; i < peers; ++i) {
+                    if (rtt_format_trace(&g_rtt, addrs[i], rlines[rn],
+                                         sizeof(rlines[rn])) > 0) {
+                        rn++;
+                    }
+                }
+                rtt_window_reset(&g_rtt);
+            }
+            LeaveCriticalSection(&g_rtt_cs);
+            for (uint32_t i = 0; i < rn; ++i) {
+                log_line("%s", rlines[i]);
+            }
+        }
         Sleep(kGovPollMs);
     }
     log_line("governor_patch: stopping after %llu cold-start bump(s), "
@@ -2864,6 +2995,10 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
         }
         if (!g_pace_cs_ready) {
             InitializeCriticalSection(&g_pace_cs);
+            if (!g_rtt_cs_ready) {
+                InitializeCriticalSection(&g_rtt_cs);
+                g_rtt_cs_ready = true;
+            }
             g_pace_cs_ready = true;
         }
         init_buffer_log_if_needed();
@@ -2939,6 +3074,19 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                         (dampen_env == nullptr || *dampen_env == '\0')
                             ? true : env_truthy(dampen_env),
                         GetTickCount64());
+            // Round-trip sampling.  ON by default (BZ_RTT=0 disables):
+            // observation only - two header fields read, nothing altered,
+            // delayed or dropped - and without it a lag report cannot be told
+            // apart from a frame-rate report.  See shared/net_rtt.h.
+            {
+                const char *rtt_env = std::getenv("BZ_RTT");
+                const uint32_t rtt_trace = clamp_u32(
+                    parse_env_u32("BZ_RTT_TRACE_MS", kGovTraceMsDef), 0, 600000);
+                rtt_init(&g_rtt,
+                         (rtt_env == nullptr || *rtt_env == '\0')
+                             ? true : env_truthy(rtt_env),
+                         rtt_trace, GetTickCount64());
+            }
             g_gov_scan = env_truthy(std::getenv("BZ_GOV_SCAN"));
             // Governor cold-start rate.  ON by default since V4.7: the game
             // hardcodes a 4000 B/s start for every match (a 2026-07-19 session

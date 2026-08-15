@@ -22,6 +22,7 @@
 #include "net_globals.h"
 #include "send_pace.h"
 #include "send_dampen.h"
+#include "net_rtt.h"
 #include "gov_trace.h"
 #include "buffer_filter.h"
 
