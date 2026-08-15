@@ -49,11 +49,17 @@ and recovered inside 60 seconds.
 
 ### Known engine issue (not fixed by this patch)
 
-An armory launch's "Scrap Impact Zone" marker can fail to replicate (its
-object class ships without a model file — `impactzn.sdf` is missing) and the
-event ignites a message-generation storm the suppressor can only blunt, not
-cure. One occurrence collapsed a match beyond recovery. Until it's
-understood, avoid armory launches / Day Wreckers in multiplayer.
+In one 2026-08-15 match, a "Scrap Impact Zone" marker (`impactzn`, the
+countdown marker for an incoming scrap drop) spawned in the host's world at
+the exact second a message-generation storm ignited, and the object never
+appeared in the client's world at all — the two players were looking at
+different battlefields. The storm generated reliable messages faster than
+any suppressor can absorb (the patch blunted ~87% of it and the match still
+collapsed beyond recovery). A likely-related defect: the `impactzn` object
+class ships without its model file (`impactzn.sdf` is missing; every machine
+logs the load failure). Whether the marker's spawn caused the storm or both
+were symptoms of something else is not yet established — it happened once,
+and the buffer log needed to decode the flood was not enabled.
 
 ## V4.94 (experimental branch)
 
