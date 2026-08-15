@@ -19,11 +19,37 @@ Current version: **V4.8** · [CHANGELOG](CHANGELOG.md)
 
 ### Windows
 
+Press Start, type `powershell`, Enter — the blue window, not Command Prompt.
+Paste this in:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex
 ```
 
 That's it. No launch options — just start the game.
+
+<details>
+<summary>If it fails with <code>Cannot bind argument to parameter 'Command' because it is an empty string</code></summary>
+
+That error means `irm` downloaded nothing and handed the empty result to
+`iex` — the script never ran. The URL above is fine, so something on your
+machine emptied the response: an ad-blocker or corporate DNS blackholing
+`raw.githubusercontent.com`, or antivirus HTTPS inspection stripping the
+body.
+
+Download to a file first, which shows you the real failure instead of an
+empty string:
+
+```powershell
+$dst = "$env:TEMP\bznet_install.ps1"
+Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1' -OutFile $dst
+(Get-Item $dst).Length   # expect ~9000, not 0
+powershell -NoProfile -ExecutionPolicy Bypass -File $dst
+```
+
+If the length is 0, the download is being blocked — try another network or
+temporarily disable the blocker. If it looks right, the last line installs.
+</details>
 
 <details>
 <summary>If Defender quarantines <code>winmm.dll</code></summary>
