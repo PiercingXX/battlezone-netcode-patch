@@ -28,17 +28,29 @@ WINEDLLOVERRIDES=dsound=n,b %command% -nointro
 
 ## Windows
 
+Paste these into **PowerShell** (press Start, type `powershell`, Enter), not
+Command Prompt.
+
 Automatic path detection:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_windows.ps1 | iex
 ```
 
-Explicit game path:
+Explicit game path — two lines, same window:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:BZNET_GAME_PATH='D:\Steam\steamapps\common\Battlezone 98 Redux'; irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/master/install/install_windows.ps1 | iex"
+$env:BZNET_GAME_PATH = 'D:\Steam\steamapps\common\Battlezone 98 Redux'
+irm https://raw.githubusercontent.com/PiercingXX/battlezone-netcode-patch/experimental/v4.9/install/install_windows.ps1 | iex
 ```
+
+Do not wrap either of these in `powershell -NoProfile -ExecutionPolicy Bypass
+-Command "..."`. That wrapper was retired: pasted into PowerShell rather than
+Command Prompt, the outer shell expands every `$env:` inside the double quotes
+before the child shell ever sees it, so the variables arrive empty and the
+remaining `='...'` is a syntax error. The ref is baked into each branch's copy
+of the script, so fetching it from a branch and running it plain installs that
+branch with no `$env:` prefix needed.
 
 Windows installs the known-good `winmm.dll` from this repo and verifies SHA256 before deploy. No Steam launch option changes are required.
 

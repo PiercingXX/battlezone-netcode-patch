@@ -43,6 +43,14 @@ $DataDir  = Join-Path $env:LOCALAPPDATA "bz-netcode"
 $Outbox   = Join-Path $DataDir "outbox"
 $Work     = Join-Path $DataDir "work"
 
+# One definition, used by meta.txt, -Status and the installer's staleness
+# check - the same rule bz_wrap.sh adopted on 2026-08-12. This was previously
+# inlined in the meta.txt block only, and it cost exactly what that comment
+# predicted: on 2026-08-15 both testers uploaded bundles stamped
+# V4.91-harvest while this repo shipped V4.92-arms, and the drift was only
+# visible after reading a bundle's meta.txt.
+$WrapperVersion = "V4.94-refresh-20260815"
+
 # Discord's webhook attachment cap is ~10 MB unboosted. Leave room for the
 # multipart envelope.
 $MaxPartBytes = 9 * 1024 * 1024
@@ -146,6 +154,7 @@ function Invoke-Setup {
 function Show-Status {
     $conf = Get-Conf
     $present = if (Test-Path $ConfFile) { "(present)" } else { "(MISSING - run -Setup)" }
+    Write-Host "wrapper     : $WrapperVersion"
     Write-Host "config file : $ConfFile $present"
     Write-Host "webhook     : $(if ($conf.Webhook) { 'configured' } else { 'NOT SET' })"
     Write-Host "player      : $(if ($conf.Player) { $conf.Player } else { '<auto: in-game name, read from BZLogger at upload time>' })"
@@ -372,7 +381,7 @@ function New-BundleAndUpload {
         "game_exit_code=$ExitCode"
         "game_dir=$GameDir"
         "platform=windows"
-        "wrapper_version=V4.92-arms-20260803"
+        "wrapper_version=$WrapperVersion"
     ) | Out-File -FilePath (Join-Path $bundle "meta.txt") -Encoding utf8
 
     # The pre-launch snapshot is the whole point: this is the previous

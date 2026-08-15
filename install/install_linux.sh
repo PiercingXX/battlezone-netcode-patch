@@ -461,6 +461,14 @@ fi
 wrapper_ready=0
 wrapper_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bz-netcode"
 conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/bz-netcode"
+# Hoisted out of the webhook branch below so the no-webhook refresh path can
+# report versions too.  Anything older than V4.94 has no WRAPPER_VERSION line
+# to match, so the honest answer is "unversioned" rather than a guess.
+wrapper_ver_of() {
+    [[ -f "$1" ]] || { echo "none"; return; }
+    sed -n 's/^WRAPPER_VERSION="\(.*\)"$/\1/p' "$1" | head -1 \
+        | grep . || echo "pre-V4.94 (unversioned)"
+}
 if [[ -n "${BZNET_WEBHOOK:-}" && -f "$source_root/upload/bz_wrap.sh" ]]; then
     if [[ "$BZNET_WEBHOOK" != https://discord.com/api/webhooks/* \
        && "$BZNET_WEBHOOK" != https://discordapp.com/api/webhooks/* ]]; then
@@ -472,11 +480,6 @@ if [[ -n "${BZNET_WEBHOOK:-}" && -f "$source_root/upload/bz_wrap.sh" ]]; then
         # until a bundle's meta.txt was read after the fact (2026-08-12) — the
         # install printed nothing about versions, so "did you re-run the
         # installer?" had no observable answer.
-        wrapper_ver_of() {
-            [[ -f "$1" ]] || { echo "none"; return; }
-            sed -n 's/^WRAPPER_VERSION="\(.*\)"$/\1/p' "$1" | head -1 \
-                | grep . || echo "pre-V4.94 (unversioned)"
-        }
         old_wrapper_ver="$(wrapper_ver_of "$wrapper_dir/bz_wrap.sh")"
         new_wrapper_ver="$(wrapper_ver_of "$source_root/upload/bz_wrap.sh")"
         command cp -f "$source_root/upload/bz_wrap.sh" "$wrapper_dir/bz_wrap.sh"
@@ -597,6 +600,34 @@ UNIT
         echo "Automatic log upload configured for '${BZNET_PLAYER:-your in-game name (read at upload time)}'."
         wrapper_ready=1
     fi
+elif [[ -f "$wrapper_dir/bz_wrap.sh" && -f "$source_root/upload/bz_wrap.sh" ]]; then
+    # No webhook in this shell, but an uploader is already installed from an
+    # earlier run that had one.  Refreshing it here is the whole fix for the
+    # 2026-08-15 drift: upload.conf holds the credential and is never touched
+    # by this branch, so a tester who re-runs the plain public command lands
+    # on the current wrapper instead of keeping a V4.91 copy forever.
+    old_wrapper_ver="$(wrapper_ver_of "$wrapper_dir/bz_wrap.sh")"
+    new_wrapper_ver="$(wrapper_ver_of "$source_root/upload/bz_wrap.sh")"
+    command cp -f "$source_root/upload/bz_wrap.sh" "$wrapper_dir/bz_wrap.sh"
+    chmod +x "$wrapper_dir/bz_wrap.sh"
+    # Mirror into any sandboxed Steam that already has a copy, for the same
+    # reason the webhook path does: the sandbox copy is the one that runs.
+    # Only refresh what is already there — creating a sandbox copy without
+    # its sibling upload.conf would leave a wrapper that cannot upload.
+    for sandbox_dir in \
+        "$HOME/snap/steam/common/.local/share/bz-netcode" \
+        "$HOME/.var/app/com.valvesoftware.Steam/data/bz-netcode"; do
+        [[ -f "$sandbox_dir/bz_wrap.sh" ]] || continue
+        command cp -f "$source_root/upload/bz_wrap.sh" "$sandbox_dir/bz_wrap.sh"
+        chmod +x "$sandbox_dir/bz_wrap.sh"
+        echo "Refreshed the sandboxed uploader in $sandbox_dir."
+    done
+    if [[ "$old_wrapper_ver" == "$new_wrapper_ver" ]]; then
+        echo "Uploader wrapper: $new_wrapper_ver (already current; saved webhook untouched)."
+    else
+        echo "Uploader wrapper: $old_wrapper_ver -> $new_wrapper_ver (saved webhook untouched)."
+    fi
+    wrapper_ready=1
 fi
 
 if [[ "$wrapper_ready" == "1" ]]; then

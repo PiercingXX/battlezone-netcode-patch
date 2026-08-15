@@ -200,6 +200,43 @@ function Add-DefenderExclusions {
     }
 }
 
+# Read the wrapper's single version definition. Anything older than V4.94 kept
+# the string inlined in the meta.txt block, so there is nothing to match and
+# the honest answer is "unversioned" rather than a guess.
+function Get-WrapperVersion {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return "none" }
+    $m = Select-String -Path $Path -Pattern '^\$WrapperVersion\s*=\s*"(.+)"' -ErrorAction SilentlyContinue |
+         Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return "pre-V4.94 (unversioned)"
+}
+
+# Download bz_wrap.* into $WrapDir and say what was replaced with what.
+# Silence here is what let two testers run V4.91-harvest against a V4.92-arms
+# repo until 2026-08-15, so the version line prints on every install.
+function Update-WrapperFiles {
+    param([string]$WrapDir)
+    $dest = Join-Path $WrapDir "bz_wrap.ps1"
+    $old  = Get-WrapperVersion -Path $dest
+    foreach ($wf in @("bz_wrap.ps1", "bz_wrap.bat")) {
+        $wu = "https://raw.githubusercontent.com/$repoSlug/$ref/upload/$wf"
+        $wfDest = Join-Path $WrapDir $wf
+        # An AV quarantine can leave a locked or ACL-broken stub that
+        # Invoke-WebRequest cannot overwrite ("Access to the path ... is
+        # denied"). Clearing it first gives the write a fresh directory entry
+        # to land in.
+        Remove-Item -Force -ErrorAction SilentlyContinue $wfDest
+        Invoke-WebRequest -Uri $wu -UseBasicParsing -OutFile $wfDest
+    }
+    $new = Get-WrapperVersion -Path $dest
+    if ($old -eq $new) {
+        Write-Host "Uploader wrapper: $new (already current)."
+    } else {
+        Write-Host "Uploader wrapper: $old -> $new."
+    }
+}
+
 if (-not $gamePath) {
     $gamePath = Find-GamePath
 }
@@ -325,16 +362,7 @@ try {
             try {
                 $wrapDir = Join-Path $env:LOCALAPPDATA "bz-netcode"
                 New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
-                foreach ($wf in @("bz_wrap.ps1", "bz_wrap.bat")) {
-                    $wu = "https://raw.githubusercontent.com/$repoSlug/$ref/upload/$wf"
-                    $wfDest = Join-Path $wrapDir $wf
-                    # An AV quarantine can leave a locked or ACL-broken stub
-                    # that Invoke-WebRequest cannot overwrite ("Access to the
-                    # path ... is denied"). Clearing it first gives the write
-                    # a fresh directory entry to land in.
-                    Remove-Item -Force -ErrorAction SilentlyContinue $wfDest
-                    Invoke-WebRequest -Uri $wu -UseBasicParsing -OutFile $wfDest
-                }
+                Update-WrapperFiles -WrapDir $wrapDir
                 $confDir = Join-Path $env:APPDATA "bz-netcode"
                 New-Item -ItemType Directory -Force -Path $confDir | Out-Null
                 # Empty BZ_PLAYER = the wrapper reads the in-game player name from
@@ -353,6 +381,23 @@ try {
             } catch {
                 Write-Warning "Upload wrapper setup failed: $_"
                 $wrapperFailed = $true
+            }
+        }
+    }
+    else {
+        # No webhook in this shell, but an uploader may already be installed
+        # from an earlier run that did have one. Refreshing it here is the
+        # whole fix for the 2026-08-15 drift: the credential lives in
+        # upload.conf, which this branch never touches, so a tester who
+        # re-runs the plain public command still lands on the current wrapper
+        # instead of keeping a V4.91 copy forever.
+        $wrapDir = Join-Path $env:LOCALAPPDATA "bz-netcode"
+        if (Test-Path (Join-Path $wrapDir "bz_wrap.ps1")) {
+            try {
+                Update-WrapperFiles -WrapDir $wrapDir
+                $wrapperReady = $true
+            } catch {
+                Write-Warning "Could not refresh the existing upload wrapper: $_"
             }
         }
     }
@@ -380,9 +425,18 @@ try {
 
     if (-not $env:BZNET_WEBHOOK) {
         Write-Host ""
-        Write-Host "No BZNET_WEBHOOK in this shell, so the log uploader was NOT installed." -ForegroundColor Yellow
-        Write-Host "Normal players: that is correct, ignore this. Test crew: paste the pinned"
-        Write-Host "command from the private channel into a PowerShell window and run it again."
+        if ($wrapperReady) {
+            # The wrapper was refreshed above but no webhook was supplied, so
+            # upload.conf keeps whatever credential it already had. Say which
+            # of the two states this is rather than claiming nothing happened.
+            Write-Host "No BZNET_WEBHOOK in this shell. The existing log uploader was updated in" -ForegroundColor Yellow
+            Write-Host "place and its saved webhook was left alone. Test crew: if uploads stop"
+            Write-Host "arriving, re-run the pinned command from the private channel."
+        } else {
+            Write-Host "No BZNET_WEBHOOK in this shell, so the log uploader was NOT installed." -ForegroundColor Yellow
+            Write-Host "Normal players: that is correct, ignore this. Test crew: paste the pinned"
+            Write-Host "command from the private channel into a PowerShell window and run it again."
+        }
     }
 
     # Defender's real-time scan is asynchronous: it can quarantine the DLL
