@@ -285,7 +285,7 @@ static DampenCtx         g_dampen;
 static SOCKET            g_dampen_sock         = INVALID_SOCKET;
 
 // Per-peer round-trip sampling (shared/net_rtt.h).  ON by default since
-// V4.95: the 2026-08-15 lag report could be narrowed to "the link was at
+// V4.94: the 2026-08-15 lag report could be narrowed to "the link was at
 // 141/174 ms against 73 ms earlier the same evening" and no further, because
 // BZLogger prints its Delay: block only at match start.  Whether the link
 // spiked during the warp storm or stayed flat was unanswerable from anything

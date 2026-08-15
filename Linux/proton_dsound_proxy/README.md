@@ -148,7 +148,7 @@ can only absorb `BZ_SEND_PACE_MAX_MS × rate` bytes, so at Battlezone's rates th
 default shapes well under one packet and traffic passes straight through — read
 `send_stats` before raising either knob.
 
-### Round-trip sampling (`BZ_RTT`, on by default since V4.95)
+### Round-trip sampling (`BZ_RTT`, on by default since V4.94)
 
 Observation only: it reads two header fields and never alters, delays or drops
 a datagram.

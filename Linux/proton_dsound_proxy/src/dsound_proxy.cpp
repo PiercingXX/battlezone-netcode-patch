@@ -264,7 +264,7 @@ static CRITICAL_SECTION  g_pace_cs          = {};
 static bool              g_pace_cs_ready    = false;
 
 // Per-peer round-trip sampling (shared/net_rtt.h).  ON by default since
-// V4.95.  See the header for why the ack field and not the send clock: the
+// V4.94.  See the header for why the ack field and not the send clock: the
 // two machines' clocks are unsynchronised, so only a loop that closes inside
 // one clock measures a round trip.  Own lock, because the send half and the
 // receive half run on different threads under different locks.
