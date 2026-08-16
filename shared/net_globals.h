@@ -182,11 +182,13 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
     16000,   // MinBandwidth — the collapse floor.  On since V4.94; see the long
              // note on the entry above for why the 2026-07-26 A/B does not
              // settle this.  BZ_NET_MINBANDWIDTH=0 reverts.
-    64000,   // MaxBandwidth — V5: was 320000 ("effectively removes the cap"),
-             // but nine instrumented matches on 2026-08-15 never measured a
-             // send rate above 24,872 B/s, so the extra headroom was untested
-             // surface, not a feature.  64000 is 4x stock and ~2.5x the
-             // highest rate ever observed; BZ_NET_MAXBANDWIDTH overrides.
+    320000,  // MaxBandwidth — back to the V4.9 value in V5.3.  V5.0 cut it to
+             // 64000 on the argument that nine matches never measured a send
+             // rate above 24,872 B/s; the 2026-08-15/16 storms then measured
+             // peaks of 86k-224k B/s, i.e. real traffic ran ABOVE the new
+             // ceiling and the governor spent whole matches fighting it.
+             // 320000 effectively removes the cap, which is the tested-good
+             // V4.9 behaviour.  BZ_NET_MAXBANDWIDTH overrides.
     // ── The ramp, reconciled (V4.94) ─────────────────────────────────────────
     // These two were 50/200 — the governor cutting four times faster than it
     // recovered.  Stock is 10/5, i.e. up twice as fast as down, so the shipped

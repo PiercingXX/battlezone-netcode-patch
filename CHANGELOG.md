@@ -1,5 +1,72 @@
 # Changelog
 
+## V5.3 — the wire goes back to V4.9
+
+**The 2026-08-15/16 evening was the worst session on record, across V5.0,
+V5.1 and V5.2 alike — the auto-kick changes never touched the lag, because
+the lag lived in the two things V5.0 changed on the traffic path. Both are
+reverted. The game now behaves on the wire exactly as V4.9 did; the V5
+line's telemetry and tooling stay.**
+
+### What the logs show
+
+Session-end counters, 8-12 (the "best yet" night) against 8-15/16:
+
+| | 8-12 (V4.9 line) | 8-15/16 (V5.x) |
+|---|---|---|
+| peak packets/sec | 175–442 | 1,646–4,186 |
+| burst seconds per session | 3–10 | 283–1,914 |
+| packets per session | 27k | 100k–389k |
+
+The storm ran on every machine, in every match, across all three V5
+releases — including the V5.2 block, which is why raising the auto-kick
+thresholds didn't help: the kicks were a symptom, and so was the lag.
+
+### Fix 1: the duplicate suppressor is off by default again
+
+V4.93 shipped the suppressor off, pending live validation. What flipped it
+on was a replay: the 2026-08-12 storm's logged sends run back through the
+suppressor showed 63.9–69.0% of the datagrams were redundant copies. That
+number was real — but a replay has no loss model. The engine's frame-locked
+resend is its **only** loss recovery, and on a lossy link the suppressor
+cannot tell a redundant copy from the copy that would have delivered. Its
+only live validation before the default flipped was a single 2-player match
+where it barely engaged (100 suppressions in 27k sends).
+
+The crew-wide debut of suppressor-on was 2026-08-15 — the horrible night.
+During the storms it was suppressing up to 63% of reliable-eligible traffic
+(23,325 of 37,019 sends in one bundle), with the backoff window sized off
+RTT measurements that congestion had inflated to seconds. Suppressed
+recovery means reliable messages stall, queues back up, the engine generates
+more traffic, and the storm feeds itself. Even the V5.0 ring enlargement
+didn't hold: `tbl_full` hit 24k and the epoch reset fired 10 times in single
+sessions.
+
+Off by default, as V4.93 shipped it. `BZ_SEND_DAMPEN=1` re-enables it for
+experiments; the code, tests and stats stay.
+
+### Fix 2: MaxBandwidth back to 320000
+
+V5.0 cut the ceiling to 64000 because nine matches had never measured a send
+rate above 24,872 B/s. The 8-15/16 storms then measured sustained peaks of
+86k–224k B/s — real traffic ran *above* the new ceiling, so the governor
+spent entire matches throttling against it. V4.9's 320000 (effectively
+uncapped) is restored, which also re-aligns the code with what the proxy
+READMEs had documented all along.
+
+### What this adds up to
+
+With V5.2's auto-kick revert already in, every [Net] value and every
+traffic-path behavior now matches the V4.9 line that testers call the best
+so far. Retained from V5: build stamps in every log, per-peer RTT telemetry,
+burst measurement, the installer improvements, and the wrapper versioning.
+
+One confound worth naming: a fifth player joined the 8-15/16 session running
+a V4.92-era wrapper from 8-03 — a mixed-version lobby. The storm pattern
+appears in matches before that player joined, so it does not change the
+diagnosis, but keeping the crew on one version keeps the next diagnosis
+clean.
+
 ## V5.2 — auto-kick reverted to V4.9 entire
 
 **V5.1's partial revert did not settle it. Further live problems followed,

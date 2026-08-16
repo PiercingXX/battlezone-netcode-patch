@@ -1,6 +1,6 @@
 # Battlezone 98 Redux — Netcode Patch
 
-**V5.2** · [CHANGELOG](CHANGELOG.md)
+**V5.3** · [CHANGELOG](CHANGELOG.md)
 
 Fixes multiplayer lag in Battlezone 98 Redux. A small proxy DLL sits between
 the game and the network — no game files are modified, and uninstalling
@@ -8,10 +8,6 @@ removes it completely.
 
 What it does:
 
-- **Kills retransmit storms.** The engine resends unacknowledged messages
-  every frame, so one player's traffic spike snowballs into a flood that
-  lags everyone. The patch suppresses the redundant copies at the socket,
-  sized to the live round-trip time it measures itself.
 - **Fixes the slow match start.** The game hardcodes a 4 KB/s send rate at
   every match start; the patch raises it so the opening world sync doesn't
   crawl.
@@ -19,28 +15,38 @@ What it does:
   buffers, packet priority marking (DSCP), a saner bandwidth governor, and
   relaxed auto-kick thresholds — enough to forgive a lag spike without
   keeping dead connections around.
+- **Measures everything.** Per-peer round-trip time, send rates, burst
+  shape — the telemetry that lets a lag report be diagnosed instead of
+  guessed at.
 
-## What changed in V5.2
+## What changed in V5.3
 
-**If you were getting auto-kicked mid-match on V5.0 or V5.1, this is the
-fix.** Update and you're done — no launch-option changes.
+**This release makes the game behave like V4.9 on the wire — the
+best-performing build so far. Everyone should update, especially whoever
+hosts.**
 
-V5.0 tightened the host's auto-kick thresholds too far and started ejecting
-real players: logs from the 2026-08-15 session show one tester kicked twice,
-both times at 42 seconds into the match — the earliest instant the rules
-allowed — on a link that spikes to 1–3 seconds while everyone else sits under
-230 ms. V5.1 loosened two of the four thresholds; that wasn't enough. V5.2
-restores all four to the V4.9 values, the last set known to run a full
-session without a single false kick.
+The V5.0 line changed two things on the traffic path, and the 2026-08-15/16
+session — the worst on record — implicated both:
 
-Known trade-off: with these settings a player whose connection dies
-completely won't be kicked automatically, so a dead match may need someone to
-abort it. That's the deal for not ejecting people who are still playing
-fine. A host who'd rather have the automatic kick back can set
-`BZ_AUTOKICK_LOSS=50`.
+1. **The duplicate suppressor is off by default again.** V5.0 turned it on
+   for everyone and fed it live RTT. It drops what it judges to be redundant
+   retransmits, but the engine's per-frame resend is its *only* way of
+   recovering a lost packet, and during the storms it was dropping up to 63%
+   of that traffic — suppressing the recovery exactly when links were lossy.
+   It goes back to what it was in V4.9: built in, off, `BZ_SEND_DAMPEN=1`
+   for experiments.
+2. **The bandwidth ceiling goes back up (64 KB/s → 320 KB/s).** V5.0 cut it
+   based on quiet-match measurements; the storm traffic peaked at 86–224
+   KB/s, above the new ceiling, so the governor spent whole matches
+   throttling. Restored to the V4.9 value.
 
-Hosts: this only bites on the machine that hosts, so the host is the one who
-needs to be on V5.2.
+Auto-kick thresholds already went back to V4.9 in V5.2 and stay there. Net
+effect of V5.2 + V5.3: **the wire behavior is V4.9's**, and what remains of
+the V5 line is the build stamping, the RTT/burst telemetry, and the
+installer fixes.
+
+Hosts matter most (the tuning applies from the host), but the suppressor ran
+on every machine — so this update is for the whole crew.
 
 ## Install
 

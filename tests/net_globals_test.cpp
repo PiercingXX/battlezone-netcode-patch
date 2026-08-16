@@ -183,10 +183,11 @@ void test_env_presets_and_overrides() {
     // floors a collapse.  2026-08-12 produced the collapse and it bottomed out
     // at the stock 4000, not this.  See the entry in shared/net_globals.h.
     CHECK_EQ(tbl[kNgMinBandwidth].want, 16000u);
-    // V5: MaxBandwidth 320000 -> 64000 (nine instrumented matches never
-    // measured a send rate above 24,872 B/s; the uncapped headroom was
-    // untested surface).
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
+    // V5.3: MaxBandwidth back to the V4.9 320000.  V5.0's 64000 was cut on
+    // "never measured above 24,872 B/s"; the 2026-08-15/16 storms then peaked
+    // at 86k-224k B/s - above the new ceiling - so the cap was live and
+    // fighting real traffic.  320000 effectively uncaps, as V4.9 did.
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
     // V5.2 auto-kick: the V4.9 values, restored entire.  V5.0's 20000/1000/
     // 50/20000 ejected a live tester twice on 2026-08-15, both times at
     // exactly AutoKickStart + AutoKickTime; V5.1's 20000/2000/50/60000 kept
@@ -224,7 +225,7 @@ void test_env_presets_and_overrides() {
     setenv("BZ_NET_MAXBANDWIDTH", "5", 1);
     net_globals_defaults(tbl);
     net_globals_configure(tbl, kNetGlobalCount);
-    CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
+    CHECK_EQ(tbl[kNgMaxBandwidth].want, 320000u);
     unsetenv("BZ_NET_MAXBANDWIDTH");
 
     // BZ_NET_TUNE=0 drops the governor preset but leaves auto-kick relax.

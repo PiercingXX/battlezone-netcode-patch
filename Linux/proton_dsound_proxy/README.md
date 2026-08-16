@@ -182,7 +182,7 @@ a filtered population is visible instead of hidden behind a clean mean.
 | `BZ_RTT` | `1` | per-peer round-trip sampling from the protocol's ack field; `0` disables |
 | `BZ_RTT_TRACE_MS` | `15000` | interval for the periodic `rtt_trace:` line; `0` silences it and leaves only the session-end summary |
 
-### Duplicate suppressor (`BZ_SEND_DAMPEN`, on by default since V4.94)
+### Duplicate suppressor (`BZ_SEND_DAMPEN`, off by default since V5.3)
 
 BZRNet's reliable retry timer is fixed at ~10 ms with no backoff, against an
 RTT the game itself reports as 56–91 ms, so every reliable message goes out
@@ -197,7 +197,7 @@ and is never duplicated.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BZ_SEND_DAMPEN` | `1` | suppresses redundant in-window reliable retransmits; `0` disables. On by default since V4.94 — replaying the 2026-08-12 storm's logged send stream through it suppresses 63.9% of the datagrams at the 60 ms floor window and 69.0% at a realistic 1.2xRTT window |
+| `BZ_SEND_DAMPEN` | `0` | suppresses redundant in-window reliable retransmits; `1` enables. Off by default since V5.3: the replay case for it (63.9-69.0% of the 2026-08-12 storm suppressed) had no loss model, and the crew-wide dampen-on debut (2026-08-15/16) was the worst session on record — during a storm it suppressed up to 63% of reliable-eligible sends, i.e. the engine's only loss-recovery mechanism |
 
 The suppression window starts at a 60 ms floor and doubles on each genuine
 loss-recovery retransmit, capped at 400 ms.  Since 2026-08-15 the window is

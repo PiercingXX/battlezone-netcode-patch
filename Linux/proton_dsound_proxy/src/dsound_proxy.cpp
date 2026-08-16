@@ -3104,21 +3104,34 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
             // read send_stats before raising either knob.
             g_pace_rate   = clamp_u32(parse_env_u32("BZ_SEND_PACE", 0), 0, 10000000);
             g_pace_max_ms = clamp_u32(parse_env_u32("BZ_SEND_PACE_MAX_MS", kPaceMaxDelayDef), 0, 200);
-            // Duplicate suppressor.  ON by default since V4.94.  It shipped off
-            // in V4.93 pending a live-match validation; the 2026-08-12 monkey
-            // match supplied one, from the wrong side.  Four runaway repair-kit
-            // objects put 30,691 retransmitted datagrams / 2.64 MB on the wire
-            // in 140 seconds — 52.9 kB/s against a governor budget that had
-            // collapsed to 4.5 kB/s — and the damper was not running to stop
-            // any of it.  Replaying that logged send stream through
-            // dampen_admit() suppresses 63.9% of the datagrams at the 60 ms
-            // floor window and 69.0% at a realistic 1.2*RTT window, which is
-            // the whole of the redundancy: 3.22 copies per message down to one.
-            // BZ_SEND_DAMPEN=0 restores the old off-by-default behaviour.
+            // Duplicate suppressor.  OFF by default again since V5.3
+            // (BZ_SEND_DAMPEN=1 re-enables for experiments) — back to the
+            // V4.93 posture: off pending a live-match validation it never
+            // actually passed.
+            //
+            // The case FOR it was a replay: the 2026-08-12 storm's logged send
+            // stream through dampen_admit() suppresses 63.9-69.0% of the
+            // datagrams, the whole of the redundancy.  But a replay has no
+            // loss model.  The engine's frame-locked resend loop is its ONLY
+            // loss recovery, and on a lossy link the damper cannot tell a
+            // redundant copy from the one that would have delivered.  Its sole
+            // live validation before the default flipped was one 2-player
+            // match (suppressed=100 of 27k sends — barely engaged).
+            //
+            // The case AGAINST is the 2026-08-15/16 evening: the crew-wide
+            // dampen-on debut, and the worst session on record.  Sustained
+            // storms on every machine across three releases (peak_pps
+            // 1646-4186, burst_seconds up to 1914, vs 175-442/3-10 on 8-12),
+            // and during a storm the damper suppressed up to 63% of
+            // reliable-eligible sends (23,325 of 37,019, one bundle) while
+            // even the 512-slot ring overflowed (tbl_full up to 24k,
+            // epoch_resets up to 10).  Suppressing loss recovery at 60-400 ms
+            // doubling backoff turns a 10 ms retry loop into multi-hundred-ms
+            // reliable stalls exactly when loss is real.
             const char *dampen_env = std::getenv("BZ_SEND_DAMPEN");
             dampen_init(&g_dampen,
                         (dampen_env == nullptr || *dampen_env == '\0')
-                            ? true : env_truthy(dampen_env),
+                            ? false : env_truthy(dampen_env),
                         GetTickCount64());
             // Round-trip sampling.  ON by default (BZ_RTT=0 disables):
             // observation only - two header fields read, nothing altered,
@@ -3185,7 +3198,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
                  static_cast<unsigned>(g_dup_max_pps),
                  static_cast<unsigned>(g_dscp));
         log_line("send_dampen: %s floor_ms=%u max_ms=%u peers=%u slots=%u"
-                 " (on by default since V4.94; BZ_SEND_DAMPEN=0 disables."
+                 " (off by default since V5.3; BZ_SEND_DAMPEN=1 enables."
                  " Suppresses redundant in-window reliable retransmits;"
                  " purge-on-disconnect is the explicit reset)",
                  g_dampen.enabled ? "enabled" : "disabled",

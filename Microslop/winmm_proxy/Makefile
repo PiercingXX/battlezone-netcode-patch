@@ -23,7 +23,7 @@ SHARED_DIR := ../../shared
 # tell you which build produced it. Every "which build was that?" thread came
 # from this. BZ_VERSION is set by hand at release; the commit and date come
 # from git, with fallbacks so a source tarball with no .git still builds.
-BZ_VERSION  ?= V5.2
+BZ_VERSION  ?= V5.3
 BZ_COMMIT   ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 BZ_DIRTY    := $(shell git diff --quiet 2>/dev/null || echo +dirty)
 # SOURCE_DATE_EPOCH keeps this reproducible when a build system sets it.
