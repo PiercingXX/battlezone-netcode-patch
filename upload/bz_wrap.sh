@@ -56,7 +56,7 @@ CONF_FILE="$CONF_DIR/upload.conf"
 # check.  It was previously inlined in the meta.txt heredoc only, which is why
 # a tester running V4.91-harvest against a V4.92-arms repo went unnoticed until
 # somebody read a bundle's meta.txt after the fact (2026-08-12).
-WRAPPER_VERSION="V5.1-shipped-20260815"
+WRAPPER_VERSION="V5.2-shipped-20260815"
 
 # Discord's webhook attachment cap is ~10 MB for an unboosted server. Stay
 # under it with room for the multipart envelope.

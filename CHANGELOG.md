@@ -1,5 +1,51 @@
 # Changelog
 
+## V5.2 — auto-kick reverted to V4.9 entire
+
+**V5.1's partial revert did not settle it. Further live problems followed,
+so all four auto-kick knobs go back to the V4.9 values on operator
+instruction.**
+
+| knob | V4.9 | V5.0 | V5.1 | **V5.2** |
+|---|---|---|---|---|
+| AutoKickStart | 60000 | 20000 | 20000 | **60000** |
+| AutoKickPing | 2000 | 1000 | 2000 | **2000** |
+| AutoKickLoss | 200 | 50 | 50 | **200** |
+| AutoKickTime | 60000 | 20000 | 60000 | **60000** |
+
+V4.9's numbers are the last set with a full session on record and no false
+kick: on 2026-08-12 a host running them measured a peer at 3418 and 4011 ms
+across matches of 179 s and 237 s and never ejected them. V5.0 cut all four
+to ~2x stock and ejected a live tester twice in one evening, both times at
+exactly `AutoKickStart` + `AutoKickTime`. V5.1 reverted `AutoKickPing` and
+`AutoKickTime` while keeping `AutoKickLoss=50`, on the theory that loss was
+the only genuinely broken knob. That theory did not survive contact.
+
+### The trade this makes, stated plainly
+
+`AutoKickLoss=200` is very likely unreachable — the write-up for the
+2026-08-15 collapse records the scoreboard at 100% loss with nothing
+kicking, which is only possible if the loss predicate could not fire at all.
+Under this preset that leaves ping as the sole detector, and ping cannot
+detect a peer whose ping loop has stopped answering.
+
+So **a peer that goes truly dead will not be auto-kicked**, and the match
+runs on until someone aborts. That is deliberate: the false-kick failure was
+hurting real players every session, while the zombie-match failure has been
+seen once. A host who prefers the reflex can set `BZ_AUTOKICK_LOSS=50`.
+
+Settling `AutoKickLoss`'s units is what would let one preset cover both
+failure modes instead of choosing between them — see the caveat in
+`shared/net_globals.h` for the single-session experiment that does it.
+
+### Notes
+
+- Nothing outside the auto-kick preset changed. The retransmit suppressor,
+  RTT sampler, governor and bandwidth tuning are as shipped in V5.0.
+- Auto-kick is host-enforced; only the hosting machine's setting matters.
+- The full tuning history now lives in a table at the top of
+  `kAutoKickRelaxPreset` so the next change can see all four attempts.
+
 ## V5.1 — auto-kick correction
 
 **V5.0's auto-kick preset ejected a live player twice in one evening. This

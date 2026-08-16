@@ -228,40 +228,49 @@ constexpr uint32_t kNetTunePreset[kNetGlobalCount] = {
 //      minutes until the players quit by hand.
 //   2. A live peer on a spiky link must NOT be ejected.
 //
+// The tuning history, because two releases in a row got this wrong in
+// opposite directions:
+//
+//   V4.9   60000/2000/200/60000  — clean on 2026-08-12, but see (1) below
+//   V5.0   20000/1000/50/20000   — ejected a live tester twice on 2026-08-15
+//   V5.1   20000/2000/50/60000   — kept Loss=50, reverted Ping/Time
+//   V5.2   60000/2000/200/60000  — full revert to V4.9 (current)
+//
 // V5.0 read (1) as "the whole envelope is too loose" and cut all four knobs to
-// ~2x stock (20000/1000/50/20000).  The 2026-08-15 evening session then
-// ejected the same tester twice, both times at 42 s — AutoKickStart +
-// AutoKickTime to the second, i.e. bad from the first tick after grace and
-// never given a chance to recover.  That tester's link reads 805-3314 ms on
-// the game's own per-player Delay while every other peer sits at 47-230 ms,
-// so a 1000 ms bar runs straight through the middle of their normal range.
+// ~2x stock.  The 2026-08-15 evening session then ejected the same tester
+// twice, both times at 42 s — AutoKickStart + AutoKickTime to the second, i.e.
+// bad from the first tick after grace and never given a chance to recover.
+// That tester's link reads 805-3314 ms on the game's own per-player Delay
+// while every other peer sits at 47-230 ms, so a 1000 ms bar runs straight
+// through the middle of their normal range.  V5.1 reverted Ping and Time on
+// the theory that AutoKickLoss was the only genuinely broken knob; live use
+// then surfaced further problems, and V5.2 restores V4.9 entire on operator
+// instruction.
 //
-// The knob that was actually broken in V4.9 is AutoKickLoss.  The write-up for
-// (1) records the scoreboard at 100% loss with the reflex still not firing,
-// which is only possible if Loss=200 was unreachable — so the loss predicate
-// was dead and ping was the sole detector, and ping cannot detect a peer whose
-// ping loop has stopped answering.  Keep V5.0's Loss=50 (that is the fix for
-// (1)) and revert Ping/Time to the V4.9 values that demonstrably did not
-// false-kick: on 2026-08-12 a host running 2000/60000 measured a peer at
-// 3418 and 4011 ms across matches of 179 s and 237 s and never ejected them.
+// What that costs, stated plainly: Loss=200 is very likely unreachable.  The
+// write-up for (1) records the scoreboard at 100% loss with the reflex still
+// not firing, which is only possible if the loss predicate could not fire at
+// all.  So under this preset ping is the sole detector, and ping cannot detect
+// a peer whose ping loop has stopped answering — failure mode (1) is NOT
+// covered here, and a truly dead peer will sit in the match until someone
+// aborts.  That is a deliberate trade: (2) was hurting real players every
+// session, (1) has been seen once.  BZ_AUTOKICK_LOSS=50 re-arms the reflex for
+// a host willing to test it.
 //
-// AutoKickStart stays at V5.0's 20000: grace only ever delays a kick, so it is
-// not implicated in (2), and the shorter grace helps (1).
-//
-// CAVEAT, unresolved: AutoKickLoss's units are not established.  Stock is 25
-// and the sanity gate accepts 1-100000; "200 was unreachable" is inference
-// from the 100%-loss observation above, not a measurement.  If loss is a
-// packet count rather than a percentage, 50 may be far too aggressive and this
-// preset trades a ping-driven false kick for a loss-driven one.  To settle it:
-// host one session with BZ_AUTOKICK_PING=60000 (disabling the ping predicate)
-// and BZ_AUTOKICK_LOSS=5 — healthy players kicked at 5 but not at 50 means
+// CAVEAT, still unresolved: AutoKickLoss's units are not established.  Stock
+// is 25 and the sanity gate accepts 1-100000; "200 is unreachable" is
+// inference from the 100%-loss observation above, not a measurement.  Settling
+// it is what would let this preset cover both failure modes instead of
+// choosing between them.  To settle it: host one session with
+// BZ_AUTOKICK_PING=60000 (disabling the ping predicate) and
+// BZ_AUTOKICK_LOSS=5 — healthy players kicked at 5 but not at 50 means
 // percentage.  Stock: 10000/750/25/15000.
 constexpr uint32_t kAutoKickRelaxPreset[kNetGlobalCount] = {
     0, 0, 0, 0, 0, 0,
-    20000,   // AutoKickStart — double stock's post-join grace
+    60000,   // AutoKickStart — 6x stock's post-join grace
     2000,    // AutoKickPing  — 1000 sits inside a real tester's normal range
-    50,      // AutoKickLoss  — reachable, unlike V4.9's 200; the actual fix
-    60000,   // AutoKickTime  — a spike clears well inside this; a corpse never
+    200,     // AutoKickLoss  — almost certainly unreachable; see the note above
+    60000,   // AutoKickTime  — a spike clears well inside this
 };
 
 // ── Environment configuration ────────────────────────────────────────────────

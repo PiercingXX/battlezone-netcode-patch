@@ -187,15 +187,16 @@ void test_env_presets_and_overrides() {
     // measured a send rate above 24,872 B/s; the uncapped headroom was
     // untested surface).
     CHECK_EQ(tbl[kNgMaxBandwidth].want, 64000u);
-    // V5.1 auto-kick: Loss stays at V5.0's reachable 50 (V4.9's 200 could not
-    // fire, which is how a dead match ran on for five minutes), while Ping and
-    // Time revert to the V4.9 values that demonstrably did not false-kick.
-    // V5.0's 1000/20000 ejected a live tester twice on 2026-08-15, both times
-    // at exactly AutoKickStart + AutoKickTime.  Pinned as a quartet because
-    // the two failure modes are only balanced by all four together.
-    CHECK_EQ(tbl[kNgAutoKickStart].want, 20000u);
+    // V5.2 auto-kick: the V4.9 values, restored entire.  V5.0's 20000/1000/
+    // 50/20000 ejected a live tester twice on 2026-08-15, both times at
+    // exactly AutoKickStart + AutoKickTime; V5.1's 20000/2000/50/60000 kept
+    // Loss=50 and live use surfaced more problems.  Pinned as a quartet
+    // because the two failure modes are only balanced by all four together --
+    // and note this preset deliberately does NOT cover the dead-peer case,
+    // since Loss=200 is very likely unreachable.  See shared/net_globals.h.
+    CHECK_EQ(tbl[kNgAutoKickStart].want, 60000u);
     CHECK_EQ(tbl[kNgAutoKickPing].want,   2000u);
-    CHECK_EQ(tbl[kNgAutoKickLoss].want,     50u);
+    CHECK_EQ(tbl[kNgAutoKickLoss].want,    200u);
     CHECK_EQ(tbl[kNgAutoKickTime].want,  60000u);
     CHECK_EQ(tbl[kNgMaxPingsLost].want, 0u);   // deliberately left alone
     // Recovery must outpace back-off 2:1, as stock intends (V4.94).
